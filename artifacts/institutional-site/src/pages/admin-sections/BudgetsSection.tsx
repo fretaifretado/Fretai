@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import * as XLSX from "xlsx";
 import {
   FileText, Plus, Trash2, AlertCircle, Building2, ArrowLeft,
   MapPin, Users, Navigation, Bus, DollarSign, Play, Upload,
@@ -95,23 +96,66 @@ const EMPTY_FORM = {
 type View = "list" | "new" | "detail";
 type DetailTab = "overview" | "employees" | "routes" | "map";
 
-/* ─── Helper: parse CSV text ─── */
-function parseCSV(text: string): Array<{ name: string; address: string; shift: string }> {
-  const lines = text.trim().split(/\r?\n/);
-  if (lines.length < 2) return [];
-  const headers = lines[0].split(",").map(h => h.trim().toLowerCase()
-    .replace("nome", "name").replace("endereço", "address").replace("endereco", "address")
-    .replace("turno", "shift"));
-  return lines.slice(1).map(line => {
-    const cols = line.split(",").map(c => c.trim().replace(/^"|"$/g, ""));
-    const obj: Record<string, string> = {};
-    headers.forEach((h, i) => { obj[h] = cols[i] ?? ""; });
-    return {
-      name: obj.name ?? obj["nome"] ?? "",
-      address: obj.address ?? obj["endereço"] ?? obj["endereco"] ?? "",
-      shift: obj.shift ?? obj["turno"] ?? "manha",
-    };
-  }).filter(r => r.name);
+/* ─── Helper: normalise a raw header string → canonical key ─── */
+function normaliseHeader(h: string): string {
+  return h
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")   // strip accents
+    .replace(/[^a-z0-9]/g, "");        // keep only alphanum
+}
+
+const HEADER_MAP: Record<string, string> = {
+  nome: "name",
+  name: "name",
+  endereco: "address",
+  endereço: "address",
+  address: "address",
+  rua: "address",
+  logradouro: "address",
+  turno: "shift",
+  shift: "shift",
+  periodo: "shift",
+};
+
+const VALID_SHIFTS = new Set(["manha", "tarde", "noite"]);
+
+function normaliseShift(raw: string): string {
+  const s = raw
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  if (s.startsWith("man") || s.includes("06") || s.includes("6h")) return "manha";
+  if (s.startsWith("tar") || s.includes("14") || s.includes("12h") || s.includes("afternoon")) return "tarde";
+  if (s.startsWith("noi") || s.includes("22") || s.includes("18h") || s.includes("night")) return "noite";
+  return VALID_SHIFTS.has(s) ? s : "manha";
+}
+
+/* ─── Helper: parse any spreadsheet/CSV file using SheetJS ─── */
+async function parseSpreadsheet(file: File): Promise<Array<{ name: string; address: string; shift: string }>> {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: "array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: "" });
+
+  if (rows.length === 0) return [];
+
+  return rows
+    .map(row => {
+      const mapped: Record<string, string> = {};
+      for (const [key, val] of Object.entries(row)) {
+        const canonical = HEADER_MAP[normaliseHeader(key)];
+        if (canonical) mapped[canonical] = String(val ?? "").trim();
+      }
+      return {
+        name: mapped.name ?? "",
+        address: mapped.address ?? "",
+        shift: mapped.shift ? normaliseShift(mapped.shift) : "manha",
+      };
+    })
+    .filter(r => r.name.length > 0);
 }
 
 /* ─── Component ─── */
@@ -320,26 +364,29 @@ export default function BudgetsSection({ token }: Props) {
     } catch { /* ignore */ }
   }
 
-  /* ─── CSV file upload ─── */
+  /* ─── Spreadsheet / CSV file upload ─── */
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file || !selected) return;
     setImporting(true); setImportResult("");
     try {
-      const text = await file.text();
-      const parsed = parseCSV(text);
-      if (parsed.length === 0) { setImportResult("Nenhum registro válido encontrado no arquivo."); return; }
+      const parsed = await parseSpreadsheet(file);
+      if (parsed.length === 0) {
+        setImportResult("Nenhum registro válido encontrado. Verifique se o arquivo contém a coluna 'Nome'.");
+        return;
+      }
       const res = await fetch(`/api/admin/budgets/${selected.id}/employees/import`, {
         method: "POST", headers: jsonHeaders,
         body: JSON.stringify({ employees: parsed }),
       });
       const data = await res.json() as { imported?: number; total?: number; error?: string };
       if (!res.ok) { setImportResult(data.error ?? "Erro ao importar."); return; }
-      setImportResult(`${data.imported ?? 0} funcionários importados com sucesso (total: ${data.total ?? 0}).`);
+      setImportResult(`✓ ${data.imported ?? 0} funcionários importados (total no orçamento: ${data.total ?? 0}).`);
       await fetchEmployees(selected.id);
       await fetchItems();
-    } catch { setImportResult("Erro ao ler o arquivo."); }
-    finally {
+    } catch (err) {
+      setImportResult("Erro ao ler o arquivo. Verifique o formato e tente novamente.");
+    } finally {
       setImporting(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
@@ -602,9 +649,9 @@ export default function BudgetsSection({ token }: Props) {
                   <UserPlus size={13} /> Adicionar
                 </Button>
                 <Button size="sm" className="gap-1.5" onClick={() => fileInputRef.current?.click()} disabled={importing}>
-                  <Upload size={13} /> {importing ? "Importando…" : "Importar CSV"}
+                  <Upload size={13} /> {importing ? "Importando…" : "Importar Planilha"}
                 </Button>
-                <input ref={fileInputRef} type="file" accept=".csv,text/csv" className="hidden" onChange={e => void handleFileChange(e)} />
+                <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.ods,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/vnd.oasis.opendocument.spreadsheet,text/csv" className="hidden" onChange={e => void handleFileChange(e)} />
               </div>
             </div>
 
@@ -618,11 +665,17 @@ export default function BudgetsSection({ token }: Props) {
               </div>
             )}
 
-            {/* CSV format hint */}
-            <div className="bg-muted/40 rounded-xl px-4 py-3 text-xs text-muted-foreground">
-              <strong>Formato CSV:</strong> nome, endereço, turno &nbsp;·&nbsp;
-              Turno aceito: <code>manha</code>, <code>tarde</code>, <code>noite</code> &nbsp;·&nbsp;
-              Primeira linha = cabeçalho
+            {/* Format hint */}
+            <div className="bg-muted/40 rounded-xl px-4 py-3 text-xs text-muted-foreground space-y-1">
+              <p>
+                <strong>Formatos aceitos:</strong> Excel (.xlsx, .xls), CSV, LibreOffice (.ods)
+              </p>
+              <p>
+                <strong>Colunas:</strong> <code>Nome</code> (obrigatório) &nbsp;·&nbsp;
+                <code>Endereço</code> (opcional) &nbsp;·&nbsp;
+                <code>Turno</code>: Manhã / Tarde / Noite (ou manha / tarde / noite)
+              </p>
+              <p className="text-muted-foreground/70">A primeira linha deve ser o cabeçalho. Acentos e capitalização são aceitos.</p>
             </div>
 
             {/* Add employee form */}
