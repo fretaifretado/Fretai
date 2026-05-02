@@ -11,3 +11,8 @@ export * from "./vehicle_types";
 export * from "./budgets";
 export * from "./budget_employees";
 export * from "./budget_route_vehicles";
+export * from "./orc-budgets";
+export * from "./orc-employees";
+export * from "./orc-vehicles";
+export * from "./orc-routes";
+export * from "./orc-boarding-points";

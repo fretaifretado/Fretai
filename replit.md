@@ -21,6 +21,34 @@ Sistema de gestão para a plataforma Fretai. Inclui site institucional, painel d
 
 - **institutional-site** (`/`): Site institucional + painel de dashboard do cliente master
 - **api-server** (`/api`): Backend Express com autenticação JWT, empresas, filiais, colaboradores
+- **orcamentos** (`/orcamentos/`): App standalone de orçamentos de transporte corporativo (React + Vite + Wouter + Leaflet)
+
+## Módulo Orçamentos (`artifacts/orcamentos`)
+
+App independente para criação e processamento de orçamentos de transporte:
+
+### Tabelas DB (prefixo `orc_` para não conflitar com o painel admin):
+- `orc_budgets` — orçamentos com empresa, estratégia, raio max, tempo max de rota
+- `orc_employees` — funcionários do orçamento com geocodificação (lat/lng)
+- `orc_vehicles` — tipos de veículo (Van, Micro-ônibus, Ônibus, Mini-Van) com custos
+- `orc_routes` — rotas geradas pelo engine com turnos, direção (ida/volta), blocos de veículo
+- `orc_boarding_points` — pontos de embarque com coordenadas e ordem na rota
+
+### API (sem prefixo `/admin`):
+- `GET/POST /api/vehicles` — gerenciar frota
+- `GET/POST /api/companies` — listar/criar empresas (reutiliza tabela existente)
+- `GET/POST /api/budgets` — criar/listar orçamentos
+- `POST /api/budgets/:id/employees` — importar funcionários (geocodificação automática)
+- `POST /api/budgets/:id/process` — rodar o motor de roteirização
+- `GET /api/budgets/:id/summary` — sumário operacional
+- `GET /api/budgets/stats` — estatísticas globais
+
+### Routing Engine (`artifacts/api-server/src/lib/routingEngine.ts`):
+- Agrupamento por turno, clustering geográfico em pontos de embarque
+- Roteamento em camadas (Ônibus→Micro→Van→Mini-Van) com ocupação mínima por tier
+- Fusão de rotas pequenas, pós-preenchimento, redimensionamento de veículos
+- Geração de rotas de volta (vuelta) e blocos de veículo reutilizáveis entre turnos
+- Geocodificação simulada com padrões para região de Jundiaí/SP
 
 ## Key Commands
 

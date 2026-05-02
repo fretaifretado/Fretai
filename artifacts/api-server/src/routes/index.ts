@@ -9,6 +9,9 @@ import scheduledMovementsRouter from "./scheduled-movements";
 import purchaseOrdersRouter from "./purchase-orders";
 import vehicleTypesRouter from "./vehicle-types";
 import budgetsRouter from "./budgets";
+import orcVehiclesRouter from "./orc-vehicles.js";
+import orcCompaniesRouter from "./orc-companies.js";
+import orcBudgetsRouter from "./orc-budgets.js";
 
 const router: IRouter = Router();
 
@@ -22,5 +25,8 @@ router.use(scheduledMovementsRouter);
 router.use(purchaseOrdersRouter);
 router.use(vehicleTypesRouter);
 router.use(budgetsRouter);
+router.use("/vehicles", orcVehiclesRouter);
+router.use("/companies", orcCompaniesRouter);
+router.use("/budgets", orcBudgetsRouter);
 
 export default router;
