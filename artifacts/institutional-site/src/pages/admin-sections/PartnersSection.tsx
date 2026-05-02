@@ -222,47 +222,58 @@ export default function PartnersSection({ token }: Props) {
               <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Dados da Empresa</p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="sm:col-span-2">
-                  <label className="text-sm font-medium block mb-1.5">Nome da empresa *</label>
-                  <Input value={partnerForm.name} onChange={e => setPartnerForm(f => ({ ...f, name: e.target.value }))} required />
+                  <label className="text-sm font-medium text-foreground block mb-1.5">Nome da empresa *</label>
+                  <Input placeholder="Transportes Exemplo Ltda." value={partnerForm.name} onChange={e => setPartnerForm(f => ({ ...f, name: e.target.value }))} required />
                 </div>
                 <div>
-                  <label className="text-sm font-medium block mb-1.5">CNPJ *</label>
-                  <Input value={partnerForm.cnpj} onChange={e => setPartnerForm(f => ({ ...f, cnpj: formatCNPJ(e.target.value) }))} required />
+                  <label className="text-sm font-medium text-foreground block mb-1.5">CNPJ *</label>
+                  <Input placeholder="00.000.000/0000-00" value={partnerForm.cnpj} onChange={e => setPartnerForm(f => ({ ...f, cnpj: formatCNPJ(e.target.value) }))} required />
                 </div>
                 <div>
-                  <label className="text-sm font-medium block mb-1.5">Telefone *</label>
-                  <Input value={partnerForm.phone} onChange={e => setPartnerForm(f => ({ ...f, phone: e.target.value }))} required />
+                  <label className="text-sm font-medium text-foreground block mb-1.5">Telefone *</label>
+                  <Input placeholder="(11) 99999-9999" value={partnerForm.phone} onChange={e => setPartnerForm(f => ({ ...f, phone: e.target.value }))} required />
                 </div>
                 <div>
-                  <label className="text-sm font-medium block mb-1.5">E-mail *</label>
-                  <Input type="email" value={partnerForm.email} onChange={e => setPartnerForm(f => ({ ...f, email: e.target.value }))} required />
+                  <label className="text-sm font-medium text-foreground block mb-1.5">E-mail principal *</label>
+                  <Input type="email" placeholder="contato@transportadora.com" value={partnerForm.email} onChange={e => setPartnerForm(f => ({ ...f, email: e.target.value }))} required />
                 </div>
                 <div className="sm:col-span-2">
-                  <label className="text-sm font-medium block mb-1.5">Endereço *</label>
-                  <Input value={partnerForm.address} onChange={e => setPartnerForm(f => ({ ...f, address: e.target.value }))} required />
+                  <label className="text-sm font-medium text-foreground block mb-1.5">Endereço completo *</label>
+                  <Input placeholder="Rua Exemplo, 123, São Paulo - SP" value={partnerForm.address} onChange={e => setPartnerForm(f => ({ ...f, address: e.target.value }))} required />
                 </div>
               </div>
+
               <div className="border-t border-border pt-4">
                 <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-3">Administrador Master</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="sm:col-span-2">
-                    <label className="text-sm font-medium block mb-1.5">Nome completo *</label>
-                    <Input value={partnerForm.masterName} onChange={e => setPartnerForm(f => ({ ...f, masterName: e.target.value }))} required />
+                    <label className="text-sm font-medium text-foreground block mb-1.5">Nome completo *</label>
+                    <Input placeholder="João da Silva" value={partnerForm.masterName} onChange={e => setPartnerForm(f => ({ ...f, masterName: e.target.value }))} required />
                   </div>
                   <div>
-                    <label className="text-sm font-medium block mb-1.5">CPF *</label>
-                    <Input value={partnerForm.masterCpf} onChange={e => setPartnerForm(f => ({ ...f, masterCpf: formatCPF(e.target.value) }))} required />
+                    <label className="text-sm font-medium text-foreground block mb-1.5">CPF *</label>
+                    <Input placeholder="000.000.000-00" value={partnerForm.masterCpf} onChange={e => setPartnerForm(f => ({ ...f, masterCpf: formatCPF(e.target.value) }))} required />
                   </div>
                   <div>
-                    <label className="text-sm font-medium block mb-1.5">E-mail *</label>
-                    <Input type="email" value={partnerForm.masterEmail} onChange={e => setPartnerForm(f => ({ ...f, masterEmail: e.target.value }))} required />
+                    <label className="text-sm font-medium text-foreground block mb-1.5">E-mail *</label>
+                    <Input type="email" placeholder="admin@transportadora.com" value={partnerForm.masterEmail} onChange={e => setPartnerForm(f => ({ ...f, masterEmail: e.target.value }))} required />
                   </div>
                 </div>
+                <p className="text-xs text-muted-foreground mt-2">
+                  A senha inicial será os <strong>6 primeiros dígitos do CPF</strong>. Troca obrigatória no 1º acesso.
+                </p>
               </div>
-              {formError && <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2"><AlertCircle size={14} />{formError}</div>}
+
+              {formError && (
+                <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
+                  <AlertCircle size={14} /><span>{formError}</span>
+                </div>
+              )}
               <div className="flex gap-3 pt-2">
                 <Button type="button" variant="outline" className="flex-1" onClick={() => setShowForm(null)}>Cancelar</Button>
-                <Button type="submit" className="flex-1 bg-accent hover:bg-accent/90 text-white font-semibold" disabled={formLoading}>{formLoading ? "Cadastrando..." : "Cadastrar Parceiro"}</Button>
+                <Button type="submit" className="flex-1 bg-accent hover:bg-accent/90 text-white font-semibold" disabled={formLoading}>
+                  {formLoading ? "Cadastrando..." : "Cadastrar Parceiro"}
+                </Button>
               </div>
             </form>
           </div>
