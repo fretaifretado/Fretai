@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import DashboardLayout from "./layout";
 import {
   useDashboard,
@@ -267,10 +267,51 @@ interface PendingImport {
   conflicts: TurnoConflict[];
 }
 
+const API_URL = import.meta.env.VITE_API_URL ?? "";
+
+function getAuthHeaders(): HeadersInit {
+  const token = localStorage.getItem("admin_token") ?? "";
+  return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+}
+
 export default function ColaboradoresPage() {
   const { colaboradoresDaFilial: colaboradores, colaboradores: todosColaboradores, addColaborador, updateColaborador, deleteColaborador, turnos, addTurno, updateTurno, filiais, filialAtiva, nomeEmpresaAtiva } = useDashboard();
   const [search, setSearch] = useState("");
   const [activeStatus, setActiveStatus] = useState<Status | "Todos">("Todos");
+
+  /** employeeId → vales do período mais recente com pedido aprovado */
+  const [valesMap, setValesMap] = useState<Map<number, number>>(new Map());
+
+  const fetchVales = useCallback(async (companyId: number) => {
+    try {
+      const res = await fetch(`${API_URL}/api/me/purchase-orders?companyId=${companyId}`, {
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) return;
+      const data = await res.json() as {
+        employeeId: number | null;
+        vales: number;
+        status: string;
+      }[];
+      const map = new Map<number, number>();
+      for (const o of data) {
+        if (o.employeeId && o.status !== "Cancelado") {
+          const prev = map.get(o.employeeId) ?? 0;
+          map.set(o.employeeId, prev + o.vales);
+        }
+      }
+      setValesMap(map);
+    } catch {
+      // silently ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    const cid = filialAtiva?.id;
+    if (cid) void fetchVales(cid);
+    else setValesMap(new Map());
+  }, [filialAtiva?.id, fetchVales]);
+
   const [editing, setEditing] = useState<Colaborador | null>(null);
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [formError, setFormError] = useState("");
@@ -895,7 +936,16 @@ export default function ColaboradoresPage() {
                         </span>
                       </td>
                       <td className="px-5 py-3.5 text-muted-foreground text-sm">{c.turno}</td>
-                      <td className="px-5 py-3.5 text-muted-foreground text-sm">{c.vale}</td>
+                      <td className="px-5 py-3.5 text-sm">
+                        {valesMap.has(c.id) ? (
+                          <span className="inline-flex items-center gap-1 font-semibold text-foreground">
+                            {valesMap.get(c.id)!.toLocaleString("pt-BR")}
+                            <span className="text-xs font-normal text-muted-foreground">vales</span>
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </td>
                       <td className="px-5 py-3.5">
                         <div className="flex items-center gap-1 justify-end">
                           {deleteId === c.id ? (
