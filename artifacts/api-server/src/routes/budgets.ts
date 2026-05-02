@@ -28,6 +28,71 @@ function fakeGeocode(address: string, baseLat = -23.5505, baseLng = -46.6333) {
   };
 }
 
+/* ─── Nominatim real geocoding (OpenStreetMap) ── */
+const geoCache = new Map<string, { lat: number; lng: number }>();
+
+async function geocodeNominatim(address: string): Promise<{ lat: number; lng: number } | null> {
+  if (!address.trim()) return null;
+  const key = address.trim().toLowerCase();
+  if (geoCache.has(key)) return geoCache.get(key)!;
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1&countrycodes=br`;
+    const res = await fetch(url, {
+      headers: { "User-Agent": "FretaiApp/1.0 (geocoding)" },
+      signal: AbortSignal.timeout(8000),
+    });
+    const data = await res.json() as Array<{ lat: string; lon: string }>;
+    if (data.length > 0 && data[0]) {
+      const result = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+      geoCache.set(key, result);
+      return result;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function geocodeWithFallback(address: string, baseLat: number, baseLng: number): Promise<{ lat: number; lng: number }> {
+  const real = await geocodeNominatim(address);
+  if (real) return real;
+  return fakeGeocode(address, baseLat, baseLng);
+}
+
+/** Rate-limited batch geocoding: 1 request per 1.1s, up to maxItems */
+async function batchGeocode(
+  items: Array<{ id: number; address: string }>,
+  baseLat: number,
+  baseLng: number,
+  maxItems = 60
+): Promise<Map<number, { lat: number; lng: number }>> {
+  const result = new Map<number, { lat: number; lng: number }>();
+  const uniqueAddrs = new Map<string, { lat: number; lng: number } | null>();
+
+  for (const item of items.slice(0, maxItems)) {
+    const key = item.address.trim().toLowerCase();
+    if (!uniqueAddrs.has(key)) uniqueAddrs.set(key, null);
+  }
+
+  // Geocode unique addresses sequentially with rate limiting
+  for (const addr of uniqueAddrs.keys()) {
+    const r = await geocodeNominatim(addr);
+    uniqueAddrs.set(addr, r ?? fakeGeocode(addr, baseLat, baseLng));
+    await new Promise(resolve => setTimeout(resolve, 1100));
+  }
+
+  for (const item of items.slice(0, maxItems)) {
+    const key = item.address.trim().toLowerCase();
+    const geo = uniqueAddrs.get(key) ?? fakeGeocode(item.address, baseLat, baseLng);
+    result.set(item.id, geo);
+  }
+  // For items beyond maxItems, use scatter
+  for (const item of items.slice(maxItems)) {
+    result.set(item.id, fakeGeocode(item.address, baseLat, baseLng));
+  }
+  return result;
+}
+
 function parseShiftStart(shift: string | null | undefined): string | null {
   if (!shift) return null;
   const m = shift.match(/^(\d{1,2}:\d{2})/);
@@ -172,7 +237,10 @@ router.get("/admin/budgets/:id", requireAdmin, async (req, res) => {
       bpsByRoute.get(bp.routeId)!.push(bp);
     }
 
-    const companyGeo = fakeGeocode(row.destinationAddress ?? "São Paulo");
+    const companyGeoReal = row.destinationAddress
+      ? await geocodeNominatim(row.destinationAddress)
+      : null;
+    const companyGeo = companyGeoReal ?? fakeGeocode(row.destinationAddress ?? "São Paulo");
 
     res.json({
       budget: {
@@ -293,7 +361,10 @@ router.post("/admin/budgets/:id/employees", requireAdmin, async (req, res) => {
 
     const [budget] = await db.select({ destinationAddress: budgetsTable.destinationAddress })
       .from(budgetsTable).where(eq(budgetsTable.id, id)).limit(1);
-    const companyGeo = fakeGeocode(budget?.destinationAddress ?? "São Paulo");
+    const companyGeoReal = budget?.destinationAddress
+      ? await geocodeNominatim(budget.destinationAddress)
+      : null;
+    const companyGeo = companyGeoReal ?? fakeGeocode(budget?.destinationAddress ?? "São Paulo");
 
     const rows = employees
       .filter(e => e.name?.trim())
@@ -391,7 +462,30 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
     }
 
     const sortedShifts = [...shiftGroups.keys()].sort();
-    const companyGeo = fakeGeocode(budget.destinationAddress ?? "São Paulo");
+    const companyGeoReal = budget.destinationAddress
+      ? await geocodeNominatim(budget.destinationAddress)
+      : null;
+    const companyGeo = companyGeoReal ?? fakeGeocode(budget.destinationAddress ?? "São Paulo");
+
+    // Geocode individual employee addresses (rate-limited, up to 60 unique addresses)
+    req.log.info({ budgetId: id }, "Geocodificando endereços dos funcionários via Nominatim...");
+    const workerGeoMap = await batchGeocode(
+      workers.map(w => ({ id: w.id, address: w.address ?? "" })),
+      companyGeo.lat,
+      companyGeo.lng,
+      60
+    );
+    // Update workers with real coordinates in DB
+    for (const [wid, geo] of workerGeoMap.entries()) {
+      await db.update(budgetWorkersTable)
+        .set({ lat: String(geo.lat), lng: String(geo.lng), geocoded: true })
+        .where(eq(budgetWorkersTable.id, wid));
+    }
+    // Also update in-memory workers list with real coords
+    for (const w of workers) {
+      const geo = workerGeoMap.get(w.id);
+      if (geo) { w.lat = String(geo.lat); w.lng = String(geo.lng); }
+    }
 
     // Assign blockIds: vehicles can be reused across compatible shifts
     // Compatible = shift B start ≈ shift A end
@@ -499,9 +593,11 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
         let seq = 1;
         for (const [, clusterWorkers] of addrGroups.entries()) {
           const sampleAddr = clusterWorkers[0]?.address ?? "";
-          const geo = sampleAddr
+          const sampleWorkerId = clusterWorkers[0]?.id;
+          const realGeo = sampleWorkerId ? workerGeoMap.get(sampleWorkerId) : null;
+          const geo = realGeo ?? (sampleAddr
             ? fakeGeocode(sampleAddr, companyGeo.lat, companyGeo.lng)
-            : { lat: companyGeo.lat + 0.01 * seq, lng: companyGeo.lng };
+            : { lat: companyGeo.lat + 0.01 * seq, lng: companyGeo.lng });
           bpsToInsert.push({
             budgetId: id,
             routeId: -1, // will fill after insert
