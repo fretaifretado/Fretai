@@ -12,7 +12,7 @@ function StatusCell({ ok }: { ok: boolean }) {
 }
 
 export default function PendenciasPage() {
-  const { colaboradoresDaFilial: colaboradores, updateColaborador, turnos } = useDashboard();
+  const { colaboradoresDaFilial: colaboradores, updateColaborador, turnos, empresaAtiva } = useDashboard();
   const [editing, setEditing] = useState<Colaborador | null>(null);
   const [fTelefone, setFTelefone] = useState("");
   const [fEndereco, setFEndereco] = useState("");
@@ -21,9 +21,15 @@ export default function PendenciasPage() {
   const [error, setError] = useState("");
   const [savedIds, setSavedIds] = useState<Set<number>>(new Set());
 
+  const empresaTemVale = !!(empresaAtiva.valeValue && parseFloat(empresaAtiva.valeValue) > 0);
+
+  function valeOk(c: Colaborador) {
+    return empresaTemVale || (!(!c.vale || c.vale === "—"));
+  }
+
   function hasPendencias(c: Colaborador) {
     return !c.telefone?.trim() ||
-      !c.vale || c.vale === "—" ||
+      !valeOk(c) ||
       !c.endereco.trim() ||
       !c.turno || c.turno === "—";
   }
@@ -33,7 +39,7 @@ export default function PendenciasPage() {
   function countP(c: Colaborador) {
     return [
       !!c.telefone?.trim(),
-      !(!c.vale || c.vale === "—"),
+      valeOk(c),
       !!c.endereco.trim(),
       !(!c.turno || c.turno === "—"),
     ].filter(v => !v).length;
@@ -79,7 +85,7 @@ export default function PendenciasPage() {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
           {[
             { label: "Sem telefone",         icon: PhoneOff, count: colaboradores.filter(c => c.status !== "Desligado" && !c.telefone?.trim()).length },
-            { label: "Vale não configurado", icon: null,     count: colaboradores.filter(c => c.status !== "Desligado" && (!c.vale || c.vale === "—")).length },
+            { label: "Vale não configurado", icon: null,     count: colaboradores.filter(c => c.status !== "Desligado" && !valeOk(c)).length },
             { label: "Endereço incompleto",  icon: null,     count: colaboradores.filter(c => c.status !== "Desligado" && !c.endereco.trim()).length },
             { label: "Turno não definido",   icon: null,     count: colaboradores.filter(c => c.status !== "Desligado" && (!c.turno || c.turno === "—")).length },
           ].map(item => (
@@ -118,7 +124,7 @@ export default function PendenciasPage() {
                       <tr key={p.id} className={`transition-colors ${resolved ? "bg-green-50/40" : n >= 3 ? "bg-red-50/30 hover:bg-red-50/50" : "hover:bg-muted/20"}`}>
                         <td className="px-5 py-4 font-medium text-foreground">{p.nome}</td>
                         <td className="px-4 py-4 text-center"><StatusCell ok={!!p.telefone?.trim()} /></td>
-                        <td className="px-4 py-4 text-center"><StatusCell ok={!(!p.vale || p.vale === "—")} /></td>
+                        <td className="px-4 py-4 text-center"><StatusCell ok={valeOk(p)} /></td>
                         <td className="px-4 py-4 text-center"><StatusCell ok={!!p.endereco.trim()} /></td>
                         <td className="px-4 py-4 text-center"><StatusCell ok={!(!p.turno || p.turno === "—")} /></td>
                         <td className="px-4 py-4 text-center">
