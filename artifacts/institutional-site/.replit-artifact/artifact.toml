@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Fretai - Painel"
+version = "1.0.0"
+id = "artifacts/institutional-site"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 25021
+
+[services.development]
+run = "pnpm --filter @workspace/institutional-site run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/institutional-site", "run", "build" ]
+publicDir = "artifacts/institutional-site/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25021"
+BASE_PATH = "/"
