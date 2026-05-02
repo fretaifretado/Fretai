@@ -1,7 +1,7 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
 import { db } from "@workspace/db";
-import { companiesTable, usersTable, employeesTable, employeeMovementsTable } from "@workspace/db/schema";
+import { companiesTable, usersTable, employeesTable, employeeMovementsTable, companyShiftsTable } from "@workspace/db/schema";
 import { eq, desc, or, inArray } from "drizzle-orm";
 import { requireAdmin, requireAuth, getAuth } from "../middlewares/auth";
 import { logAudit } from "../services/audit";
@@ -445,6 +445,109 @@ router.post("/employees/:id/movements", requireAuth("platform_admin", "cliente_m
     res.status(201).json({ ...movement, createdAt: movement.createdAt?.toISOString?.() ?? movement.createdAt });
   } catch (err) {
     req.log.error({ err }, "Error creating movement");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ── Turnos: listar por empresa (admin) ── */
+router.get("/companies/:id/shifts", requireAuth("platform_admin", "cliente_master", "cliente_subadmin"), async (req, res) => {
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  try {
+    const shifts = await db.select().from(companyShiftsTable)
+      .where(eq(companyShiftsTable.companyId, id))
+      .orderBy(companyShiftsTable.createdAt);
+    res.json(shifts.map(s => ({ ...s, createdAt: s.createdAt.toISOString(), updatedAt: s.updatedAt.toISOString() })));
+  } catch (err) {
+    req.log.error({ err }, "Error listing shifts");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ── Turnos: listar os próprios turnos ── */
+router.get("/me/shifts", requireAuth("cliente_master", "cliente_subadmin"), async (req, res) => {
+  const auth = getAuth(req);
+  const entityId = auth.entityId as number | undefined;
+  if (!entityId) { res.status(404).json({ error: "Empresa não encontrada" }); return; }
+  try {
+    const shifts = await db.select().from(companyShiftsTable)
+      .where(eq(companyShiftsTable.companyId, entityId))
+      .orderBy(companyShiftsTable.createdAt);
+    res.json(shifts.map(s => ({ ...s, createdAt: s.createdAt.toISOString(), updatedAt: s.updatedAt.toISOString() })));
+  } catch (err) {
+    req.log.error({ err }, "Error listing own shifts");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ── Turnos: criar ── */
+router.post("/me/shifts", requireAuth("cliente_master", "cliente_subadmin"), async (req, res) => {
+  const auth = getAuth(req);
+  const entityId = auth.entityId as number | undefined;
+  if (!entityId) { res.status(404).json({ error: "Empresa não encontrada" }); return; }
+  const { nome, entrada, saida, escala, tipoEscala } = req.body as Record<string, string | undefined>;
+  if (!nome || !entrada || !saida) {
+    res.status(400).json({ error: "Nome, entrada e saída são obrigatórios" }); return;
+  }
+  try {
+    const [shift] = await db.insert(companyShiftsTable).values({
+      companyId: entityId,
+      nome: nome.trim(),
+      entrada: entrada.trim(),
+      saida: saida.trim(),
+      escala: escala?.trim() ?? "",
+      tipoEscala: tipoEscala?.trim() ?? "",
+    }).returning();
+    if (!shift) throw new Error("Erro ao criar turno");
+    res.status(201).json({ ...shift, createdAt: shift.createdAt.toISOString(), updatedAt: shift.updatedAt.toISOString() });
+  } catch (err) {
+    req.log.error({ err }, "Error creating shift");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ── Turnos: editar ── */
+router.put("/me/shifts/:id", requireAuth("cliente_master", "cliente_subadmin"), async (req, res) => {
+  const auth = getAuth(req);
+  const entityId = auth.entityId as number | undefined;
+  if (!entityId) { res.status(404).json({ error: "Empresa não encontrada" }); return; }
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const { nome, entrada, saida, escala, tipoEscala } = req.body as Record<string, string | undefined>;
+  const updates: Record<string, unknown> = { updatedAt: new Date() };
+  if (nome !== undefined) updates.nome = nome.trim();
+  if (entrada !== undefined) updates.entrada = entrada.trim();
+  if (saida !== undefined) updates.saida = saida.trim();
+  if (escala !== undefined) updates.escala = escala.trim();
+  if (tipoEscala !== undefined) updates.tipoEscala = tipoEscala.trim();
+  try {
+    const [shift] = await db.update(companyShiftsTable)
+      .set(updates)
+      .where(eq(companyShiftsTable.id, id))
+      .returning();
+    if (!shift) { res.status(404).json({ error: "Turno não encontrado" }); return; }
+    res.json({ ...shift, createdAt: shift.createdAt.toISOString(), updatedAt: shift.updatedAt.toISOString() });
+  } catch (err) {
+    req.log.error({ err }, "Error updating shift");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ── Turnos: excluir ── */
+router.delete("/me/shifts/:id", requireAuth("cliente_master", "cliente_subadmin"), async (req, res) => {
+  const auth = getAuth(req);
+  const entityId = auth.entityId as number | undefined;
+  if (!entityId) { res.status(404).json({ error: "Empresa não encontrada" }); return; }
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  try {
+    const [deleted] = await db.delete(companyShiftsTable)
+      .where(eq(companyShiftsTable.id, id))
+      .returning();
+    if (!deleted) { res.status(404).json({ error: "Turno não encontrado" }); return; }
+    res.json({ ok: true });
+  } catch (err) {
+    req.log.error({ err }, "Error deleting shift");
     res.status(500).json({ error: "Erro interno" });
   }
 });

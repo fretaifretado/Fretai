@@ -6,3 +6,4 @@ export * from "./partners";
 export * from "./audit";
 export * from "./scheduled_movements";
 export * from "./purchase_orders";
+export * from "./company_shifts";

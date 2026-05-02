@@ -200,9 +200,9 @@ interface DashboardContextValue {
   deleteFilial: (id: number) => void;
 
   turnos: Turno[];
-  addTurno: (t: Omit<Turno, "id">) => void;
-  updateTurno: (t: Turno) => void;
-  deleteTurno: (id: number) => void;
+  addTurno: (t: Omit<Turno, "id">) => Promise<void>;
+  updateTurno: (t: Turno) => Promise<void>;
+  deleteTurno: (id: number) => Promise<void>;
 
   grupos: Grupo[];
   addGrupo: (g: Omit<Grupo, "id">) => void;
@@ -347,6 +347,25 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
           setColaboradores(employees.map(e => apiToColab(e, loadedFiliais)));
         }
       } catch (err) { console.error("[dashboard] erro ao carregar colaboradores:", err); }
+
+      try {
+        const shiftsRes = await fetch(`${API_URL}/api/me/shifts`, { headers });
+        if (shiftsRes.ok) {
+          const shiftsData = await shiftsRes.json() as Array<{
+            id: number; nome: string; entrada: string; saida: string;
+            escala: string; tipoEscala: string;
+          }>;
+          setTurnos(shiftsData.map(s => ({
+            id: s.id,
+            nome: s.nome,
+            entrada: s.entrada,
+            saida: s.saida,
+            escala: s.escala ?? "",
+            tipoEscala: s.tipoEscala ?? "",
+            colaboradores: 0,
+          })));
+        }
+      } catch (err) { console.error("[dashboard] erro ao carregar turnos:", err); }
     }
 
     void loadData();
@@ -356,9 +375,58 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const updateFilial = (f: Filial)              => setFiliais(p => p.map(x => x.id === f.id ? f : x));
   const deleteFilial = (id: number)             => setFiliais(p => p.filter(x => x.id !== id));
 
-  const addTurno    = (t: Omit<Turno, "id">) => setTurnos(p => [...p, { ...t, id: Date.now() }]);
-  const updateTurno = (t: Turno)             => setTurnos(p => p.map(x => x.id === t.id ? t : x));
-  const deleteTurno = (id: number)           => setTurnos(p => p.filter(x => x.id !== id));
+  async function addTurno(t: Omit<Turno, "id">) {
+    const token = getToken();
+    if (!token) {
+      setTurnos(p => [...p, { ...t, id: Date.now() }]);
+      return;
+    }
+    try {
+      const API_URL = import.meta.env.VITE_API_URL ?? "";
+      const res = await fetch(`${API_URL}/api/me/shifts`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ nome: t.nome, entrada: t.entrada, saida: t.saida, escala: t.escala, tipoEscala: t.tipoEscala }),
+      });
+      if (res.ok) {
+        const saved = await res.json() as { id: number; nome: string; entrada: string; saida: string; escala: string; tipoEscala: string };
+        setTurnos(p => [...p, { ...t, id: saved.id }]);
+      }
+    } catch (err) {
+      console.error("[dashboard] erro ao criar turno:", err);
+    }
+  }
+
+  async function updateTurno(t: Turno) {
+    setTurnos(p => p.map(x => x.id === t.id ? t : x));
+    const token = getToken();
+    if (!token) return;
+    try {
+      const API_URL = import.meta.env.VITE_API_URL ?? "";
+      await fetch(`${API_URL}/api/me/shifts/${t.id}`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ nome: t.nome, entrada: t.entrada, saida: t.saida, escala: t.escala, tipoEscala: t.tipoEscala }),
+      });
+    } catch (err) {
+      console.error("[dashboard] erro ao atualizar turno:", err);
+    }
+  }
+
+  async function deleteTurno(id: number) {
+    setTurnos(p => p.filter(x => x.id !== id));
+    const token = getToken();
+    if (!token) return;
+    try {
+      const API_URL = import.meta.env.VITE_API_URL ?? "";
+      await fetch(`${API_URL}/api/me/shifts/${id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch (err) {
+      console.error("[dashboard] erro ao excluir turno:", err);
+    }
+  }
 
   const addGrupo    = (g: Omit<Grupo, "id">) => setGrupos(p => [...p, { ...g, id: Date.now() }]);
   const updateGrupo = (g: Grupo)             => setGrupos(p => p.map(x => x.id === g.id ? g : x));
