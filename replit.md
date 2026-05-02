@@ -67,25 +67,44 @@ A página `/painel/compras` gera e exibe o histórico de pedidos de vale-transpo
 - O frontend carrega os pedidos via `useEffect` quando `filialAtiva` está disponível
 - Ao confirmar a prévia, os pedidos são enviados ao servidor antes de atualizar o estado local
 
-## Módulo de Orçamentos (Admin)
+## Módulo de Orçamentos (Admin) — Implementação Completa
 
-- **Tabelas DB**: `budgets`, `budget_employees`, `budget_route_vehicles`, `vehicle_types`
-- **Endpoints**:
-  - `GET/POST /api/admin/budgets` — listar / criar orçamentos
-  - `GET /api/admin/budgets/:id` — detalhe de um orçamento
-  - `PUT/DELETE /api/admin/budgets/:id` — atualizar / excluir
-  - `GET /api/admin/budgets/:id/employees` — listar funcionários
-  - `POST /api/admin/budgets/:id/employees` — adicionar 1 funcionário
-  - `POST /api/admin/budgets/:id/employees/import` — importar CSV (body: `{employees:[{name,address,shift}]}`)
-  - `DELETE /api/admin/budgets/:id/employees/:empId` — remover funcionário
-  - `DELETE /api/admin/budgets/:id/employees` — limpar todos
-  - `POST /api/admin/budgets/:id/process` — processa rotas (cria `budget_route_vehicles`, muda status para "pronto")
-  - `GET /api/admin/budgets/:id/route-vehicles` — listar veículos gerados
-- **Frontend** (`BudgetsSection.tsx`): 3 views (list / new / detail). Detail tem 4 abas:
-  - **Visão Geral**: 4 KPI cards + Parâmetros + Frota Utilizada + Roteiro Diário por Veículo (após processamento)
-  - **Funcionários**: upload CSV, adição manual, listagem com delete por linha ou limpeza total
-  - **Rotas**: tabela de veículos com ocupação e "Reprocessar"
-  - **Mapa Visual**: placeholder
+### Tabelas DB novas (migradas)
+- `budgets` — orçamento com campos: name, algorithm(strategy), companyId, status, destinationAddress, maxWalkingRadiusKm, maxTravelTimeMin
+- `budget_workers` — funcionários por orçamento: name, address, shift ("HH:MM/HH:MM"), lat, lng, geocoded, boardingPointId
+- `budget_routes` — rotas geradas: shiftTime, vehicleBlockId, totalPassengers, totalDistanceKm, estimatedMinutes, occupancyPct, totalCost, vehicleAssignments (JSONB)
+- `budget_boarding_points` — pontos de embarque: routeId, name, lat, lng, passengerCount, sequenceOrder
+
+### Endpoints API (`/api/admin/budgets`)
+- `GET /api/admin/budgets` — lista com employeeCount e routeCount dos workers/routes
+- `POST /api/admin/budgets` — cria com {name, companyId, companyAddress, maxRadiusKm, maxRouteMinutes, strategy}
+- `GET /api/admin/budgets/:id` — detalhe: {budget, employees (budget_workers), routes (com boardingPoints)}
+- `PATCH /api/admin/budgets/:id` — atualiza campos
+- `DELETE /api/admin/budgets/:id` — exclui em cascata (bps → routes → workers → budget)
+- `GET /api/admin/budgets/:id/summary` — {totalCost, totalEmployees}
+- `POST /api/admin/budgets/:id/employees` — importa [{name, address, shift}], faz fake-geocode e salva em budget_workers
+- `DELETE /api/admin/budgets/:id/employees` — limpa todos os workers
+- `DELETE /api/admin/budgets/:id/employees/:wid` — remove 1 worker
+- `POST /api/admin/budgets/:id/process` — algoritmo de bin-packing por strategy (min_cost/min_vehicles/max_occupancy), cria routes + boarding_points, atualiza boardingPointId nos workers
+
+### Algoritmo de Processamento
+- Agrupa workers por turno (parse "06:00/14:20" → start "06:00")
+- Bin-packing usando vehicle_types ordenados por strategy
+- vehicleBlockId reusado entre turnos compatíveis (turno B começa quando A termina ±30min)
+- Geocodificação determinística por hash do endereço (scatter ao redor do endereço da empresa)
+- 1 boarding_point por grupo de endereço similar dentro de cada rota
+
+### Frontend (`BudgetsSection.tsx`) — 3 views, 4 abas
+- **List view**: tabela com status badge, employeeCount, routeCount, botão criar/ver/deletar
+- **New view**: form com nome, empresa, endereço destino, raio máximo, tempo máximo, estratégia
+- **Detail view** (4 abas):
+  - **Visão Geral**: 4 KPI cards (Custo, Passageiros por turno, Rotas/Turnos, Veículos Físicos) + Parâmetros + Frota Utilizada + Roteiro Diário por Veículo (tabela veículo × horário com entrada→/saída←, timeline do primeiro veículo)
+  - **Funcionários**: upload planilha (xlsx/xls/csv/ods) com normalização de colunas, tabela com delete, botão limpar tudo
+  - **Rotas**: PassengerListCard com busca, filtro de turno, lista por rota → boarding point → funcionários (accordion)
+  - **Mapa Visual**: RouteMap Leaflet com filtros de turno/veículo, rotas via OSRM, pontos de embarque, funcionários geocodificados, raio configurável
+
+### Componentes
+- `artifacts/institutional-site/src/components/RouteMap.tsx` — Leaflet map com react-leaflet, OSRM road routing, panel de filtros, circle radius overlay
 
 ## Key Files
 

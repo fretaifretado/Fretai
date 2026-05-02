@@ -11,3 +11,6 @@ export * from "./vehicle_types";
 export * from "./budgets";
 export * from "./budget_employees";
 export * from "./budget_route_vehicles";
+export * from "./budget_workers";
+export * from "./budget_routes";
+export * from "./budget_boarding_points";
