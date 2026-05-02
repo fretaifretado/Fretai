@@ -236,11 +236,22 @@ router.get("/companies/:id/employees", requireAuth("platform_admin", "cliente_ma
   }
 });
 
+function serializeEmployee(e: typeof employeesTable.$inferSelect) {
+  return {
+    ...e,
+    turno: e.route ?? null,
+    admissionDate: e.admissionDate,
+    createdAt: e.createdAt?.toISOString?.() ?? e.createdAt,
+    updatedAt: e.updatedAt?.toISOString?.() ?? e.updatedAt,
+  };
+}
+
 /* ── Funcionários: criar ── */
 router.post("/companies/:id/employees", requireAuth("platform_admin", "cliente_master", "cliente_subadmin"), async (req, res) => {
   const companyId = parseInt(req.params.id as string, 10);
   if (isNaN(companyId)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const { name, cpf, matricula, admissionDate, route, routeStartDate } = req.body as Record<string, string | undefined>;
+  const body = req.body as Record<string, string | undefined>;
+  const { name, cpf, matricula, admissionDate } = body;
   if (!name || !cpf || !matricula || !admissionDate) {
     res.status(400).json({ error: "Nome, CPF, matrícula e data de admissão são obrigatórios" }); return;
   }
@@ -253,13 +264,30 @@ router.post("/companies/:id/employees", requireAuth("platform_admin", "cliente_m
       cpf: cleanedCpf,
       matricula: matricula.trim(),
       admissionDate,
-      route: route?.trim() ?? null,
-      routeStartDate: routeStartDate ?? null,
+      route: body.route?.trim() ?? null,
+      routeStartDate: body.routeStartDate ?? null,
+      status: body.status?.trim() ?? "Ativo",
+      email: body.email?.trim() ?? null,
+      phone: body.phone?.trim() ?? null,
+      birthDate: body.birthDate ?? null,
+      address: body.address?.trim() ?? null,
+      addressNumber: body.addressNumber?.trim() ?? null,
+      addressComplement: body.addressComplement?.trim() ?? null,
+      neighborhood: body.neighborhood?.trim() ?? null,
+      city: body.city?.trim() ?? null,
+      state: body.state?.trim() ?? null,
+      zipCode: body.zipCode?.trim() ?? null,
+      shiftStart: body.shiftStart?.trim() ?? null,
+      shiftEnd: body.shiftEnd?.trim() ?? null,
+      operationStart: body.operationStart ?? null,
+      valeValue: body.valeValue?.trim() ?? null,
+      codigo: body.codigo?.trim() ?? null,
+      grupoId: body.grupoId ? parseInt(body.grupoId, 10) : null,
     }).returning();
     if (!employee) throw new Error("Erro ao criar funcionário");
     const auth = getAuth(req);
     await logAudit({ userId: auth.sub as number, userEmail: auth.email, action: "create_employee", entityType: "employee", entityId: employee.id, newValue: { name, cpf: cleanedCpf } });
-    res.status(201).json({ ...employee, createdAt: employee.createdAt?.toISOString?.() ?? employee.createdAt, updatedAt: employee.updatedAt?.toISOString?.() ?? employee.updatedAt });
+    res.status(201).json(serializeEmployee(employee));
   } catch (err: unknown) {
     const pgErr = err as { code?: string };
     if (pgErr.code === "23505") { res.status(400).json({ error: "CPF já cadastrado" }); return; }
@@ -272,19 +300,51 @@ router.post("/companies/:id/employees", requireAuth("platform_admin", "cliente_m
 router.put("/companies/:companyId/employees/:id", requireAuth("platform_admin", "cliente_master", "cliente_subadmin"), async (req, res) => {
   const id = parseInt(req.params.id as string, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const { name, matricula, admissionDate, route, routeStartDate } = req.body as Record<string, string | undefined>;
+  const body = req.body as Record<string, string | undefined>;
   const updates: Record<string, unknown> = { updatedAt: new Date() };
-  if (name) updates.name = name.trim();
-  if (matricula) updates.matricula = matricula.trim();
-  if (admissionDate) updates.admissionDate = admissionDate;
-  if (route !== undefined) updates.route = route?.trim() ?? null;
-  if (routeStartDate !== undefined) updates.routeStartDate = routeStartDate ?? null;
+  if (body.name) updates.name = body.name.trim();
+  if (body.matricula) updates.matricula = body.matricula.trim();
+  if (body.admissionDate) updates.admissionDate = body.admissionDate;
+  if (body.route !== undefined) updates.route = body.route?.trim() ?? null;
+  if (body.routeStartDate !== undefined) updates.routeStartDate = body.routeStartDate ?? null;
+  if (body.status !== undefined) updates.status = body.status?.trim() ?? null;
+  if (body.email !== undefined) updates.email = body.email?.trim() ?? null;
+  if (body.phone !== undefined) updates.phone = body.phone?.trim() ?? null;
+  if (body.birthDate !== undefined) updates.birthDate = body.birthDate ?? null;
+  if (body.address !== undefined) updates.address = body.address?.trim() ?? null;
+  if (body.addressNumber !== undefined) updates.addressNumber = body.addressNumber?.trim() ?? null;
+  if (body.addressComplement !== undefined) updates.addressComplement = body.addressComplement?.trim() ?? null;
+  if (body.neighborhood !== undefined) updates.neighborhood = body.neighborhood?.trim() ?? null;
+  if (body.city !== undefined) updates.city = body.city?.trim() ?? null;
+  if (body.state !== undefined) updates.state = body.state?.trim() ?? null;
+  if (body.zipCode !== undefined) updates.zipCode = body.zipCode?.trim() ?? null;
+  if (body.shiftStart !== undefined) updates.shiftStart = body.shiftStart?.trim() ?? null;
+  if (body.shiftEnd !== undefined) updates.shiftEnd = body.shiftEnd?.trim() ?? null;
+  if (body.operationStart !== undefined) updates.operationStart = body.operationStart ?? null;
+  if (body.valeValue !== undefined) updates.valeValue = body.valeValue?.trim() ?? null;
+  if (body.codigo !== undefined) updates.codigo = body.codigo?.trim() ?? null;
+  if (body.grupoId !== undefined) updates.grupoId = body.grupoId ? parseInt(body.grupoId, 10) : null;
   try {
     const [employee] = await db.update(employeesTable).set(updates).where(eq(employeesTable.id, id)).returning();
     if (!employee) { res.status(404).json({ error: "Funcionário não encontrado" }); return; }
-    res.json({ ...employee, createdAt: employee.createdAt?.toISOString?.() ?? employee.createdAt, updatedAt: employee.updatedAt?.toISOString?.() ?? employee.updatedAt });
+    res.json(serializeEmployee(employee));
   } catch (err) {
     req.log.error({ err }, "Error updating employee");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ── Funcionários: excluir ── */
+router.delete("/companies/:companyId/employees/:id", requireAuth("platform_admin", "cliente_master", "cliente_subadmin"), async (req, res) => {
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  try {
+    await db.delete(employeeMovementsTable).where(eq(employeeMovementsTable.employeeId, id));
+    const [deleted] = await db.delete(employeesTable).where(eq(employeesTable.id, id)).returning();
+    if (!deleted) { res.status(404).json({ error: "Funcionário não encontrado" }); return; }
+    res.json({ ok: true });
+  } catch (err) {
+    req.log.error({ err }, "Error deleting employee");
     res.status(500).json({ error: "Erro interno" });
   }
 });
@@ -326,6 +386,25 @@ router.get("/me/branches", requireAuth("cliente_master", "cliente_subadmin"), as
     res.json(all);
   } catch (err) {
     req.log.error({ err }, "Error listing user branches");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ── Master: listar próprios colaboradores (todas as filiais) ── */
+router.get("/me/employees", requireAuth("cliente_master", "cliente_subadmin"), async (req, res) => {
+  const auth = getAuth(req);
+  const entityId = auth.entityId as number | undefined;
+  if (!entityId) { res.status(404).json({ error: "Empresa não encontrada" }); return; }
+  try {
+    const filiais = await db.select({ id: companiesTable.id }).from(companiesTable).where(eq(companiesTable.parentCompanyId, entityId));
+    const filialIds = filiais.map(f => f.id);
+    const allIds = [entityId, ...filialIds];
+    const employees = await db.select().from(employeesTable)
+      .where(allIds.length === 1 ? eq(employeesTable.companyId, entityId) : inArray(employeesTable.companyId, allIds))
+      .orderBy(employeesTable.name);
+    res.json(employees.map(serializeEmployee));
+  } catch (err) {
+    req.log.error({ err }, "Error listing own employees");
     res.status(500).json({ error: "Erro interno" });
   }
 });
