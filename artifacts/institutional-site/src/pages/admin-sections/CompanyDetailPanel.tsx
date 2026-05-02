@@ -38,11 +38,21 @@ interface Employee {
   matricula: string;
   admissionDate: string | null;
   route: string | null;
-  status?: string;
-  turno?: string;
-  telefone?: string;
-  endereco?: string;
-  vale?: string;
+  turno?: string | null;
+  status?: string | null;
+  phone?: string | null;
+  address?: string | null;
+  addressNumber?: string | null;
+  neighborhood?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zipCode?: string | null;
+  email?: string | null;
+  birthDate?: string | null;
+  shiftStart?: string | null;
+  shiftEnd?: string | null;
+  valeValue?: string | null;
+  codigo?: string | null;
 }
 
 interface PurchaseOrder {
@@ -183,7 +193,7 @@ export default function CompanyDetailPanel({ company, token, onClose }: Props) {
 
   const ativos   = employees.filter(e => !e.status || e.status === "Ativo").length;
   const inativos = employees.filter(e => e.status && e.status !== "Ativo" && e.status !== "Desligado").length;
-  const pendencias = employees.filter(e => !e.telefone?.trim() || !e.endereco?.trim() || !e.turno || e.turno === "—").length;
+  const pendencias = employees.filter(e => !e.phone?.trim() || !e.address?.trim() || !e.turno || e.turno === "—").length;
 
   const totalOrders = orders.reduce((s, o) => s + parseFloat(o.total), 0);
   const totalVales  = orders.reduce((s, o) => s + o.vales, 0);
@@ -415,8 +425,8 @@ export default function CompanyDetailPanel({ company, token, onClose }: Props) {
 
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
                   {[
-                    { label: "Sem telefone",       count: employees.filter(e => !e.telefone?.trim()).length },
-                    { label: "Endereço incompleto", count: employees.filter(e => !e.endereco?.trim()).length },
+                    { label: "Sem telefone",       count: employees.filter(e => !e.phone?.trim()).length },
+                    { label: "Endereço incompleto", count: employees.filter(e => !e.address?.trim()).length },
                     { label: "Turno não definido",  count: employees.filter(e => !e.turno || e.turno === "—").length },
                   ].map(k => (
                     <div key={k.label} className="bg-amber-50 border border-amber-200 rounded-xl p-4">
@@ -431,7 +441,7 @@ export default function CompanyDetailPanel({ company, token, onClose }: Props) {
                 ) : (() => {
                   const lista = employees.filter(e =>
                     e.status !== "Desligado" && (
-                      !e.telefone?.trim() || !e.endereco?.trim() || !e.turno || e.turno === "—"
+                      !e.phone?.trim() || !e.address?.trim() || !e.turno || e.turno === "—"
                     )
                   );
                   return lista.length === 0 ? (
@@ -459,12 +469,12 @@ export default function CompanyDetailPanel({ company, token, onClose }: Props) {
                                   <span className="ml-2 text-xs text-muted-foreground font-mono">{e.cpf}</span>
                                 </td>
                                 <td className="px-4 py-3.5 text-center">
-                                  {e.telefone?.trim()
+                                  {e.phone?.trim()
                                     ? <CheckCircle size={16} className="text-green-600 mx-auto" />
                                     : <XCircle size={16} className="text-red-500 mx-auto" />}
                                 </td>
                                 <td className="px-4 py-3.5 text-center">
-                                  {e.endereco?.trim()
+                                  {e.address?.trim()
                                     ? <CheckCircle size={16} className="text-green-600 mx-auto" />
                                     : <XCircle size={16} className="text-red-500 mx-auto" />}
                                 </td>
