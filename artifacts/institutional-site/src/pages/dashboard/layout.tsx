@@ -58,8 +58,8 @@ export default function DashboardLayout({ children, alertMessage }: LayoutProps)
   const { empresaAtiva, nomeEmpresaAtiva, filiais, filialAtiva, setFilialAtiva, colaboradoresDaFilial: colaboradores } = useDashboard();
 
   // Nome do usuário vem do localStorage — agora salva o name real
-  const userName = localStorage.getItem("admin_displayname")
-    ?? localStorage.getItem("admin_username")
+  const userName = localStorage.getItem("jwt_displayname")
+    ?? localStorage.getItem("jwt_username")
     ?? "Usuário";
   const displayName = userName.includes("@") ? userName.split("@")[0] : userName;
   const initial = displayName.charAt(0).toUpperCase();
@@ -73,16 +73,16 @@ export default function DashboardLayout({ children, alertMessage }: LayoutProps)
   ).length;
 
   useEffect(() => {
-    const t = localStorage.getItem("admin_token");
+    const t = localStorage.getItem("jwt_token");
     if (!t) { sessionStorage.setItem("redirect_after_login", location); setLocation("/login"); }
     else setAuthed(true);
   }, [location, setLocation]);
 
   function logout() {
-    localStorage.removeItem("admin_token");
-    localStorage.removeItem("admin_username");
-    localStorage.removeItem("admin_displayname");
-    localStorage.removeItem("admin_role");
+    localStorage.removeItem("jwt_token");
+    localStorage.removeItem("jwt_username");
+    localStorage.removeItem("jwt_displayname");
+    localStorage.removeItem("jwt_role");
     setLocation("/login");
   }
 

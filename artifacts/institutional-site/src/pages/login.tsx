@@ -108,10 +108,10 @@ export default function Login() {
           return;
         }
 
-        localStorage.setItem("admin_token", data.token!);
-        localStorage.setItem("admin_username", data.email!);
-        localStorage.setItem("admin_displayname", data.name ?? data.email!);
-        localStorage.setItem("admin_role", data.role ?? "");
+        localStorage.setItem("jwt_token", data.token!);
+        localStorage.setItem("jwt_username", data.email!);
+        localStorage.setItem("jwt_displayname", data.name ?? data.email!);
+        localStorage.setItem("jwt_role", data.role ?? "");
 
         const redirect = sessionStorage.getItem("redirect_after_login");
         sessionStorage.removeItem("redirect_after_login");
@@ -163,10 +163,10 @@ export default function Login() {
       const data = await res.json() as { message?: string; error?: string };
       if (!res.ok) { setError(data.error ?? "Erro ao trocar senha."); return; }
 
-      localStorage.setItem("admin_token", pendingToken!);
-      localStorage.setItem("admin_username", pendingEmail!);
-      localStorage.setItem("admin_displayname", pendingName ?? pendingEmail!);
-      localStorage.setItem("admin_role", pendingRole ?? "");
+      localStorage.setItem("jwt_token", pendingToken!);
+      localStorage.setItem("jwt_username", pendingEmail!);
+      localStorage.setItem("jwt_displayname", pendingName ?? pendingEmail!);
+      localStorage.setItem("jwt_role", pendingRole ?? "");
 
       const redirect = sessionStorage.getItem("redirect_after_login");
       sessionStorage.removeItem("redirect_after_login");

@@ -261,8 +261,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   useEffect(() => { agendamentosRef.current  = agendamentos;  }, [agendamentos]);
 
   useEffect(() => {
-    const token = localStorage.getItem("admin_token");
-    const role = localStorage.getItem("admin_role");
+    const token = localStorage.getItem("jwt_token");
+    const role = localStorage.getItem("jwt_role");
     if (!token || role === "platform_admin") return;
 
     const payload = decodeJwt(token);
@@ -270,10 +270,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
 
     if (typeof payload.entityId !== "number") {
       console.warn("[dashboard] JWT sem entityId — sessão obsoleta, redirecionando para login");
-      localStorage.removeItem("admin_token");
-      localStorage.removeItem("admin_username");
-      localStorage.removeItem("admin_displayname");
-      localStorage.removeItem("admin_role");
+      localStorage.removeItem("jwt_token");
+      localStorage.removeItem("jwt_username");
+      localStorage.removeItem("jwt_displayname");
+      localStorage.removeItem("jwt_role");
       window.location.href = "/login";
       return;
     }
@@ -282,10 +282,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     const headers = { Authorization: `Bearer ${token}` };
 
     function handleUnauthorized() {
-      localStorage.removeItem("admin_token");
-      localStorage.removeItem("admin_username");
-      localStorage.removeItem("admin_displayname");
-      localStorage.removeItem("admin_role");
+      localStorage.removeItem("jwt_token");
+      localStorage.removeItem("jwt_username");
+      localStorage.removeItem("jwt_displayname");
+      localStorage.removeItem("jwt_role");
       window.location.href = "/login";
     }
 
@@ -477,7 +477,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   }
 
   function getAuthHeaders(): { Authorization: string } | null {
-    const token = localStorage.getItem("admin_token");
+    const token = localStorage.getItem("jwt_token");
     if (!token) return null;
     return { Authorization: `Bearer ${token}` };
   }
@@ -485,7 +485,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   async function fetchAgendamentos(): Promise<void> {
     const headers = getAuthHeaders();
     if (!headers) return;
-    const role = localStorage.getItem("admin_role");
+    const role = localStorage.getItem("jwt_role");
     if (role === "platform_admin") return;
     try {
       const API_URL = import.meta.env.VITE_API_URL ?? "";

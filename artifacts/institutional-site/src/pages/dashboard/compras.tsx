@@ -150,7 +150,7 @@ function calcularDiasNoMes(
 const API_URL = import.meta.env.VITE_API_URL ?? "";
 
 function getAuthHeaders(): HeadersInit {
-  const token = localStorage.getItem("admin_token") ?? "";
+  const token = localStorage.getItem("jwt_token") ?? "";
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
 }
 
