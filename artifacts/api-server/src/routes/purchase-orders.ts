@@ -151,7 +151,7 @@ router.post(
             vales: item.vales,
             valorUnit: String(item.valorUnit),
             total: String(item.total),
-            status: "Processando" as const,
+            status: "Aprovado" as const,
             proRata: item.proRata,
           })),
         )

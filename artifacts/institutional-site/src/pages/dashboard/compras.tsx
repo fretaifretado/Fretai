@@ -1,7 +1,6 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import DashboardLayout from "./layout";
-import { CreditCard, CalendarClock, Users, ChevronLeft, ChevronRight, X, Check } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { CreditCard, CalendarClock } from "lucide-react";
 import { useDashboard, type Colaborador } from "./context";
 
 type StatusPedido = "Processando" | "Aprovado" | "Cancelado";
@@ -41,10 +40,6 @@ const STATUS_STYLE: Record<StatusPedido, string> = {
   "Cancelado":   "bg-red-100 text-red-700 border-red-200",
 };
 
-const MESES = [
-  "Janeiro","Fevereiro","Março","Abril","Maio","Junho",
-  "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro",
-];
 const MESES_CURTO = [
   "Jan","Fev","Mar","Abr","Mai","Jun",
   "Jul","Ago","Set","Out","Nov","Dez",
@@ -81,10 +76,6 @@ function formatDate(ano: number, mes: number, dia: number): string {
   return `${String(dia).padStart(2, "0")}/${String(mes).padStart(2, "0")}/${ano}`;
 }
 
-/**
- * Cyclic schedule: 12x36 = 1 work day every 2; 24x48 = 1 every 3.
- * Cycle starts at `inicioOp`. Only counts days >= `fromDay` in the month.
- */
 function diasCiclicosNoMes(
   tipoEscala: "12x36" | "24x48",
   inicioOp: string,
@@ -109,13 +100,6 @@ function diasCiclicosNoMes(
   return count || (tipoEscala === "12x36" ? 15 : 10);
 }
 
-/**
- * Calculates working days for a collaborator in a given month/year.
- * Returns `{ dias: 0 }` when `inicioOperacao` is after the selected period
- * (collaborator hasn't started yet — exclude from purchase).
- * When `inicioOperacao` falls in the same month, counts only from that day
- * onwards (pro-rata first purchase). Otherwise, counts the full month.
- */
 function calcularDiasNoMes(
   tipoEscala: string,
   inicioOp: string,
@@ -124,7 +108,6 @@ function calcularDiasNoMes(
 ): { dias: number; proRata: boolean; fromDay: number } {
   const start = parseInicioOp(inicioOp);
 
-  // Exclude collaborator when start date is after the selected period
   if (start) {
     const sy = start.getFullYear();
     const sm = start.getMonth() + 1;
@@ -184,18 +167,12 @@ export default function ComprasPage() {
     : hoje.getMonth() + 1;
 
   const [pedidos, setPedidos] = useState<PedidoCompra[]>([]);
-  /** Starts as true so the auto-generation effect waits for the initial fetch. */
   const [loadingPedidos, setLoadingPedidos] = useState(true);
   const [savingPedidos, setSavingPedidos] = useState(false);
-  const [showPrevia, setShowPrevia] = useState(false);
-  const [periodoAno, setPeriodoAno] = useState(defaultAno);
-  const [periodoMes, setPeriodoMes] = useState(defaultMes);
-
-  /** Prevents the auto-generation effect from firing more than once per session. */
-  const autoGeradoRef = useRef(false);
+  const [periodoAno] = useState(defaultAno);
+  const [periodoMes] = useState(defaultMes);
 
   const valeDiario = parseFloat(empresaAtiva.valeValue ?? "8.50");
-
   const companyId = filialAtiva?.id ?? null;
 
   const fetchPedidos = useCallback(async (cid: number) => {
@@ -275,10 +252,12 @@ export default function ComprasPage() {
       .filter(item => item.dias > 0),
     [colaboradoresElegiveis, turnos, periodoAno, periodoMes, valeDiario]);
 
-  const totalValesPreview = previewItems.reduce((a, x) => a + x.vales, 0);
-  const totalValorPreview = previewItems.reduce((a, x) => a + x.total, 0);
+  /**
+   * Tracks the last set of collaborator IDs for which we auto-generated.
+   * Resets when collaborators change so a new import triggers re-generation.
+   */
+  const autoGeradoParaRef = useRef<string>("");
 
-  /** Sends `items` to the API and prepends the saved records to `pedidos`. */
   async function salvarItens(items: PreviewItem[], cid: number): Promise<void> {
     const res = await fetch(`${API_URL}/api/me/purchase-orders`, {
       method: "POST",
@@ -338,39 +317,30 @@ export default function ComprasPage() {
     }
   }
 
-  async function confirmarPedidos() {
-    if (!companyId || previewItems.length === 0) return;
-    setSavingPedidos(true);
-    try {
-      await salvarItens(previewItems, companyId);
-    } finally {
-      setSavingPedidos(false);
-      setShowPrevia(false);
-    }
-  }
-
   /**
-   * Auto-generates purchases once per session when:
-   * - the history fetch finished with 0 results
+   * Auto-generates purchases whenever:
+   * - fetch finished and there are no existing orders
    * - there are eligible collaborators
-   * - a companyId is known
+   * - we haven't already generated for this exact set of collaborators
    */
+  const colaboradoresKey = colaboradoresElegiveis.map(c => c.id).sort().join(",");
+
   useEffect(() => {
     if (
       !loadingPedidos &&
       pedidos.length === 0 &&
       previewItems.length > 0 &&
       companyId !== null &&
-      !autoGeradoRef.current
+      autoGeradoParaRef.current !== colaboradoresKey
     ) {
-      autoGeradoRef.current = true;
+      autoGeradoParaRef.current = colaboradoresKey;
       setSavingPedidos(true);
       salvarItens(previewItems, companyId)
         .catch(err => console.error("[compras] auto-geração falhou:", err))
         .finally(() => setSavingPedidos(false));
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadingPedidos, pedidos.length, previewItems, companyId]);
+  }, [loadingPedidos, pedidos.length, previewItems, companyId, colaboradoresKey]);
 
   const totalGasto          = pedidos.reduce((a, p) => a + p.total, 0);
   const totalValesHistorico = pedidos.reduce((a, p) => a + p.vales, 0);
@@ -382,15 +352,6 @@ export default function ComprasPage() {
     return new Date(hoje.getFullYear(), hoje.getMonth() + 1, 28);
   })();
   const proxDia28Str = formatDate(proxDia28.getFullYear(), proxDia28.getMonth() + 1, 28);
-
-  function navegarMes(dir: -1 | 1) {
-    let m = periodoMes + dir;
-    let a = periodoAno;
-    if (m < 1)  { m = 12; a--; }
-    if (m > 12) { m = 1;  a++; }
-    setPeriodoMes(m);
-    setPeriodoAno(a);
-  }
 
   return (
     <DashboardLayout>
@@ -404,13 +365,6 @@ export default function ComprasPage() {
             </div>
             <p className="text-muted-foreground text-sm">Histórico e gestão de compras de vale-transporte.</p>
           </div>
-          <Button
-            onClick={() => setShowPrevia(true)}
-            disabled={colaboradoresElegiveis.length === 0}
-            className="bg-accent hover:bg-accent/90 text-white font-semibold shrink-0 gap-1.5"
-          >
-            <Users size={15} />Gerar compras
-          </Button>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
@@ -483,106 +437,6 @@ export default function ComprasPage() {
           </p>
         </div>
       </div>
-
-      {showPrevia && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
-          <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[90vh]">
-
-            <div className="p-6 border-b shrink-0">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="font-bold text-lg text-foreground">Prévia de compras</h2>
-                <button
-                  onClick={() => setShowPrevia(false)}
-                  className="h-8 w-8 flex items-center justify-center rounded-lg hover:bg-muted transition-colors"
-                >
-                  <X size={15} />
-                </button>
-              </div>
-              <div className="flex items-center gap-3">
-                <span className="text-sm text-muted-foreground">Período:</span>
-                <div className="flex items-center gap-1 bg-muted/30 rounded-lg px-1 py-0.5">
-                  <button onClick={() => navegarMes(-1)} className="p-1.5 rounded hover:bg-muted transition-colors">
-                    <ChevronLeft size={14} />
-                  </button>
-                  <span className="text-sm font-semibold text-foreground min-w-[110px] text-center">
-                    {MESES[periodoMes - 1]} {periodoAno}
-                  </span>
-                  <button onClick={() => navegarMes(1)} className="p-1.5 rounded hover:bg-muted transition-colors">
-                    <ChevronRight size={14} />
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-y-auto">
-              {previewItems.length === 0 ? (
-                <div className="py-12 text-center text-sm text-muted-foreground">
-                  Nenhum colaborador elegível encontrado.
-                </div>
-              ) : (
-                previewItems.map(item => (
-                  <div key={item.colaborador.id} className="flex items-center gap-3 px-5 py-3.5 border-b">
-                    <div className="w-8 h-8 rounded-full bg-accent/10 text-accent text-xs font-bold flex items-center justify-center shrink-0">
-                      {item.colaborador.nome.charAt(0)}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-foreground truncate">{item.colaborador.nome}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {item.turnoNome} · {item.dataInicio} – {item.dataFim}
-                        {item.proRata && (
-                          <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-medium border border-amber-200">
-                            1ª compra
-                          </span>
-                        )}
-                      </p>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <p className="text-sm font-semibold text-foreground">{fmt(item.total)}</p>
-                      <p className="text-xs text-muted-foreground">{item.dias} dias · {item.vales} vales</p>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-
-            <div className="p-6 border-t bg-muted/10 shrink-0">
-              {previewItems.length > 0 && (
-                <div className="bg-card border rounded-xl p-4 mb-4 space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span className="text-muted-foreground">Colaboradores</span>
-                    <span className="font-medium">{previewItems.length}</span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-muted-foreground">Total de vales</span>
-                    <span className="font-medium">{totalValesPreview.toLocaleString("pt-BR")} vales</span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-muted-foreground">Valor unitário (vale)</span>
-                    <span className="font-medium">{fmt(valeDiario)}</span>
-                  </div>
-                  <div className="border-t pt-2 flex justify-between">
-                    <span className="font-semibold text-foreground">Total geral</span>
-                    <span className="font-bold text-accent text-lg">{fmt(totalValorPreview)}</span>
-                  </div>
-                </div>
-              )}
-              <div className="flex gap-3">
-                <Button variant="outline" className="flex-1" onClick={() => setShowPrevia(false)} disabled={savingPedidos}>
-                  Cancelar
-                </Button>
-                <Button
-                  disabled={previewItems.length === 0 || savingPedidos}
-                  className="flex-1 bg-accent hover:bg-accent/90 text-white font-semibold disabled:opacity-50"
-                  onClick={() => void confirmarPedidos()}
-                >
-                  <Check size={14} className="mr-1.5" />
-                  {savingPedidos ? "Salvando..." : `Confirmar ${previewItems.length} pedido${previewItems.length !== 1 ? "s" : ""}`}
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </DashboardLayout>
   );
 }
