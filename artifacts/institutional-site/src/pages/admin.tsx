@@ -6,7 +6,8 @@ import { z } from "zod";
 import {
   Users, Plus, LogOut, Pencil, Trash2, X, Check, AlertCircle, Hexagon, Search,
   LayoutDashboard, FileBarChart2, Settings, ChevronRight, Menu as MenuIcon,
-  Activity, Building2, Truck, ScrollText,
+  Activity, Building2, Truck, ScrollText, TrendingUp, UserCheck, RefreshCw,
+  CalendarDays, ShieldCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
@@ -25,6 +26,38 @@ interface Client {
   createdAt: string;
   updatedAt: string;
 }
+
+interface DashCompany {
+  id: number;
+  name: string;
+  createdAt: string;
+}
+
+interface DashPartner {
+  id: number;
+  name: string;
+  createdAt: string;
+}
+
+interface DashAuditLog {
+  id: number;
+  userEmail: string | null;
+  companyId: number | null;
+  action: string;
+  entityType: string;
+  createdAt: string;
+}
+
+const AUDIT_LABELS: Record<string, string> = {
+  create_company: "Empresa criada", create_branch: "Filial criada",
+  create_partner: "Parceiro criado", create_employee: "Colaborador adicionado",
+  update_employee: "Colaborador editado", update_employee_status: "Status alterado",
+  fix_employee_pending: "Pendência corrigida", delete_employee: "Colaborador removido",
+  create_movement: "Movimentação registrada", create_shift: "Turno adicionado",
+  update_shift: "Turno editado", delete_shift: "Turno removido",
+  create_scheduled_movement: "Agendamento criado", cancel_scheduled_movement: "Agendamento cancelado",
+  create_driver: "Motorista cadastrado", change_password: "Senha alterada",
+};
 
 const ACCESS_LEVELS = [
   { value: "basico", label: "Básico" },
@@ -98,6 +131,13 @@ export default function Admin() {
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [adminUsername, setAdminUsername] = useState("");
 
+  /* ── dashboard state ── */
+  const [dashCompanies, setDashCompanies] = useState<DashCompany[]>([]);
+  const [dashPartners, setDashPartners] = useState<DashPartner[]>([]);
+  const [dashAuditLogs, setDashAuditLogs] = useState<DashAuditLog[]>([]);
+  const [dashLoading, setDashLoading] = useState(false);
+  const [dashLastRefresh, setDashLastRefresh] = useState<Date | null>(null);
+
   const token = localStorage.getItem("admin_token") ?? "";
 
   useEffect(() => {
@@ -117,7 +157,25 @@ export default function Admin() {
     finally { setLoading(false); }
   }, [token, setLocation]);
 
+  const fetchDashboard = useCallback(async () => {
+    setDashLoading(true);
+    try {
+      const headers = { Authorization: `Bearer ${token}` };
+      const [companiesRes, partnersRes, auditRes] = await Promise.all([
+        fetch("/api/admin/companies", { headers }),
+        fetch("/api/admin/partners", { headers }),
+        fetch("/api/admin/audit-logs?limit=8", { headers }),
+      ]);
+      if (companiesRes.ok) setDashCompanies(await companiesRes.json() as DashCompany[]);
+      if (partnersRes.ok) setDashPartners(await partnersRes.json() as DashPartner[]);
+      if (auditRes.ok) setDashAuditLogs(await auditRes.json() as DashAuditLog[]);
+      setDashLastRefresh(new Date());
+    } catch { /* silent */ }
+    finally { setDashLoading(false); }
+  }, [token]);
+
   useEffect(() => { if (token) fetchClients(); }, [token, fetchClients]);
+  useEffect(() => { if (token && activeSection === "dashboard") fetchDashboard(); }, [token, activeSection, fetchDashboard]);
 
   const form = useForm<ClientForm>({
     resolver: zodResolver(clientSchema),
@@ -250,62 +308,166 @@ export default function Admin() {
           <div className="container mx-auto px-4 lg:px-8 py-8 max-w-5xl">
 
             {/* DASHBOARD */}
-            {activeSection === "dashboard" && (
-              <div>
-                <h1 className="text-xl font-bold text-foreground mb-1">Dashboard</h1>
-                <p className="text-muted-foreground text-sm mb-8">Visão geral da plataforma Fretai.</p>
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-                  <div className="bg-card border rounded-xl p-5 shadow-sm">
-                    <p className="text-xs text-muted-foreground mb-1">Usuários Ativos</p>
-                    <p className="text-3xl font-bold text-foreground">{clients.length}</p>
-                  </div>
-                  {ACCESS_LEVELS.map(level => (
-                    <div key={level.value} className="bg-card border rounded-xl p-5 shadow-sm">
-                      <p className="text-xs text-muted-foreground mb-1">{level.label}</p>
-                      <p className="text-3xl font-bold text-foreground">{clients.filter(c => c.accessLevel === level.value).length}</p>
-                    </div>
-                  ))}
-                </div>
+            {activeSection === "dashboard" && (() => {
+              const today = new Date();
+              const todayStr = today.toISOString().slice(0, 10);
+              const thisMonth = today.toISOString().slice(0, 7);
 
-                {/* Quick access */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
-                  {[
-                    { label: "Empresas Clientes", icon: Building2, section: "companies", desc: "Cadastre indústrias e administradores" },
-                    { label: "Parceiros Transportadores", icon: Truck, section: "partners", desc: "Gerencie frotas e motoristas" },
-                    { label: "Auditoria", icon: ScrollText, section: "audit", desc: "Logs de ações e acessos" },
-                  ].map(item => (
+              const acoesHoje = dashAuditLogs.filter(l => l.createdAt.slice(0, 10) === todayStr).length;
+              const empresasMes = dashCompanies.filter(c => c.createdAt.slice(0, 7) === thisMonth).length;
+              const masterUsers = clients.filter(c => c.accessLevel === "admin" || c.accessLevel === "avancado").length;
+
+              return (
+                <div>
+                  {/* Header */}
+                  <div className="flex items-center justify-between mb-6">
+                    <div>
+                      <h1 className="text-xl font-bold text-foreground mb-0.5">Dashboard</h1>
+                      <p className="text-muted-foreground text-sm">
+                        Visão geral da plataforma Fretai
+                        {dashLastRefresh && (
+                          <span className="ml-2 text-xs text-muted-foreground/60">
+                            · Atualizado às {dashLastRefresh.toLocaleTimeString("pt-BR", { timeStyle: "short" })}
+                          </span>
+                        )}
+                      </p>
+                    </div>
                     <button
-                      key={item.section}
-                      onClick={() => setActiveSection(item.section)}
-                      className="bg-card border rounded-xl p-5 shadow-sm text-left hover:border-accent/50 hover:shadow-md transition-all group"
+                      onClick={() => void fetchDashboard()}
+                      disabled={dashLoading}
+                      className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground border rounded-lg px-3 py-2 bg-card hover:bg-muted transition-colors disabled:opacity-50"
                     >
-                      <item.icon size={22} className="text-accent mb-3" />
-                      <p className="font-semibold text-foreground text-sm mb-1">{item.label}</p>
-                      <p className="text-xs text-muted-foreground">{item.desc}</p>
+                      <RefreshCw size={13} className={dashLoading ? "animate-spin" : ""} />
+                      Atualizar
                     </button>
-                  ))}
-                </div>
+                  </div>
 
-                <div className="bg-card border rounded-xl p-6 shadow-sm">
-                  <h2 className="font-semibold text-foreground mb-4 text-sm">Últimos usuários cadastrados</h2>
-                  {clients.length === 0 ? (
-                    <p className="text-muted-foreground text-sm">Nenhum usuário cadastrado ainda.</p>
-                  ) : (
-                    <div className="space-y-3">
-                      {clients.slice(-5).reverse().map(c => (
-                        <div key={c.id} className="flex items-center justify-between py-2 border-b border-border last:border-0">
-                          <div>
-                            <p className="font-medium text-sm text-foreground">{c.name}</p>
-                            <p className="text-xs text-muted-foreground">{c.email}</p>
-                          </div>
-                          {accessLevelBadge(c.accessLevel)}
+                  {/* KPI cards */}
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                    {[
+                      {
+                        icon: Building2,
+                        label: "Empresas clientes",
+                        value: dashLoading ? "…" : dashCompanies.length,
+                        sub: `${empresasMes} cadastrada(s) este mês`,
+                        color: "text-blue-600", bg: "bg-blue-50 border-blue-100",
+                        onClick: () => setActiveSection("companies"),
+                      },
+                      {
+                        icon: Truck,
+                        label: "Parceiros transportadores",
+                        value: dashLoading ? "…" : dashPartners.length,
+                        sub: "frotas ativas na plataforma",
+                        color: "text-violet-600", bg: "bg-violet-50 border-violet-100",
+                        onClick: () => setActiveSection("partners"),
+                      },
+                      {
+                        icon: UserCheck,
+                        label: "Usuários do sistema",
+                        value: dashLoading ? "…" : clients.length,
+                        sub: `${masterUsers} com nível avançado/admin`,
+                        color: "text-emerald-600", bg: "bg-emerald-50 border-emerald-100",
+                        onClick: () => setActiveSection("clients"),
+                      },
+                      {
+                        icon: TrendingUp,
+                        label: "Ações hoje",
+                        value: dashLoading ? "…" : acoesHoje,
+                        sub: `${dashAuditLogs.length} nas últimas ações registradas`,
+                        color: "text-orange-600", bg: "bg-orange-50 border-orange-100",
+                        onClick: () => setActiveSection("audit"),
+                      },
+                    ].map(card => (
+                      <button
+                        key={card.label}
+                        onClick={card.onClick}
+                        className={`border rounded-xl p-5 shadow-sm text-left hover:shadow-md transition-all ${card.bg}`}
+                      >
+                        <div className={`flex items-center gap-2 mb-3 ${card.color}`}>
+                          <card.icon size={16} />
+                          <p className="text-xs font-semibold uppercase tracking-wide">{card.label}</p>
                         </div>
-                      ))}
+                        <p className={`text-3xl font-bold ${card.color}`}>{card.value}</p>
+                        <p className="text-xs text-muted-foreground mt-1">{card.sub}</p>
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Bottom grid */}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+
+                    {/* Últimas empresas cadastradas */}
+                    <div className="bg-card border rounded-xl shadow-sm overflow-hidden">
+                      <div className="flex items-center justify-between px-5 py-4 border-b">
+                        <div className="flex items-center gap-2">
+                          <Building2 size={15} className="text-accent" />
+                          <h2 className="font-semibold text-foreground text-sm">Últimas empresas cadastradas</h2>
+                        </div>
+                        <button onClick={() => setActiveSection("companies")} className="text-xs text-accent hover:underline">Ver todas</button>
+                      </div>
+                      {dashLoading ? (
+                        <div className="py-8 text-center text-muted-foreground text-sm">Carregando...</div>
+                      ) : dashCompanies.length === 0 ? (
+                        <div className="py-8 text-center text-muted-foreground text-sm">Nenhuma empresa cadastrada.</div>
+                      ) : (
+                        <div className="divide-y divide-border">
+                          {dashCompanies.slice(0, 5).map(c => (
+                            <div key={c.id} className="flex items-center justify-between px-5 py-3">
+                              <div className="flex items-center gap-2.5">
+                                <div className="w-7 h-7 rounded-full bg-accent/10 flex items-center justify-center text-xs font-bold text-accent uppercase shrink-0">
+                                  {c.name.charAt(0)}
+                                </div>
+                                <p className="text-sm font-medium text-foreground">{c.name}</p>
+                              </div>
+                              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                                <CalendarDays size={11} />
+                                {new Date(c.createdAt).toLocaleDateString("pt-BR")}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                  )}
+
+                    {/* Atividade recente */}
+                    <div className="bg-card border rounded-xl shadow-sm overflow-hidden">
+                      <div className="flex items-center justify-between px-5 py-4 border-b">
+                        <div className="flex items-center gap-2">
+                          <Activity size={15} className="text-accent" />
+                          <h2 className="font-semibold text-foreground text-sm">Atividade recente</h2>
+                        </div>
+                        <button onClick={() => setActiveSection("audit")} className="text-xs text-accent hover:underline">Ver auditoria</button>
+                      </div>
+                      {dashLoading ? (
+                        <div className="py-8 text-center text-muted-foreground text-sm">Carregando...</div>
+                      ) : dashAuditLogs.length === 0 ? (
+                        <div className="py-8 text-center text-muted-foreground text-sm">Nenhuma ação registrada.</div>
+                      ) : (
+                        <div className="divide-y divide-border">
+                          {dashAuditLogs.slice(0, 6).map(log => (
+                            <div key={log.id} className="flex items-start gap-3 px-5 py-3">
+                              <div className="w-6 h-6 rounded-full bg-accent/10 flex items-center justify-center shrink-0 mt-0.5">
+                                <ShieldCheck size={11} className="text-accent" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm text-foreground truncate">
+                                  <span className="font-medium">{AUDIT_LABELS[log.action] ?? log.action}</span>
+                                </p>
+                                <p className="text-xs text-muted-foreground truncate">{log.userEmail ?? "sistema"}</p>
+                              </div>
+                              <p className="text-xs text-muted-foreground whitespace-nowrap shrink-0">
+                                {new Date(log.createdAt).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* EMPRESAS */}
             {activeSection === "companies" && <CompaniesSection token={token} />}
