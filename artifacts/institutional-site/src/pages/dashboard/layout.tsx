@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, Shuffle, AlertTriangle,
   CalendarClock, Radio, Calendar, CreditCard, FileText, CalendarDays,
   Clock, ChevronDown, LogOut, Settings, Bell, Menu, X, Building2,
-  Pencil, Check,
+  Pencil, Check, BarChart2,
 } from "lucide-react";
 import { useDashboard } from "./context";
 
@@ -13,7 +13,8 @@ interface NavSection { title?: string; items: NavItem[] }
 
 const NAV: NavSection[] = [
   { items: [
-    { icon: LayoutDashboard, label: "Dashboard", path: "/painel" },
+    { icon: LayoutDashboard, label: "Dashboard",  path: "/painel" },
+    { icon: BarChart2,       label: "Relatórios", path: "/painel/relatorios" },
   ]},
   {
     title: "COLABORADORES",
