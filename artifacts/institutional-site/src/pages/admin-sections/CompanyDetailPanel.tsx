@@ -90,6 +90,7 @@ function fmt(v: number) {
   return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
 
+
 function fmtDate(iso: string) {
   if (!iso || iso === "9999-12-31") return "—";
   const d = new Date(iso + "T00:00:00");
@@ -738,32 +739,45 @@ export default function CompanyDetailPanel({ company, token, onClose }: Props) {
                 {loadingEmployees ? (
                   <div className="py-16 text-center text-sm text-muted-foreground">Carregando...</div>
                 ) : (() => {
-                  const turnoCounts = employees.reduce<Record<string, number>>((acc, e) => {
-                    if (e.turno && e.turno !== "—") {
-                      acc[e.turno] = (acc[e.turno] ?? 0) + 1;
+                  type TurnoInfo = { count: number; shiftStart: string; shiftEnd: string };
+                  const turnoMap = employees.reduce<Record<string, TurnoInfo>>((acc, e) => {
+                    if (!e.turno || e.turno === "—") return acc;
+                    if (!acc[e.turno]) {
+                      acc[e.turno] = { count: 0, shiftStart: e.shiftStart ?? "", shiftEnd: e.shiftEnd ?? "" };
                     }
+                    acc[e.turno]!.count += 1;
                     return acc;
                   }, {});
-                  const turnos = Object.entries(turnoCounts);
-                  return turnos.length === 0 ? (
+                  const turnosList = Object.entries(turnoMap);
+                  return turnosList.length === 0 ? (
                     <div className="bg-card border rounded-xl p-12 text-center shadow-sm">
                       <Clock size={32} className="text-muted-foreground/30 mx-auto mb-3" />
                       <p className="text-muted-foreground text-sm">Nenhum turno identificado nos colaboradores.</p>
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {turnos.map(([nome, count]) => (
-                        <div key={nome} className="bg-card border rounded-xl p-5 shadow-sm">
-                          <div className="flex items-center gap-2 mb-3">
-                            <div className="w-2 h-2 rounded-full bg-accent" />
-                            <h4 className="font-semibold text-foreground">{nome}</h4>
+                      {turnosList.map(([nome, info]) => {
+                        const hasHorario = info.shiftStart && info.shiftEnd;
+                        return (
+                          <div key={nome} className="bg-card border rounded-xl p-5 shadow-sm hover:shadow-md transition-shadow">
+                            <div className="flex items-center gap-2 mb-3">
+                              <div className="w-2 h-2 rounded-full bg-accent" />
+                              <h4 className="font-semibold text-foreground">{nome}</h4>
+                            </div>
+
+                            {hasHorario && (
+                              <>
+                                <p className="text-[11px] text-muted-foreground mb-1 uppercase tracking-wide font-medium">Horário</p>
+                                <p className="text-xl font-bold text-foreground font-mono">{info.shiftStart} – {info.shiftEnd}</p>
+                              </>
+                            )}
+
+                            <div className={`${hasHorario ? "mt-4" : "mt-0"} pt-3 border-t border-border`}>
+                              <p className="text-xs text-muted-foreground">{info.count} colaborador{info.count !== 1 ? "es" : ""}</p>
+                            </div>
                           </div>
-                          <div className="pt-3 border-t border-border flex items-center justify-between">
-                            <p className="text-xs text-muted-foreground">{count} colaborador{count !== 1 ? "es" : ""}</p>
-                            <ArrowUpRight size={14} className="text-muted-foreground/40" />
-                          </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   );
                 })()}
