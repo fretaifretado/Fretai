@@ -8,8 +8,14 @@ const router = Router();
 
 router.get("/admin/audit-logs", requireAdmin, async (req, res) => {
   try {
-    const limit = Math.min(parseInt(String(req.query.limit ?? "100"), 10), 500);
-    const logs = await db.select().from(auditLogsTable).orderBy(desc(auditLogsTable.createdAt)).limit(limit);
+    const limit = Math.min(parseInt(String(req.query.limit ?? "200"), 10), 500);
+    const companyId = req.query.companyId ? parseInt(String(req.query.companyId), 10) : null;
+
+    let query = db.select().from(auditLogsTable).$dynamic();
+    if (companyId) {
+      query = query.where(eq(auditLogsTable.companyId, companyId));
+    }
+    const logs = await query.orderBy(desc(auditLogsTable.createdAt)).limit(limit);
     res.json(logs.map(l => ({ ...l, createdAt: l.createdAt.toISOString() })));
   } catch (err) {
     req.log.error({ err }, "Error fetching audit logs");

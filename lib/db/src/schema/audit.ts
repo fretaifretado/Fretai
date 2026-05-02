@@ -4,6 +4,7 @@ export const auditLogsTable = pgTable("audit_logs", {
   id: serial("id").primaryKey(),
   userId: integer("user_id"),
   userEmail: text("user_email"),
+  companyId: integer("company_id"),
   action: text("action").notNull(),
   entityType: text("entity_type").notNull(),
   entityId: integer("entity_id"),

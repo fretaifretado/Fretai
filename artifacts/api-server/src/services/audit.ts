@@ -4,6 +4,7 @@ import { auditLogsTable, loginLogsTable } from "@workspace/db/schema";
 export async function logAudit(opts: {
   userId?: number;
   userEmail?: string;
+  companyId?: number;
   action: string;
   entityType: string;
   entityId?: number;
@@ -15,6 +16,7 @@ export async function logAudit(opts: {
     await db.insert(auditLogsTable).values({
       userId: opts.userId,
       userEmail: opts.userEmail,
+      companyId: opts.companyId,
       action: opts.action,
       entityType: opts.entityType,
       entityId: opts.entityId,

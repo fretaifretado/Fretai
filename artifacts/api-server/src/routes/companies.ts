@@ -162,6 +162,7 @@ router.post("/admin/companies/:id/branches", requireAdmin, async (req, res) => {
     await logAudit({
       userId: (auth.sub as number) ?? 0,
       userEmail: auth.email,
+      companyId: parentId,
       action: "create_branch",
       entityType: "company_branch",
       entityId: branch.id,
@@ -288,7 +289,7 @@ router.post("/companies/:id/employees", requireAuth("platform_admin", "cliente_m
     }).returning();
     if (!employee) throw new Error("Erro ao criar funcionário");
     const auth = getAuth(req);
-    await logAudit({ userId: auth.sub as number, userEmail: auth.email, action: "create_employee", entityType: "employee", entityId: employee.id, newValue: { name, cpf: cleanedCpf } });
+    await logAudit({ userId: auth.sub as number, userEmail: auth.email, companyId, action: "create_employee", entityType: "employee", entityId: employee.id, newValue: { name, cpf: cleanedCpf } });
     res.status(201).json(serializeEmployee(employee));
   } catch (err: unknown) {
     const pgErr = err as { code?: string };
@@ -329,6 +330,22 @@ router.put("/companies/:companyId/employees/:id", requireAuth("platform_admin", 
   try {
     const [employee] = await db.update(employeesTable).set(updates).where(eq(employeesTable.id, id)).returning();
     if (!employee) { res.status(404).json({ error: "Funcionário não encontrado" }); return; }
+    const authUpd = getAuth(req);
+    const companyIdUpd = parseInt(req.params.companyId as string, 10);
+    const action = body.status !== undefined && Object.keys(updates).filter(k => k !== "updatedAt").length === 1
+      ? "update_employee_status"
+      : body.address !== undefined || body.phone !== undefined || body.cep !== undefined
+        ? "fix_employee_pending"
+        : "update_employee";
+    await logAudit({
+      userId: authUpd.sub as number,
+      userEmail: authUpd.email,
+      companyId: isNaN(companyIdUpd) ? undefined : companyIdUpd,
+      action,
+      entityType: "employee",
+      entityId: id,
+      newValue: { name: employee.name, status: employee.status, ...Object.fromEntries(Object.entries(body).filter(([k]) => k !== "cpf")) },
+    });
     res.json(serializeEmployee(employee));
   } catch (err) {
     req.log.error({ err }, "Error updating employee");
@@ -339,11 +356,22 @@ router.put("/companies/:companyId/employees/:id", requireAuth("platform_admin", 
 /* ── Funcionários: excluir ── */
 router.delete("/companies/:companyId/employees/:id", requireAuth("platform_admin", "cliente_master", "cliente_subadmin"), async (req, res) => {
   const id = parseInt(req.params.id as string, 10);
+  const companyIdDel = parseInt(req.params.companyId as string, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   try {
     await db.delete(employeeMovementsTable).where(eq(employeeMovementsTable.employeeId, id));
     const [deleted] = await db.delete(employeesTable).where(eq(employeesTable.id, id)).returning();
     if (!deleted) { res.status(404).json({ error: "Funcionário não encontrado" }); return; }
+    const authDel = getAuth(req);
+    await logAudit({
+      userId: authDel.sub as number,
+      userEmail: authDel.email,
+      companyId: isNaN(companyIdDel) ? undefined : companyIdDel,
+      action: "delete_employee",
+      entityType: "employee",
+      entityId: id,
+      newValue: { name: deleted.name },
+    });
     res.json({ ok: true });
   } catch (err) {
     req.log.error({ err }, "Error deleting employee");
@@ -501,6 +529,8 @@ router.post("/me/shifts", requireAuth("cliente_master", "cliente_subadmin"), asy
       tipoEscala: tipoEscala?.trim() ?? "",
     }).returning();
     if (!shift) throw new Error("Erro ao criar turno");
+    const authShift = getAuth(req);
+    await logAudit({ userId: authShift.sub as number, userEmail: authShift.email, companyId: entityId, action: "create_shift", entityType: "shift", entityId: shift.id, newValue: { nome, entrada, saida, tipoEscala } });
     res.status(201).json({ ...shift, createdAt: shift.createdAt.toISOString(), updatedAt: shift.updatedAt.toISOString() });
   } catch (err) {
     req.log.error({ err }, "Error creating shift");
@@ -528,6 +558,7 @@ router.put("/me/shifts/:id", requireAuth("cliente_master", "cliente_subadmin"), 
       .where(eq(companyShiftsTable.id, id))
       .returning();
     if (!shift) { res.status(404).json({ error: "Turno não encontrado" }); return; }
+    await logAudit({ userId: auth.sub as number, userEmail: auth.email, companyId: entityId, action: "update_shift", entityType: "shift", entityId: id, newValue: { nome, entrada, saida, tipoEscala } });
     res.json({ ...shift, createdAt: shift.createdAt.toISOString(), updatedAt: shift.updatedAt.toISOString() });
   } catch (err) {
     req.log.error({ err }, "Error updating shift");
@@ -547,6 +578,7 @@ router.delete("/me/shifts/:id", requireAuth("cliente_master", "cliente_subadmin"
       .where(eq(companyShiftsTable.id, id))
       .returning();
     if (!deleted) { res.status(404).json({ error: "Turno não encontrado" }); return; }
+    await logAudit({ userId: auth.sub as number, userEmail: auth.email, companyId: entityId, action: "delete_shift", entityType: "shift", entityId: id, newValue: { nome: deleted.nome } });
     res.json({ ok: true });
   } catch (err) {
     req.log.error({ err }, "Error deleting shift");
