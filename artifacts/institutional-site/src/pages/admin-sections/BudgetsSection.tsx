@@ -143,10 +143,10 @@ export default function BudgetsSection({ token }: Props) {
               </div>
               <div>
                 <label className="text-sm font-medium text-foreground block mb-1.5">Empresa</label>
-                <Select value={form.companyId} onValueChange={v => setForm(f => ({ ...f, companyId: v }))}>
+                <Select value={form.companyId || "none"} onValueChange={v => setForm(f => ({ ...f, companyId: v === "none" ? "" : v }))}>
                   <SelectTrigger><SelectValue placeholder="Selecione uma empresa (opcional)" /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">Nenhuma</SelectItem>
+                    <SelectItem value="none">Nenhuma</SelectItem>
                     {companies.map(c => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
                   </SelectContent>
                 </Select>
