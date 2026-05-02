@@ -356,17 +356,151 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     return colaboradores.some(c => normalizeCpf(c.cpf) === norm && c.id !== exceptId);
   }
 
+  function getToken(): string | null { return localStorage.getItem("jwt_token"); }
+  function getEntityId(): number | null {
+    const token = getToken();
+    if (!token) return null;
+    const payload = decodeJwt(token);
+    return typeof payload?.entityId === "number" ? payload.entityId : null;
+  }
+
+  function colabToApiBody(c: Omit<Colaborador, "id" | "codigo">, codigo: string, companyId: number) {
+    return {
+      name: c.nome,
+      cpf: normalizeCpf(c.cpf),
+      matricula: c.matricula || "000000",
+      admissionDate: c.inicioOperacao || new Date().toISOString().slice(0, 10),
+      route: c.turno && c.turno !== "—" ? c.turno : null,
+      status: c.status,
+      email: c.email || null,
+      phone: c.telefone ? c.telefone.replace(/\D/g, "") : null,
+      birthDate: c.dataNascimento || c.nascimento || null,
+      address: c.endereco || null,
+      addressNumber: c.numero || null,
+      addressComplement: c.complemento || null,
+      neighborhood: c.bairro || null,
+      city: c.cidade || null,
+      state: c.estado || null,
+      zipCode: c.cep ? c.cep.replace(/\D/g, "") : null,
+      shiftStart: c.horarioEntrada || null,
+      shiftEnd: c.horarioSaida || null,
+      operationStart: c.inicioOperacao || null,
+      valeValue: c.vale && c.vale !== "—" ? c.vale : null,
+      codigo,
+      grupoId: c.grupoId ? String(c.grupoId) : null,
+    };
+  }
+
+  function apiToColab(e: Record<string, unknown>, filiais: Filial[]): Colaborador {
+    const companyId = e.companyId as number;
+    const filial = filiais.find(f => f.id === companyId) ?? null;
+    return {
+      id: e.id as number,
+      nome: (e.name as string) ?? "",
+      cpf: formatCpf((e.cpf as string) ?? ""),
+      email: (e.email as string) ?? "",
+      telefone: formatTelefone((e.phone as string) ?? ""),
+      nascimento: (e.birthDate as string) ?? "",
+      matricula: (e.matricula as string) ?? "",
+      dataNascimento: (e.birthDate as string) ?? "",
+      codigo: (e.codigo as string) ?? `COL-${String(e.id).padStart(4, "0")}`,
+      status: ((e.status as string) ?? "Ativo") as Status,
+      turno: (e.turno as string) ?? "—",
+      local: filial?.nome ?? "",
+      filialId: companyId,
+      endereco: (e.address as string) ?? "",
+      numero: (e.addressNumber as string) ?? "",
+      complemento: (e.addressComplement as string) ?? "",
+      bairro: (e.neighborhood as string) ?? "",
+      cidade: (e.city as string) ?? "",
+      estado: (e.state as string) ?? "",
+      cep: formatCep((e.zipCode as string) ?? ""),
+      horarioEntrada: (e.shiftStart as string) ?? "",
+      horarioSaida: (e.shiftEnd as string) ?? "",
+      inicioOperacao: (e.operationStart as string) ?? "",
+      vale: (e.valeValue as string) ?? "—",
+      grupoId: (e.grupoId as number | null) ?? null,
+    };
+  }
+
   function addColaborador(c: Omit<Colaborador, "id" | "codigo">): boolean {
     if (isCpfDuplicate(c.cpf)) return false;
     const codigo = `COL-${String(colabSeq++).padStart(4, "0")}`;
     const filialId = c.filialId ?? filialAtiva?.id ?? null;
     const local = c.local?.trim() || filialAtiva?.nome || empresaAtiva.nome || "";
     const newId = Date.now() + Math.floor(Math.random() * 1000);
-    setColaboradores(p => [...p, { ...c, id: newId, codigo, filialId, local }]);
+    const newColab: Colaborador = { ...c, id: newId, codigo, filialId, local };
+    setColaboradores(p => [...p, newColab]);
+
+    const token = getToken();
+    const companyId = filialId ?? getEntityId();
+    if (token && companyId) {
+      const API_URL = import.meta.env.VITE_API_URL ?? "";
+      fetch(`${API_URL}/api/companies/${companyId}/employees`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(colabToApiBody(c, codigo, companyId)),
+      })
+        .then(r => r.ok ? r.json() : null)
+        .then((saved: Record<string, unknown> | null) => {
+          if (saved?.id) {
+            setColaboradores(p => p.map(x => x.id === newId ? { ...x, id: saved.id as number } : x));
+          }
+        })
+        .catch(() => {});
+    }
     return true;
   }
-  const updateColaborador = (c: Colaborador) => setColaboradores(p => p.map(x => x.id === c.id ? c : x));
-  const deleteColaborador = (id: number)     => setColaboradores(p => p.filter(x => x.id !== id));
+
+  const updateColaborador = (c: Colaborador) => {
+    setColaboradores(p => p.map(x => x.id === c.id ? c : x));
+    const token = getToken();
+    const companyId = c.filialId ?? getEntityId();
+    if (token && companyId) {
+      const API_URL = import.meta.env.VITE_API_URL ?? "";
+      const body: Record<string, unknown> = {
+        name: c.nome,
+        matricula: c.matricula || "000000",
+        route: c.turno && c.turno !== "—" ? c.turno : null,
+        status: c.status,
+        email: c.email || null,
+        phone: c.telefone ? c.telefone.replace(/\D/g, "") : null,
+        birthDate: c.dataNascimento || c.nascimento || null,
+        address: c.endereco || null,
+        addressNumber: c.numero || null,
+        addressComplement: c.complemento || null,
+        neighborhood: c.bairro || null,
+        city: c.cidade || null,
+        state: c.estado || null,
+        zipCode: c.cep ? c.cep.replace(/\D/g, "") : null,
+        shiftStart: c.horarioEntrada || null,
+        shiftEnd: c.horarioSaida || null,
+        operationStart: c.inicioOperacao || null,
+        valeValue: c.vale && c.vale !== "—" ? c.vale : null,
+        codigo: c.codigo,
+        grupoId: c.grupoId ? String(c.grupoId) : null,
+      };
+      fetch(`${API_URL}/api/companies/${companyId}/employees/${c.id}`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).catch(() => {});
+    }
+  };
+
+  const deleteColaborador = (id: number) => {
+    const c = colaboradoresRef.current.find(x => x.id === id);
+    setColaboradores(p => p.filter(x => x.id !== id));
+    const token = getToken();
+    const companyId = c?.filialId ?? getEntityId();
+    if (token && companyId) {
+      const API_URL = import.meta.env.VITE_API_URL ?? "";
+      fetch(`${API_URL}/api/companies/${companyId}/employees/${id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
+  };
 
   /* ---------------------------- Agendamentos -----------------------------
    * Persistência e source of truth ficam no servidor: tabelas
