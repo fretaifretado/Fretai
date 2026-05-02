@@ -31,12 +31,35 @@ function fakeGeocode(address: string, baseLat = -23.5505, baseLng = -46.6333) {
 /* ─── Nominatim real geocoding (OpenStreetMap) ── */
 const geoCache = new Map<string, { lat: number; lng: number }>();
 
-async function geocodeNominatim(address: string): Promise<{ lat: number; lng: number } | null> {
+/**
+ * Geocode a single address via Nominatim.
+ *
+ * When `viewbox` is supplied (the company destination lat/lng), Nominatim is
+ * constrained to a ±0.4° bounding box (≈ 45 km) around that point with
+ * `bounded=1`.  This prevents the very common case where generic Brazilian
+ * street names (e.g. "Rua XV de Novembro") are resolved to a completely
+ * different city that happens to share the name.
+ */
+async function geocodeNominatim(
+  address: string,
+  viewbox?: { lat: number; lng: number }
+): Promise<{ lat: number; lng: number } | null> {
   if (!address.trim()) return null;
-  const key = address.trim().toLowerCase();
+  // Cache key includes the viewbox so the same address near different companies
+  // can return different results.
+  const vbSuffix = viewbox ? `@${viewbox.lat.toFixed(2)},${viewbox.lng.toFixed(2)}` : "";
+  const key = address.trim().toLowerCase() + vbSuffix;
   if (geoCache.has(key)) return geoCache.get(key)!;
   try {
-    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1&countrycodes=br`;
+    let url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1&countrycodes=br`;
+    if (viewbox) {
+      const delta = 0.4; // ≈ 45 km in each direction
+      const left  = (viewbox.lng - delta).toFixed(6);
+      const right = (viewbox.lng + delta).toFixed(6);
+      const bottom = (viewbox.lat - delta).toFixed(6);
+      const top    = (viewbox.lat + delta).toFixed(6);
+      url += `&viewbox=${left},${bottom},${right},${top}&bounded=1`;
+    }
     const res = await fetch(url, {
       headers: { "User-Agent": "FretaiApp/1.0 (geocoding)" },
       signal: AbortSignal.timeout(8000),
@@ -53,36 +76,38 @@ async function geocodeNominatim(address: string): Promise<{ lat: number; lng: nu
   }
 }
 
-async function geocodeWithFallback(address: string, baseLat: number, baseLng: number): Promise<{ lat: number; lng: number }> {
-  const real = await geocodeNominatim(address);
-  if (real) return real;
-  return fakeGeocode(address, baseLat, baseLng);
-}
-
-/** Rate-limited batch geocoding: 1 request per 1.1s, up to maxItems */
+/** Rate-limited batch geocoding: 1 request per 1.1s, up to maxItems.
+ *
+ * `viewbox` is the company destination coord — passed to every Nominatim call
+ * so that employee addresses are resolved within the correct metro area.
+ */
 async function batchGeocode(
   items: Array<{ id: number; address: string }>,
   baseLat: number,
   baseLng: number,
-  maxItems = 60
+  maxItems = 60,
+  viewbox?: { lat: number; lng: number }
 ): Promise<Map<number, { lat: number; lng: number }>> {
   const result = new Map<number, { lat: number; lng: number }>();
+  // Cache key must include viewbox so same addr near different companies differs
+  const vbSuffix = viewbox ? `@${viewbox.lat.toFixed(2)},${viewbox.lng.toFixed(2)}` : "";
   const uniqueAddrs = new Map<string, { lat: number; lng: number } | null>();
 
   for (const item of items.slice(0, maxItems)) {
-    const key = item.address.trim().toLowerCase();
+    const key = item.address.trim().toLowerCase() + vbSuffix;
     if (!uniqueAddrs.has(key)) uniqueAddrs.set(key, null);
   }
 
   // Geocode unique addresses sequentially with rate limiting
-  for (const addr of uniqueAddrs.keys()) {
-    const r = await geocodeNominatim(addr);
-    uniqueAddrs.set(addr, r ?? fakeGeocode(addr, baseLat, baseLng));
+  for (const [key, _] of uniqueAddrs.entries()) {
+    const addr = key.replace(vbSuffix, "");
+    const r = await geocodeNominatim(addr, viewbox);
+    uniqueAddrs.set(key, r ?? fakeGeocode(addr, baseLat, baseLng));
     await new Promise(resolve => setTimeout(resolve, 1100));
   }
 
   for (const item of items.slice(0, maxItems)) {
-    const key = item.address.trim().toLowerCase();
+    const key = item.address.trim().toLowerCase() + vbSuffix;
     const geo = uniqueAddrs.get(key) ?? fakeGeocode(item.address, baseLat, baseLng);
     result.set(item.id, geo);
   }
@@ -133,10 +158,21 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
 }
 
 /**
- * Greedy radius clustering.
- * Each cluster = one boarding point. Workers within `radiusKm` of the first
- * unclustered worker are grouped together. The boarding point is the centroid
- * of the cluster (workers walk to the nearest boarding point).
+ * MCLP — Maximum Coverage Location Problem (greedy approximation).
+ *
+ * Instead of seeding clusters from individual worker positions (which creates
+ * sub-optimal splits when two workers are just outside each other's radius but
+ * share a natural midpoint), this algorithm:
+ *
+ *  1. Generates CANDIDATE boarding-point locations:
+ *     - Every worker's own position
+ *     - Midpoints between every pair of workers within 2×radius of each other
+ *  2. Picks the candidate that covers the MOST uncovered workers within `radiusKm`
+ *  3. Assigns those workers to a boarding point at that optimal position
+ *  4. Removes them from the unassigned pool and repeats
+ *
+ * This produces fewer, better-placed boarding points compared to the naive
+ * first-worker-seeded approach.
  */
 function clusterByRadius(
   workers: Array<{ id: number; lat: string | null; lng: string | null; address: string | null; name: string }>,
@@ -154,32 +190,110 @@ function clusterByRadius(
     _lng: w.lng ? parseFloat(String(w.lng)) : fallbackLng,
   }));
 
-  const assigned = new Set<number>();
-  const clusters: Array<{ members: Enriched[] }> = [];
+  // Count workers covered by a candidate center position
+  const coverageAt = (lat: number, lng: number, pool: Enriched[]) =>
+    pool.filter(w => haversineKm(lat, lng, w._lat, w._lng) <= radiusKm);
 
-  for (const w of geo) {
-    if (assigned.has(w.id)) continue;
-    const members: Enriched[] = [w];
-    assigned.add(w.id);
+  const unassigned = [...geo];
+  const clusters: Array<{ center: { lat: number; lng: number }; members: Enriched[] }> = [];
 
-    for (const other of geo) {
-      if (assigned.has(other.id)) continue;
-      if (haversineKm(w._lat, w._lng, other._lat, other._lng) <= radiusKm) {
-        members.push(other);
-        assigned.add(other.id);
+  while (unassigned.length > 0) {
+    // Build candidate centers:
+    // a) every worker's own position
+    const candidates: Array<{ lat: number; lng: number }> = unassigned.map(w => ({ lat: w._lat, lng: w._lng }));
+
+    // b) midpoints between pairs within 2×radius (only when dataset is small enough)
+    if (unassigned.length <= 150) {
+      for (let i = 0; i < unassigned.length; i++) {
+        for (let j = i + 1; j < unassigned.length; j++) {
+          const dist = haversineKm(unassigned[i]!._lat, unassigned[i]!._lng, unassigned[j]!._lat, unassigned[j]!._lng);
+          if (dist <= 2 * radiusKm) {
+            candidates.push({
+              lat: (unassigned[i]!._lat + unassigned[j]!._lat) / 2,
+              lng: (unassigned[i]!._lng + unassigned[j]!._lng) / 2,
+            });
+          }
+        }
       }
     }
-    clusters.push({ members });
+
+    // Pick the candidate that covers the most workers
+    let bestCenter = { lat: unassigned[0]!._lat, lng: unassigned[0]!._lng };
+    let bestMembers = coverageAt(bestCenter.lat, bestCenter.lng, unassigned);
+
+    for (const cand of candidates) {
+      const members = coverageAt(cand.lat, cand.lng, unassigned);
+      if (members.length > bestMembers.length) {
+        bestCenter = cand;
+        bestMembers = members;
+      }
+    }
+
+    // Safety: always take at least the first unassigned worker
+    if (bestMembers.length === 0) {
+      bestMembers = [unassigned[0]!];
+      bestCenter = { lat: bestMembers[0]!._lat, lng: bestMembers[0]!._lng };
+    }
+
+    const assignedIds = new Set(bestMembers.map(m => m.id));
+    // Remove assigned workers from pool
+    for (let i = unassigned.length - 1; i >= 0; i--) {
+      if (assignedIds.has(unassigned[i]!.id)) unassigned.splice(i, 1);
+    }
+
+    clusters.push({ center: bestCenter, members: bestMembers });
   }
 
-  return clusters.map(c => {
-    const centLat = c.members.reduce((s, m) => s + m._lat, 0) / c.members.length;
-    const centLng = c.members.reduce((s, m) => s + m._lng, 0) / c.members.length;
-    return {
-      centroid: { lat: parseFloat(centLat.toFixed(7)), lng: parseFloat(centLng.toFixed(7)) },
-      workers: c.members,
-    };
-  });
+  // ── Post-processing: merge clusters whose centers are within 2×radius ────
+  // If cluster A and cluster B are close enough that a single coverage point
+  // can reach ALL members of both, merge them into one boarding point.
+  let merged = true;
+  while (merged) {
+    merged = false;
+    outer:
+    for (let i = 0; i < clusters.length; i++) {
+      for (let j = i + 1; j < clusters.length; j++) {
+        const centerDist = haversineKm(
+          clusters[i]!.center.lat, clusters[i]!.center.lng,
+          clusters[j]!.center.lat, clusters[j]!.center.lng
+        );
+        if (centerDist > 2 * radiusKm) continue;
+
+        const combined = [...clusters[i]!.members, ...clusters[j]!.members];
+        // Try candidate centers: each member's position + midpoints between members
+        const mergeCandidates: Array<{ lat: number; lng: number }> = combined.map(w => ({ lat: w._lat, lng: w._lng }));
+        for (let a = 0; a < combined.length; a++) {
+          for (let b = a + 1; b < combined.length; b++) {
+            mergeCandidates.push({
+              lat: (combined[a]!._lat + combined[b]!._lat) / 2,
+              lng: (combined[a]!._lng + combined[b]!._lng) / 2,
+            });
+          }
+        }
+
+        for (const cand of mergeCandidates) {
+          const allCovered = combined.every(w =>
+            haversineKm(cand.lat, cand.lng, w._lat, w._lng) <= radiusKm
+          );
+          if (allCovered) {
+            // Merge: replace cluster i with the merged cluster, remove j
+            clusters[i] = { center: cand, members: combined };
+            clusters.splice(j, 1);
+            merged = true;
+            break outer;
+          }
+        }
+      }
+    }
+  }
+
+  return clusters.map(c => ({
+    centroid: {
+      lat: parseFloat(c.center.lat.toFixed(7)),
+      lng: parseFloat(c.center.lng.toFixed(7)),
+    },
+    workers: c.members,
+  }));
 }
 
 function budgetToApi(row: {
@@ -524,13 +638,15 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
       : null;
     const companyGeo = companyGeoReal ?? fakeGeocode(budget.destinationAddress ?? "São Paulo");
 
-    // Geocode individual employee addresses (rate-limited, up to 60 unique addresses)
+    // Geocode individual employee addresses (rate-limited, up to 60 unique addresses).
+    // Pass companyGeo as viewbox so Nominatim restricts results to the correct city.
     req.log.info({ budgetId: id }, "Geocodificando endereços dos funcionários via Nominatim...");
     const workerGeoMap = await batchGeocode(
       workers.map(w => ({ id: w.id, address: w.address ?? "" })),
       companyGeo.lat,
       companyGeo.lng,
-      60
+      60,
+      companyGeoReal ? companyGeo : undefined
     );
     // Update workers with real coordinates in DB
     for (const [wid, geo] of workerGeoMap.entries()) {
