@@ -20,6 +20,14 @@ const companyIcon = L.divIcon({
   popupAnchor: [0, -14],
 });
 
+const makeArrowIcon = (color: string) =>
+  L.divIcon({
+    html: `<div style="width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;border-bottom:13px solid ${color};filter:drop-shadow(0 1px 2px rgba(0,0,0,0.4));"></div>`,
+    className: "",
+    iconSize: [14, 13],
+    iconAnchor: [7, 6],
+  });
+
 const makeBoardingIcon = (color: string, size = 12) =>
   L.divIcon({
     html: `<div style="width:${size}px;height:${size}px;background:${color};border:2px solid white;border-radius:50%;box-shadow:0 1px 4px rgba(0,0,0,0.3);"></div>`,
@@ -84,6 +92,8 @@ interface RouteMapProps {
   vehicleLabel: (blockId: number) => string;
 }
 
+type Direction = "ida" | "volta";
+
 async function fetchOsrmRoute(coords: [number, number][]): Promise<[number, number][] | null> {
   if (coords.length < 2) return null;
   const coordStr = coords.map(([lat, lng]) => `${lng},${lat}`).join(";");
@@ -116,6 +126,23 @@ function FitBounds({ routes, companyLat, companyLng }: { routes: MapRoute[]; com
   return null;
 }
 
+/** Extracts mid-route point for direction arrow placement */
+function midPoint(coords: [number, number][]): [number, number] | null {
+  if (coords.length < 2) return null;
+  const mid = Math.floor(coords.length / 2);
+  return coords[mid] ?? null;
+}
+
+/** Returns approx heading (degrees) between two consecutive points */
+function bearing(a: [number, number], b: [number, number]): number {
+  const dLng = (b[1] - a[1]) * (Math.PI / 180);
+  const lat1 = a[0] * (Math.PI / 180);
+  const lat2 = b[0] * (Math.PI / 180);
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
 export function RouteMap({ routes, employees = [], companyLat, companyLng, maxRadiusKm = 1, vehicleLabel }: RouteMapProps) {
   const shifts = useMemo(
     () => [...new Set(routes.map((r) => r.shiftTime).filter(Boolean) as string[])].sort(),
@@ -126,13 +153,15 @@ export function RouteMap({ routes, employees = [], companyLat, companyLng, maxRa
     [routes]
   );
 
+  const [direction, setDirection] = useState<Direction>("ida");
   const [selectedShifts, setSelectedShifts] = useState<Set<string>>(new Set());
   const [selectedBlocks, setSelectedBlocks] = useState<Set<number>>(new Set());
   const [showCircles, setShowCircles] = useState(true);
   const [showEmployees, setShowEmployees] = useState(true);
-  const [roadGeometries, setRoadGeometries] = useState<Map<number, [number, number][]>>(new Map());
+  // Key: "${routeId}-${direction}"
+  const [roadGeometries, setRoadGeometries] = useState<Map<string, [number, number][]>>(new Map());
   const [loadingOsrm, setLoadingOsrm] = useState(false);
-  const fetchedRef = useRef<Set<number>>(new Set());
+  const fetchedRef = useRef<Set<string>>(new Set());
 
   const toggleShift = (s: string) =>
     setSelectedShifts((prev) => {
@@ -173,34 +202,45 @@ export function RouteMap({ routes, employees = [], companyLat, companyLng, maxRa
     return m;
   }, [routes]);
 
+  /** Build ordered coordinate list for a route depending on direction */
+  function routeCoords(route: MapRoute, dir: Direction): [number, number][] {
+    const sorted = [...route.boardingPoints].sort((a, b) => (a.sequenceOrder ?? 0) - (b.sequenceOrder ?? 0));
+    const bpCoords = sorted.map((bp) => [bp.lat, bp.lng] as [number, number]);
+    const company: [number, number] = [companyLat, companyLng];
+    if (dir === "ida") {
+      // Boarding points in order → company
+      return [...bpCoords, company];
+    } else {
+      // Company → boarding points in reverse order
+      return [company, ...[...bpCoords].reverse()];
+    }
+  }
+
   useEffect(() => {
-    const toFetch = visibleRoutes.filter((r) => !fetchedRef.current.has(r.id));
+    const toFetch = visibleRoutes.filter((r) => !fetchedRef.current.has(`${r.id}-${direction}`));
     if (toFetch.length === 0) return;
     setLoadingOsrm(true);
 
     void Promise.all(
       toFetch.map(async (route) => {
-        fetchedRef.current.add(route.id);
-        const sorted = [...route.boardingPoints].sort((a, b) => (a.sequenceOrder ?? 0) - (b.sequenceOrder ?? 0));
-        const coords: [number, number][] = [
-          ...sorted.map((bp) => [bp.lat, bp.lng] as [number, number]),
-          [companyLat, companyLng],
-        ];
+        const key = `${route.id}-${direction}`;
+        fetchedRef.current.add(key);
+        const coords = routeCoords(route, direction);
         const road = await fetchOsrmRoute(coords);
-        return { id: route.id, road };
+        return { key, road };
       })
     ).then((results) => {
       setRoadGeometries((prev) => {
         const next = new Map(prev);
-        for (const { id, road } of results) {
-          if (road) next.set(id, road);
+        for (const { key, road } of results) {
+          if (road) next.set(key, road);
         }
         return next;
       });
       setLoadingOsrm(false);
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleRoutes.map((r) => r.id).join(","), companyLat, companyLng]);
+  }, [visibleRoutes.map((r) => r.id).join(","), companyLat, companyLng, direction]);
 
   const center: [number, number] = [companyLat, companyLng];
   const radiusMeters = maxRadiusKm * 1000;
@@ -209,7 +249,42 @@ export function RouteMap({ routes, employees = [], companyLat, companyLng, maxRa
     <div className="flex gap-3" style={{ height: 620 }}>
       {/* ── Painel de filtros ── */}
       <div className="w-52 shrink-0 bg-white dark:bg-card border rounded-xl p-4 flex flex-col gap-4 overflow-y-auto shadow-sm">
+
+        {/* Direção Ida / Volta */}
         <div>
+          <p className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-2">Direção</p>
+          <div className="flex rounded-lg border overflow-hidden text-sm font-medium">
+            <button
+              className="flex-1 flex items-center justify-center gap-1.5 py-1.5 transition-colors"
+              style={{
+                background: direction === "ida" ? "#3b82f6" : "transparent",
+                color: direction === "ida" ? "white" : undefined,
+              }}
+              onClick={() => setDirection("ida")}
+              title="Ida: pontos de embarque → empresa"
+            >
+              <span>↗</span> Ida
+            </button>
+            <button
+              className="flex-1 flex items-center justify-center gap-1.5 py-1.5 transition-colors border-l"
+              style={{
+                background: direction === "volta" ? "#8b5cf6" : "transparent",
+                color: direction === "volta" ? "white" : undefined,
+              }}
+              onClick={() => setDirection("volta")}
+              title="Volta: empresa → pontos de embarque"
+            >
+              <span>↙</span> Volta
+            </button>
+          </div>
+          <p className="mt-1.5 text-[10px] text-muted-foreground leading-tight">
+            {direction === "ida"
+              ? "Embarque → Empresa"
+              : "Empresa → Embarque"}
+          </p>
+        </div>
+
+        <div className="border-t pt-3">
           <p className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-2">Turno</p>
           <div className="space-y-1">
             {shifts.map((shift) => (
@@ -276,26 +351,48 @@ export function RouteMap({ routes, employees = [], companyLat, companyLng, maxRa
           <FitBounds routes={visibleRoutes} companyLat={companyLat} companyLng={companyLng} />
 
           <Marker position={center} icon={companyIcon}>
-            <Popup><strong>Empresa (Destino)</strong></Popup>
+            <Popup><strong>Empresa (Destino)</strong><br /><span className="text-xs text-gray-500">{direction === "ida" ? "Destino final da ida" : "Ponto de partida da volta"}</span></Popup>
           </Marker>
 
           {visibleRoutes.map((route) => {
-            const color = blockColorHex(route.vehicleBlockId ?? 1);
+            const color = direction === "ida" ? blockColorHex(route.vehicleBlockId ?? 1) : "#8b5cf6";
+            const geoKey = `${route.id}-${direction}`;
             const sorted = [...route.boardingPoints].sort((a, b) => (a.sequenceOrder ?? 0) - (b.sequenceOrder ?? 0));
-            const straightCoords: [number, number][] = [
-              ...sorted.map((bp) => [bp.lat, bp.lng] as [number, number]),
-              [companyLat, companyLng],
-            ];
-            const roadCoords = roadGeometries.get(route.id);
+            const straightCoords = routeCoords(route, direction);
+            const roadCoords = roadGeometries.get(geoKey);
+            const displayCoords = roadCoords ?? straightCoords;
             const bpIcon = makeBoardingIcon(color, 14);
+
+            // Arrow: placed at midpoint of the polyline, rotated to face direction
+            const arrowPos = midPoint(displayCoords);
+            let arrowRotation = 0;
+            if (arrowPos && displayCoords.length >= 2) {
+              const mid = Math.floor(displayCoords.length / 2);
+              const a = displayCoords[mid - 1] ?? displayCoords[0]!;
+              const b2 = displayCoords[mid] ?? displayCoords[displayCoords.length - 1]!;
+              arrowRotation = bearing(a, b2);
+            }
+            const arrowIconEl = L.divIcon({
+              html: `<div style="width:14px;height:14px;transform:rotate(${arrowRotation}deg);transform-origin:center;display:flex;align-items:center;justify-content:center;">
+                <div style="width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:10px solid ${color};filter:drop-shadow(0 1px 2px rgba(0,0,0,0.5));"></div>
+              </div>`,
+              className: "",
+              iconSize: [14, 14],
+              iconAnchor: [7, 7],
+            });
+
+            const bpList = direction === "ida" ? sorted : [...sorted].reverse();
 
             return (
               <Fragment key={route.id}>
                 <Polyline
-                  positions={roadCoords ?? straightCoords}
+                  positions={displayCoords}
                   pathOptions={{ color, weight: roadCoords ? 4 : 2, opacity: 0.85, dashArray: roadCoords ? undefined : "6,5" }}
                 />
-                {sorted.map((bp) => (
+                {arrowPos && (
+                  <Marker position={arrowPos} icon={arrowIconEl} interactive={false} />
+                )}
+                {bpList.map((bp, idx) => (
                   <Fragment key={bp.id}>
                     {showCircles && (
                       <Circle
@@ -309,7 +406,10 @@ export function RouteMap({ routes, employees = [], companyLat, companyLng, maxRa
                         <div className="text-sm space-y-1 min-w-[160px]">
                           <p className="font-semibold">{bp.name}</p>
                           <p className="text-muted-foreground">{bp.passengerCount} passageiro{bp.passengerCount !== 1 ? "s" : ""}</p>
-                          <p className="text-xs" style={{ color }}>{route.name} · Turno {route.shiftTime}</p>
+                          <p className="text-xs" style={{ color }}>
+                            {route.name} · Turno {route.shiftTime}
+                            {" · "}{direction === "ida" ? `Parada ${idx + 1}` : `Retorno ${idx + 1}`}
+                          </p>
                         </div>
                       </Popup>
                     </Marker>
