@@ -252,10 +252,6 @@ export default function ComprasPage() {
       .filter(item => item.dias > 0),
     [colaboradoresElegiveis, turnos, periodoAno, periodoMes, valeDiario]);
 
-  /**
-   * Tracks the last set of collaborator IDs for which we auto-generated.
-   * Resets when collaborators change so a new import triggers re-generation.
-   */
   const autoGeradoParaRef = useRef<string>("");
 
   async function salvarItens(items: PreviewItem[], cid: number): Promise<void> {
@@ -318,29 +314,44 @@ export default function ComprasPage() {
   }
 
   /**
-   * Auto-generates purchases whenever:
-   * - fetch finished and there are no existing orders
-   * - there are eligible collaborators
-   * - we haven't already generated for this exact set of collaborators
+   * Current period label used to detect which orders already exist for this period.
+   * e.g. "Mai/2026"
    */
-  const colaboradoresKey = colaboradoresElegiveis.map(c => c.id).sort().join(",");
+  const periodoLabel = `${MESES_CURTO[periodoMes - 1]}/${periodoAno}`;
+
+  /**
+   * Key representing all eligible collaborator IDs + current period.
+   * Changes whenever collaborators are added/removed or the period changes.
+   */
+  const colaboradoresKey = `${periodoLabel}:${colaboradoresElegiveis.map(c => c.id).sort().join(",")}`;
 
   useEffect(() => {
-    if (
-      !loadingPedidos &&
-      pedidos.length === 0 &&
-      previewItems.length > 0 &&
-      companyId !== null &&
-      autoGeradoParaRef.current !== colaboradoresKey
-    ) {
+    if (loadingPedidos || savingPedidos || companyId === null) return;
+    if (previewItems.length === 0) return;
+    if (autoGeradoParaRef.current === colaboradoresKey) return;
+
+    // IDs dos colaboradores que já têm pedido no período atual
+    const jaGeradosIds = new Set(
+      pedidos
+        .filter(p => p.periodo === periodoLabel && p.colaboradorId > 0)
+        .map(p => p.colaboradorId),
+    );
+
+    // Itens sem pedido ainda
+    const faltando = previewItems.filter(item => !jaGeradosIds.has(item.colaborador.id));
+
+    if (faltando.length === 0) {
       autoGeradoParaRef.current = colaboradoresKey;
-      setSavingPedidos(true);
-      salvarItens(previewItems, companyId)
-        .catch(err => console.error("[compras] auto-geração falhou:", err))
-        .finally(() => setSavingPedidos(false));
+      return;
     }
+
+    autoGeradoParaRef.current = colaboradoresKey;
+    setSavingPedidos(true);
+    salvarItens(faltando, companyId)
+      .catch(err => console.error("[compras] auto-geração falhou:", err))
+      .finally(() => setSavingPedidos(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadingPedidos, pedidos.length, previewItems, companyId, colaboradoresKey]);
+  }, [loadingPedidos, savingPedidos, pedidos, previewItems, companyId, colaboradoresKey, periodoLabel]);
 
   const totalGasto          = pedidos.reduce((a, p) => a + p.total, 0);
   const totalValesHistorico = pedidos.reduce((a, p) => a + p.vales, 0);
