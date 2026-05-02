@@ -2,7 +2,7 @@ import { Router } from "express";
 import bcrypt from "bcryptjs";
 import { db } from "@workspace/db";
 import { companiesTable, usersTable, employeesTable, employeeMovementsTable } from "@workspace/db/schema";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, or, inArray } from "drizzle-orm";
 import { requireAdmin, requireAuth, getAuth } from "../middlewares/auth";
 import { logAudit } from "../services/audit";
 
@@ -217,9 +217,15 @@ router.get("/companies/:id/employees", requireAuth("platform_admin", "cliente_ma
   const id = parseInt(req.params.id as string, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   try {
-    const employees = await db.select().from(employeesTable).where(eq(employeesTable.companyId, id)).orderBy(employeesTable.name);
+    const filiais = await db.select({ id: companiesTable.id }).from(companiesTable).where(eq(companiesTable.parentCompanyId, id));
+    const filialIds = filiais.map(f => f.id);
+    const allIds = [id, ...filialIds];
+    const employees = await db.select().from(employeesTable)
+      .where(allIds.length === 1 ? eq(employeesTable.companyId, id) : inArray(employeesTable.companyId, allIds))
+      .orderBy(employeesTable.name);
     res.json(employees.map(e => ({
       ...e,
+      turno: e.route ?? null,
       admissionDate: e.admissionDate,
       createdAt: e.createdAt?.toISOString?.() ?? e.createdAt,
       updatedAt: e.updatedAt?.toISOString?.() ?? e.updatedAt,
