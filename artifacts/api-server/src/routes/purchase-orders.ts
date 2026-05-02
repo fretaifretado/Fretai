@@ -175,4 +175,35 @@ router.post(
   },
 );
 
+/* ── Admin: listar pedidos de compra de uma empresa ── */
+router.get(
+  "/admin/companies/:id/purchase-orders",
+  requireAuth("platform_admin"),
+  async (req, res) => {
+    const companyId = parseInt(req.params.id as string, 10);
+    if (isNaN(companyId)) {
+      res.status(400).json({ error: "ID inválido" });
+      return;
+    }
+    try {
+      const orders = await db
+        .select()
+        .from(purchaseOrdersTable)
+        .where(eq(purchaseOrdersTable.companyId, companyId))
+        .orderBy(desc(purchaseOrdersTable.createdAt));
+      res.json(
+        orders.map(o => ({
+          ...o,
+          valorUnit: o.valorUnit,
+          total: o.total,
+          createdAt: o.createdAt?.toISOString?.() ?? o.createdAt,
+        })),
+      );
+    } catch (err) {
+      req.log.error({ err }, "Admin: error listing purchase orders");
+      res.status(500).json({ error: "Erro interno" });
+    }
+  },
+);
+
 export default router;

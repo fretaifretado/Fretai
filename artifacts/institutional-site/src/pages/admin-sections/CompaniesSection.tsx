@@ -2,6 +2,7 @@ import { Fragment, useState, useEffect, useCallback } from "react";
 import { Building2, Plus, Trash2, X, Check, AlertCircle, Search, User, GitBranch, ChevronRight, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import CompanyDetailPanel from "./CompanyDetailPanel";
 
 interface Company {
   id: number;
@@ -55,6 +56,9 @@ export default function CompaniesSection({ token }: Props) {
   const [formLoading, setFormLoading] = useState(false);
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [createdInfo, setCreatedInfo] = useState<{ email: string; password: string } | null>(null);
+
+  /* detail panel */
+  const [detailCompany, setDetailCompany] = useState<Company | null>(null);
 
   /* branch (filial) state */
   const [branchParent, setBranchParent] = useState<Company | null>(null);
@@ -268,6 +272,15 @@ export default function CompaniesSection({ token }: Props) {
                         <td className="px-5 py-3.5 text-muted-foreground text-xs">{new Date(company.createdAt).toLocaleDateString("pt-BR")}</td>
                         <td className="px-5 py-3.5">
                           <div className="flex items-center gap-1 justify-end">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 gap-1.5 px-2 text-xs text-accent hover:text-accent/80 font-semibold"
+                              onClick={() => setDetailCompany(company)}
+                              title="Ver painel da empresa"
+                            >
+                              <ChevronRight size={13} />Ver painel
+                            </Button>
                             {deleteId === company.id ? (
                               <>
                                 <Button size="sm" variant="destructive" className="h-7 px-2 text-xs" onClick={() => handleDelete(company.id)}>
@@ -562,6 +575,15 @@ export default function CompaniesSection({ token }: Props) {
             </form>
           </div>
         </div>
+      )}
+
+      {/* Company Detail Panel */}
+      {detailCompany && (
+        <CompanyDetailPanel
+          company={detailCompany}
+          token={token}
+          onClose={() => setDetailCompany(null)}
+        />
       )}
     </div>
   );

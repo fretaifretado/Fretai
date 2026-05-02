@@ -54,6 +54,7 @@ function Router() {
           <Switch>
             <Route path="/painel"                       component={DashboardPage} />
             <Route path="/painel/relatorios"            component={DashboardPage} />
+            {/* alias kept for back-compat, renders main dashboard */}
             <Route path="/painel/colaboradores"         component={ColaboradoresPage} />
             <Route path="/painel/movimentacao"          component={MovimentacaoPage} />
             <Route path="/painel/pendencias"            component={PendenciasPage} />

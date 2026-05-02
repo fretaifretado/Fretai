@@ -161,6 +161,24 @@ async function listAgendamentos(companyId: number): Promise<AgendamentoApi[]> {
   }));
 }
 
+/* ── Admin: listar agendamentos de uma empresa ── */
+router.get("/admin/companies/:id/scheduled-movements",
+  requireAuth("platform_admin"),
+  async (req, res) => {
+    const companyId = parseInt(req.params.id as string, 10);
+    if (isNaN(companyId)) {
+      res.status(400).json({ error: "ID inválido" }); return;
+    }
+    try {
+      await advanceStatesForCompany(companyId);
+      const list = await listAgendamentos(companyId);
+      res.json(list);
+    } catch (err) {
+      req.log.error({ err }, "Admin: error listing scheduled movements");
+      res.status(500).json({ error: "Erro interno" });
+    }
+  });
+
 /* ---------- Listar ---------- */
 router.get("/me/scheduled-movements",
   requireAuth("cliente_master", "cliente_subadmin"),
