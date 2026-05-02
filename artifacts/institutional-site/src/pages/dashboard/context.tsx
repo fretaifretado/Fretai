@@ -315,27 +315,41 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       parentCompanyId: number | null;
       tipo: "matriz" | "filial";
     }
-    fetch(`${API_URL}/api/me/branches`, { headers })
-      .then(res => {
-        if (res.status === 401) { handleUnauthorized(); return null; }
-        return res.ok ? res.json() : null;
-      })
-      .then((branches: BranchApi[] | null) => {
-        if (!branches || !Array.isArray(branches)) return;
-        const mapped: Filial[] = branches.map(b => ({
-          id: b.id,
-          empresaId: b.parentCompanyId ?? b.id,
-          tipo: b.tipo,
-          nome: b.name,
-          cidade: b.city ?? "",
-          estado: b.state ?? "",
-          cnpj: b.cnpj,
-        }));
-        setFiliais(mapped);
-        const matriz = mapped.find(m => m.tipo === "matriz") ?? mapped[0];
-        if (matriz) setFilialAtiva(matriz);
-      })
-      .catch(err => console.error("[dashboard] erro ao carregar filiais:", err));
+
+    async function loadData() {
+      let loadedFiliais: Filial[] = [];
+      try {
+        const brRes = await fetch(`${API_URL}/api/me/branches`, { headers });
+        if (brRes.status === 401) { handleUnauthorized(); return; }
+        if (brRes.ok) {
+          const branches: BranchApi[] = await brRes.json();
+          const mapped: Filial[] = branches.map(b => ({
+            id: b.id,
+            empresaId: b.parentCompanyId ?? b.id,
+            tipo: b.tipo,
+            nome: b.name,
+            cidade: b.city ?? "",
+            estado: b.state ?? "",
+            cnpj: b.cnpj,
+          }));
+          loadedFiliais = mapped;
+          setFiliais(mapped);
+          const matriz = mapped.find(m => m.tipo === "matriz") ?? mapped[0];
+          if (matriz) setFilialAtiva(matriz);
+        }
+      } catch (err) { console.error("[dashboard] erro ao carregar filiais:", err); }
+
+      try {
+        const empRes = await fetch(`${API_URL}/api/me/employees`, { headers });
+        if (empRes.status === 401) { handleUnauthorized(); return; }
+        if (empRes.ok) {
+          const employees: Record<string, unknown>[] = await empRes.json();
+          setColaboradores(employees.map(e => apiToColab(e, loadedFiliais)));
+        }
+      } catch (err) { console.error("[dashboard] erro ao carregar colaboradores:", err); }
+    }
+
+    void loadData();
   }, []);
 
   const addFilial    = (f: Omit<Filial, "id">) => setFiliais(p => [...p, { ...f, id: Date.now() }]);
