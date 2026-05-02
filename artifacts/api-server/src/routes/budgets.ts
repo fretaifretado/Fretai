@@ -119,6 +119,69 @@ function addressKey(address: string): string {
   return address.toLowerCase().replace(/[^a-z0-9]/g, "").substring(0, 24);
 }
 
+/* ─── Geospatial helpers ─────────────────────────────────────────────────── */
+
+/** Haversine distance in km between two lat/lng points */
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLng = (lng2 - lng1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/**
+ * Greedy radius clustering.
+ * Each cluster = one boarding point. Workers within `radiusKm` of the first
+ * unclustered worker are grouped together. The boarding point is the centroid
+ * of the cluster (workers walk to the nearest boarding point).
+ */
+function clusterByRadius(
+  workers: Array<{ id: number; lat: string | null; lng: string | null; address: string | null; name: string }>,
+  radiusKm: number,
+  fallbackLat: number,
+  fallbackLng: number
+): Array<{
+  centroid: { lat: number; lng: number };
+  workers: typeof workers;
+}> {
+  type Enriched = (typeof workers)[0] & { _lat: number; _lng: number };
+  const geo: Enriched[] = workers.map(w => ({
+    ...w,
+    _lat: w.lat ? parseFloat(String(w.lat)) : fallbackLat,
+    _lng: w.lng ? parseFloat(String(w.lng)) : fallbackLng,
+  }));
+
+  const assigned = new Set<number>();
+  const clusters: Array<{ members: Enriched[] }> = [];
+
+  for (const w of geo) {
+    if (assigned.has(w.id)) continue;
+    const members: Enriched[] = [w];
+    assigned.add(w.id);
+
+    for (const other of geo) {
+      if (assigned.has(other.id)) continue;
+      if (haversineKm(w._lat, w._lng, other._lat, other._lng) <= radiusKm) {
+        members.push(other);
+        assigned.add(other.id);
+      }
+    }
+    clusters.push({ members });
+  }
+
+  return clusters.map(c => {
+    const centLat = c.members.reduce((s, m) => s + m._lat, 0) / c.members.length;
+    const centLng = c.members.reduce((s, m) => s + m._lng, 0) / c.members.length;
+    return {
+      centroid: { lat: parseFloat(centLat.toFixed(7)), lng: parseFloat(centLng.toFixed(7)) },
+      workers: c.members,
+    };
+  });
+}
+
 function budgetToApi(row: {
   id: number; name: string; algorithm: string | null; companyId: number | null;
   status: string; destinationAddress: string | null; maxWalkingRadiusKm: string | null;
@@ -514,7 +577,12 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
     const routesToInsert: RouteInsert[] = [];
     type BPInsert = { budgetId: number; routeId: number; name: string; lat: string; lng: string; passengerCount: number; sequenceOrder: number };
     const bpsToInsert: BPInsert[] = [];
-    const workerBPUpdates: { workerId: number; bpId?: number }[] = [];
+
+    // Structured tracking: for each route, the worker IDs per cluster (by bp insert index)
+    // routeCluster[i] = { bpInsertIdx, workerIds[] } for route i
+    const routeClusters: Array<Array<{ bpInsertIdx: number; workerIds: number[] }>> = [];
+
+    const radiusKm = parseFloat(String(budget.maxWalkingRadiusKm ?? "1.0"));
 
     for (const shiftTime of sortedShifts) {
       const group = shiftGroups.get(shiftTime)!;
@@ -539,17 +607,13 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
 
         // Step 1: largest vehicle achieving ≥90% occupancy
         const ideal = vehicleTypes.find(v => n >= Math.ceil(v.capacity * MIN_OCCUPANCY));
-
-        // Step 3: smallest vehicle that physically fits ALL remaining (may be < 90%)
+        // Step 2/3: smallest vehicle that physically fits ALL remaining (may be < 90%)
         const consolidation = [...vehicleTypes].reverse().find(v => v.capacity >= n);
 
         let chosen: typeof vehicleTypes[0];
         if (!ideal) {
-          // No vehicle reaches 90% → consolidate into smallest that fits, or largest available
           chosen = consolidation ?? vehicleTypes[vehicleTypes.length - 1]!;
         } else if (n > ideal.capacity && consolidation && n <= consolidation.capacity) {
-          // Step 2: ideal would need multiple trips but a single consolidation vehicle fits all
-          // → prefer the one trip (logistics wins over the 90% rule for this remainder)
           chosen = consolidation;
         } else {
           chosen = ideal;
@@ -563,139 +627,113 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
         for (const [bid, freeMins] of freeBlockAt.entries()) {
           const diff = Math.abs(freeMins - shiftMins);
           const diffWrapped = Math.min(diff, 1440 - diff);
-          if (diffWrapped <= 30) {
-            assignedBlock = bid;
-            break;
-          }
+          if (diffWrapped <= 30) { assignedBlock = bid; break; }
         }
-        if (assignedBlock === -1) {
-          assignedBlock = nextBlockId++;
-        }
+        if (assignedBlock === -1) assignedBlock = nextBlockId++;
 
-        // Estimate route
-        const addrGroups = new Map<string, typeof batch>();
-        for (const w of batch) {
-          const key = addressKey(w.address);
-          if (!addrGroups.has(key)) addrGroups.set(key, []);
-          addrGroups.get(key)!.push(w);
-        }
+        // ── Cluster workers into boarding points by walking radius ──────────
+        // Workers within `radiusKm` of each other share a boarding point
+        // (centroid of the cluster). Vehicles stop at the boarding point —
+        // passengers walk to it instead of being picked up at home.
+        const boardingClusters = clusterByRadius(batch, radiusKm, companyGeo.lat, companyGeo.lng);
 
-        const numStops = Math.max(1, addrGroups.size);
-        const distKm = parseFloat((0.8 + numStops * 1.2).toFixed(2));
-        const durationMins = Math.round(10 + numStops * 8 + distKm * 2.5);
+        // Route distance: sum of haversine legs between consecutive boarding points
+        // plus the final leg to the company destination
+        let distKm = 0;
+        const pts = [...boardingClusters.map(c => c.centroid), companyGeo];
+        for (let i = 0; i < pts.length - 1; i++) {
+          distKm += haversineKm(pts[i]!.lat, pts[i]!.lng, pts[i + 1]!.lat, pts[i + 1]!.lng);
+        }
+        distKm = parseFloat(Math.max(1.0, distKm * 1.4).toFixed(2));
+
+        const numStops = boardingClusters.length;
+        const durationMins = Math.round(10 + numStops * 5 + distKm * 2.0);
         const costPerKm = parseFloat(String(chosen.costPerKm ?? "3.50"));
         const fixedCost = parseFloat(String(chosen.fixedCost ?? "80.00"));
         const totalCost = (distKm * costPerKm + fixedCost).toFixed(2);
         const occupancy = ((batch.length / chosen.capacity) * 100).toFixed(2);
 
-        // Mark block free at shift end + duration
         freeBlockAt.set(assignedBlock, shiftEndMins + durationMins);
 
+        // Record route index before pushing (used for cluster→route mapping)
+        const routeInsertIdx = routesToInsert.length;
         routesToInsert.push({
           budgetId: id,
           name: `Rota ${shiftTime} - Veículo ${assignedBlock}`,
-          shiftTime,
-          vehicleBlockId: assignedBlock,
-          totalPassengers: batch.length,
-          totalDistanceKm: String(distKm),
-          estimatedMinutes: durationMins,
-          occupancyPct: occupancy,
-          totalCost,
+          shiftTime, vehicleBlockId: assignedBlock,
+          totalPassengers: batch.length, totalDistanceKm: String(distKm),
+          estimatedMinutes: durationMins, occupancyPct: occupancy, totalCost,
           vehicleAssignments: [{ vehicleType: chosen.type, count: 1, capacity: chosen.capacity }],
         });
 
-        // Create boarding points
+        // One boarding point per cluster; track exact worker IDs per cluster
+        const thisRouteClusters: Array<{ bpInsertIdx: number; workerIds: number[] }> = [];
         let seq = 1;
-        for (const [, clusterWorkers] of addrGroups.entries()) {
-          const sampleAddr = clusterWorkers[0]?.address ?? "";
-          const sampleWorkerId = clusterWorkers[0]?.id;
-          const realGeo = sampleWorkerId ? workerGeoMap.get(sampleWorkerId) : null;
-          const geo = realGeo ?? (sampleAddr
-            ? fakeGeocode(sampleAddr, companyGeo.lat, companyGeo.lng)
-            : { lat: companyGeo.lat + 0.01 * seq, lng: companyGeo.lng });
+        for (const cluster of boardingClusters) {
+          const label = cluster.workers[0]?.address?.split(",").slice(0, 2).join(",").trim()
+            ?? `Ponto de Embarque ${seq}`;
+          const bpInsertIdx = bpsToInsert.length;
           bpsToInsert.push({
             budgetId: id,
-            routeId: -1, // will fill after insert
-            name: sampleAddr ? sampleAddr.substring(0, 50) : `Ponto ${seq}`,
-            lat: String(geo.lat),
-            lng: String(geo.lng),
-            passengerCount: clusterWorkers.length,
+            routeId: -1,          // filled after route DB insert
+            name: label.substring(0, 80),
+            lat: String(cluster.centroid.lat),
+            lng: String(cluster.centroid.lng),
+            passengerCount: cluster.workers.length,
             sequenceOrder: seq++,
           });
-          for (const w of clusterWorkers) {
-            workerBPUpdates.push({ workerId: w.id, bpId: undefined });
-          }
+          thisRouteClusters.push({
+            bpInsertIdx,
+            workerIds: cluster.workers.map(w => w.id),
+          });
         }
+        routeClusters[routeInsertIdx] = thisRouteClusters;
       }
     }
 
-    // Insert routes
+    // ── Insert routes ───────────────────────────────────────────────────────
     if (routesToInsert.length === 0) { res.status(400).json({ error: "Nenhuma rota gerada" }); return; }
     const insertedRoutes = await db.insert(budgetRoutesTable).values(routesToInsert).returning();
 
-    // Map routeId by position
-    let routeIdx = 0;
-    let bpOffset = 0;
-    for (const _ of routesToInsert) {
-      const route = insertedRoutes[routeIdx++]!;
-      const addrKey = addressKey(routesToInsert[routeIdx - 1]?.name ?? "");
-      const numBps = [...new Set(
-        (shiftGroups.get(routesToInsert[routeIdx - 1]?.shiftTime ?? "") ?? [])
-          .slice(0, routesToInsert[routeIdx - 1]?.totalPassengers ?? 0)
-          .map(w => addressKey(w.address))
-      )].length || 1;
-
-      for (let i = bpOffset; i < bpOffset + numBps && i < bpsToInsert.length; i++) {
-        bpsToInsert[i]!.routeId = route.id;
-      }
-      bpOffset += numBps;
-      void addrKey;
-    }
-
-    // Re-assign routeId properly — rebuild mapping
-    {
-      let rIdx = 0;
-      let bpIdx = 0;
-      for (const route of routesToInsert) {
-        const insertedRoute = insertedRoutes[rIdx++]!;
-        const addrSet = new Set<string>();
-        const shiftWorkers = shiftGroups.get(route.shiftTime ?? "") ?? [];
-        for (const w of shiftWorkers.slice(0, route.totalPassengers)) addrSet.add(addressKey(w.address));
-        const cnt = Math.max(1, addrSet.size);
-        for (let k = 0; k < cnt && bpIdx < bpsToInsert.length; k++, bpIdx++) {
-          bpsToInsert[bpIdx]!.routeId = insertedRoute.id;
-        }
+    // Fill in real routeId for each BP using the cluster index map
+    for (let rIdx = 0; rIdx < insertedRoutes.length; rIdx++) {
+      const route = insertedRoutes[rIdx]!;
+      const clusters = routeClusters[rIdx] ?? [];
+      for (const cluster of clusters) {
+        bpsToInsert[cluster.bpInsertIdx]!.routeId = route.id;
       }
     }
 
-    // Insert boarding points
+    // ── Insert boarding points ──────────────────────────────────────────────
     const validBps = bpsToInsert.filter(bp => bp.routeId > 0);
-    let insertedBPs: typeof validBps & { id: number }[] = [];
+    let insertedBPs: Array<typeof validBps[0] & { id: number }> = [];
     if (validBps.length > 0) {
       insertedBPs = await db.insert(budgetBoardingPointsTable).values(validBps).returning() as typeof insertedBPs;
     }
 
-    // Update worker boardingPointIds: assign each worker to a BP in their route
-    const bpsByRoute2 = new Map<number, (typeof insertedBPs[0])[]>();
-    for (const bp of insertedBPs) {
-      if (!bpsByRoute2.has(bp.routeId)) bpsByRoute2.set(bp.routeId, []);
-      bpsByRoute2.get(bp.routeId)!.push(bp);
+    // Build a map from bpInsertIdx → inserted BP id
+    // We need to reconcile validBps (filtered) indices back to bpsToInsert indices
+    const bpInsertIdxToId = new Map<number, number>();
+    {
+      let vIdx = 0;
+      for (let i = 0; i < bpsToInsert.length; i++) {
+        if ((bpsToInsert[i]?.routeId ?? -1) > 0) {
+          const inserted = insertedBPs[vIdx++];
+          if (inserted) bpInsertIdxToId.set(i, inserted.id);
+        }
+      }
     }
 
-    for (const route of insertedRoutes) {
-      const bpsForRoute = bpsByRoute2.get(route.id) ?? [];
-      if (bpsForRoute.length === 0) continue;
-      const shiftWorkers = (shiftGroups.get(route.shiftTime ?? "") ?? []).slice(0, route.totalPassengers);
-      const addrToBP = new Map<string, number>();
-      for (const bp of bpsForRoute) addrToBP.set(bp.name.substring(0, 50), bp.id);
-
-      let bpIter = 0;
-      for (const w of shiftWorkers) {
-        const addrMatch = w.address.substring(0, 50);
-        let bpId = addrToBP.get(addrMatch) ?? bpsForRoute[bpIter % bpsForRoute.length]?.id;
-        bpIter++;
-        if (bpId) {
-          await db.update(budgetWorkersTable).set({ boardingPointId: bpId }).where(eq(budgetWorkersTable.id, w.id));
+    // ── Assign boardingPointId to each worker using exact cluster membership ─
+    for (let rIdx = 0; rIdx < insertedRoutes.length; rIdx++) {
+      const clusters = routeClusters[rIdx] ?? [];
+      for (const cluster of clusters) {
+        const bpId = bpInsertIdxToId.get(cluster.bpInsertIdx);
+        if (!bpId) continue;
+        for (const wid of cluster.workerIds) {
+          await db.update(budgetWorkersTable)
+            .set({ boardingPointId: bpId })
+            .where(eq(budgetWorkersTable.id, wid));
         }
       }
     }
