@@ -2,7 +2,7 @@ import { Router } from "express";
 import bcrypt from "bcryptjs";
 import { db } from "@workspace/db";
 import { companiesTable, usersTable, employeesTable, employeeMovementsTable, companyShiftsTable } from "@workspace/db/schema";
-import { eq, desc, or, inArray } from "drizzle-orm";
+import { eq, desc, or, inArray, isNull } from "drizzle-orm";
 import { requireAdmin, requireAuth, getAuth } from "../middlewares/auth";
 import { logAudit } from "../services/audit";
 
@@ -11,10 +11,12 @@ const router = Router();
 function cleanCnpj(v: string) { return v.replace(/\D/g, ""); }
 function cleanCpf(v: string) { return v.replace(/\D/g, ""); }
 
-/* ── Administrador: listar empresas ── */
+/* ── Administrador: listar empresas (apenas raiz — sem parentCompanyId) ── */
 router.get("/admin/companies", requireAdmin, async (req, res) => {
   try {
-    const companies = await db.select().from(companiesTable).orderBy(desc(companiesTable.createdAt));
+    const companies = await db.select().from(companiesTable)
+      .where(isNull(companiesTable.parentCompanyId))
+      .orderBy(desc(companiesTable.createdAt));
     res.json(companies.map(c => ({
       ...c,
       createdAt: c.createdAt?.toISOString?.() ?? c.createdAt,
