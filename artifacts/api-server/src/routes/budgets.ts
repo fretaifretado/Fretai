@@ -36,7 +36,7 @@ router.get("/admin/budgets", requireAdmin, async (req, res) => {
 });
 
 router.post("/admin/budgets", requireAdmin, async (req, res) => {
-  const { name, algorithm, companyId, status } = req.body as Record<string, string | undefined>;
+  const { name, algorithm, companyId, status, destinationAddress, maxWalkingRadiusKm, maxTravelTimeMin } = req.body as Record<string, string | undefined>;
   if (!name) { res.status(400).json({ error: "Nome é obrigatório" }); return; }
   try {
     const [row] = await db.insert(budgetsTable).values({
@@ -44,6 +44,9 @@ router.post("/admin/budgets", requireAdmin, async (req, res) => {
       algorithm: algorithm ?? "maior_ocupacao",
       companyId: companyId ? parseInt(companyId, 10) : null,
       status: status ?? "rascunho",
+      destinationAddress: destinationAddress?.trim() ?? null,
+      maxWalkingRadiusKm: maxWalkingRadiusKm ?? "2",
+      maxTravelTimeMin: maxTravelTimeMin ? parseInt(maxTravelTimeMin, 10) : 120,
     }).returning();
     res.status(201).json({ ...row, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() });
   } catch (err) {
