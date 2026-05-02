@@ -436,15 +436,9 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
       ];
     }
 
-    // Sort by strategy
-    if (strategy === "min_cost") {
-      vehicleTypes.sort((a, b) => parseFloat(String(a.costPerKm ?? "999")) - parseFloat(String(b.costPerKm ?? "999")));
-    } else if (strategy === "min_vehicles" || strategy === "maior_ocupacao") {
-      vehicleTypes.sort((a, b) => b.capacity - a.capacity);
-    } else {
-      // max_occupancy: prefer smaller vehicles that fit best
-      vehicleTypes.sort((a, b) => a.capacity - b.capacity);
-    }
+    // Always sort descending by capacity (largest first) — algorithm fills largest possible
+    // maintaining ≥90% occupancy, downsizing only when needed for the remainder
+    vehicleTypes.sort((a, b) => b.capacity - a.capacity);
 
     // Clear existing routes/bps
     await db.delete(budgetBoardingPointsTable).where(eq(budgetBoardingPointsTable.budgetId, id));
@@ -528,18 +522,39 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
       const endTime = shiftEndMap.get(shiftTime);
       const shiftEndMins = endTime ? timeToMins(endTime) : shiftMins + 480;
 
-      // Bin-pack workers into vehicles
+      // Bin-pack workers into vehicles: largest-first, minimum 90% occupancy
+      //
+      // Rules (applied in order):
+      // 1. Find the LARGEST vehicle where remaining >= ceil(capacity × 0.90)
+      //    → this vehicle will be filled to ≥90% occupancy
+      // 2. If using that vehicle would need multiple trips BUT a single consolidation
+      //    vehicle exists that fits all remaining in ONE trip, prefer consolidation
+      //    (fewer routes = better logistics, even if occupancy dips below 90%)
+      // 3. If no vehicle can achieve 90%, fall back to the smallest vehicle that
+      //    fits all remaining passengers (last-resort single trip)
+      const MIN_OCCUPANCY = 0.90;
       let remaining = [...group];
       while (remaining.length > 0) {
-        // Pick vehicle type based on strategy
-        let chosen = vehicleTypes[0];
-        if (strategy === "max_occupancy") {
-          // Find smallest vehicle that fits
-          const fit = vehicleTypes.filter(v => v.capacity >= remaining.length);
-          chosen = fit.length > 0 ? fit[fit.length - 1] : vehicleTypes[vehicleTypes.length - 1];
+        const n = remaining.length;
+
+        // Step 1: largest vehicle achieving ≥90% occupancy
+        const ideal = vehicleTypes.find(v => n >= Math.ceil(v.capacity * MIN_OCCUPANCY));
+
+        // Step 3: smallest vehicle that physically fits ALL remaining (may be < 90%)
+        const consolidation = [...vehicleTypes].reverse().find(v => v.capacity >= n);
+
+        let chosen: typeof vehicleTypes[0];
+        if (!ideal) {
+          // No vehicle reaches 90% → consolidate into smallest that fits, or largest available
+          chosen = consolidation ?? vehicleTypes[vehicleTypes.length - 1]!;
+        } else if (n > ideal.capacity && consolidation && n <= consolidation.capacity) {
+          // Step 2: ideal would need multiple trips but a single consolidation vehicle fits all
+          // → prefer the one trip (logistics wins over the 90% rule for this remainder)
+          chosen = consolidation;
         } else {
-          chosen = vehicleTypes[0];
+          chosen = ideal;
         }
+
         const batchSize = Math.min(chosen.capacity, remaining.length);
         const batch = remaining.splice(0, batchSize);
 
