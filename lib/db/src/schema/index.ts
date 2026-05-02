@@ -9,3 +9,5 @@ export * from "./purchase_orders";
 export * from "./company_shifts";
 export * from "./vehicle_types";
 export * from "./budgets";
+export * from "./budget_employees";
+export * from "./budget_route_vehicles";

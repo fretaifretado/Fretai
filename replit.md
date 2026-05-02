@@ -67,6 +67,26 @@ A página `/painel/compras` gera e exibe o histórico de pedidos de vale-transpo
 - O frontend carrega os pedidos via `useEffect` quando `filialAtiva` está disponível
 - Ao confirmar a prévia, os pedidos são enviados ao servidor antes de atualizar o estado local
 
+## Módulo de Orçamentos (Admin)
+
+- **Tabelas DB**: `budgets`, `budget_employees`, `budget_route_vehicles`, `vehicle_types`
+- **Endpoints**:
+  - `GET/POST /api/admin/budgets` — listar / criar orçamentos
+  - `GET /api/admin/budgets/:id` — detalhe de um orçamento
+  - `PUT/DELETE /api/admin/budgets/:id` — atualizar / excluir
+  - `GET /api/admin/budgets/:id/employees` — listar funcionários
+  - `POST /api/admin/budgets/:id/employees` — adicionar 1 funcionário
+  - `POST /api/admin/budgets/:id/employees/import` — importar CSV (body: `{employees:[{name,address,shift}]}`)
+  - `DELETE /api/admin/budgets/:id/employees/:empId` — remover funcionário
+  - `DELETE /api/admin/budgets/:id/employees` — limpar todos
+  - `POST /api/admin/budgets/:id/process` — processa rotas (cria `budget_route_vehicles`, muda status para "pronto")
+  - `GET /api/admin/budgets/:id/route-vehicles` — listar veículos gerados
+- **Frontend** (`BudgetsSection.tsx`): 3 views (list / new / detail). Detail tem 4 abas:
+  - **Visão Geral**: 4 KPI cards + Parâmetros + Frota Utilizada + Roteiro Diário por Veículo (após processamento)
+  - **Funcionários**: upload CSV, adição manual, listagem com delete por linha ou limpeza total
+  - **Rotas**: tabela de veículos com ocupação e "Reprocessar"
+  - **Mapa Visual**: placeholder
+
 ## Key Files
 
 - `artifacts/institutional-site/src/pages/dashboard/context.tsx` — contexto global do dashboard (empresas, filiais, colaboradores)
