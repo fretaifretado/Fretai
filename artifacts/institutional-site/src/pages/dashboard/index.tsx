@@ -1,15 +1,29 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import DashboardLayout from "./layout";
 import { useDashboard } from "./context";
 import {
   Users, TrendingUp, CalendarDays, ChevronLeft, ChevronRight,
   ArrowUpRight, Info, BarChart2, TrendingDown, DollarSign, Calendar,
-  Building2, Filter,
+  Building2, Filter, CheckCircle2, XCircle, FileSpreadsheet,
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
   PieChart, Pie, Cell, LineChart, Line,
 } from "recharts";
+
+const API_URL = import.meta.env.VITE_API_URL ?? "";
+function getAuthHeaders(): HeadersInit {
+  const token = localStorage.getItem("jwt_token") ?? "";
+  return { Authorization: `Bearer ${token}` };
+}
+
+interface PedidoApi {
+  id: number;
+  employeeId: number | null;
+  vales: number;
+  total: string;
+  status: "Processando" | "Aprovado" | "Cancelado";
+}
 
 function StatCard({ label, value, sub, trend }: { label: string; value: number | string; sub?: string; trend?: "up" | "down" | "neutral" }) {
   return (
@@ -50,14 +64,37 @@ function fmt(v: number) {
   return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
 
+const MESES_CURTO = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
+
+function normalizeTurnoKey(name: string) {
+  return (name || "").toLowerCase().replace(/\s+/g, "");
+}
+
 export default function DashboardPage() {
-  const { colaboradoresDaFilial: colaboradores, colaboradores: todosColaboradores, filiais, empresaAtiva } = useDashboard();
+  const { colaboradoresDaFilial: colaboradores, colaboradores: todosColaboradores, filiais, empresaAtiva, turnos, filialAtiva } = useDashboard();
 
   const today    = new Date();
   const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1);
   const [futureDate, setFutureDate] = useState<Date>(() => {
     const d = new Date(); d.setDate(d.getDate() + 7); return d;
   });
+
+  /* ── purchase orders para os cards de relatório ── */
+  const [pedidos, setPedidos] = useState<PedidoApi[]>([]);
+  const [loadingPedidos, setLoadingPedidos] = useState(false);
+  const companyId = filialAtiva?.id ?? null;
+
+  const fetchPedidos = useCallback(async (cid: number) => {
+    setLoadingPedidos(true);
+    try {
+      const res = await fetch(`${API_URL}/api/me/purchase-orders?companyId=${cid}`, { headers: getAuthHeaders() });
+      if (res.ok) setPedidos(await res.json() as PedidoApi[]);
+    } catch { /* ignore */ } finally { setLoadingPedidos(false); }
+  }, []);
+
+  useEffect(() => {
+    if (companyId) void fetchPedidos(companyId);
+  }, [companyId, fetchPedidos]);
 
   /* ── relatórios state ── */
   const [periodo, setPeriodo] = useState<Periodo>("mensal");
@@ -154,6 +191,54 @@ export default function DashboardPage() {
   const nomeUnidade = filtroUnidade === "global"
     ? `${empresaAtiva.nome} — Visão Global`
     : filiaisEmpresa.find(f => f.id === filtroUnidade)?.nome ?? "";
+
+  /* ── métricas dos 5 cards de relatório ── */
+  const valeDiario = parseFloat(empresaAtiva.valeValue ?? "8.50");
+
+  const valesUtilizados = useMemo(
+    () => pedidos.filter(p => p.status !== "Cancelado").reduce((s, p) => s + p.vales, 0),
+    [pedidos],
+  );
+
+  const valorTotalCompras = useMemo(
+    () => pedidos.filter(p => p.status !== "Cancelado").reduce((s, p) => s + parseFloat(p.total), 0),
+    [pedidos],
+  );
+
+  const inativosHoje = useMemo(
+    () => colaboradoresFiltrados.filter(c => ["Férias","Licença","Afastado","Desligado","Inativo"].includes(c.status)),
+    [colaboradoresFiltrados],
+  );
+
+  const diasMesAtual = useMemo(() => {
+    const h = new Date();
+    return new Date(h.getFullYear(), h.getMonth() + 1, 0).getDate();
+  }, []);
+
+  const valesNaoUtilizados = inativosHoje.length * 2 * diasMesAtual;
+
+  const economiaMensal = inativosHoje.length * valeDiario * 2 * diasMesAtual;
+
+  const nextPeriodoLabel = useMemo(() => {
+    const h = new Date();
+    const ano = h.getDate() >= 28 ? (h.getMonth() === 11 ? h.getFullYear() + 1 : h.getFullYear()) : h.getFullYear();
+    const mes = h.getDate() >= 28 ? (h.getMonth() === 11 ? 1 : h.getMonth() + 2) : h.getMonth() + 1;
+    return `${MESES_CURTO[mes - 1]}/${ano}`;
+  }, []);
+
+  const notaASerGerada = useMemo(() => {
+    return colaboradoresFiltrados
+      .filter(c => c.status === "Ativo" && c.turno !== "—")
+      .reduce((sum, c) => {
+        const t = turnos.find(x => normalizeTurnoKey(x.nome) === normalizeTurnoKey(c.turno));
+        let dias = 22;
+        switch (t?.tipoEscala) {
+          case "5x2": dias = 22; break; case "6x1": dias = 26; break;
+          case "12x36": dias = 15; break; case "24x48": dias = 10; break;
+        }
+        return sum + dias * 2 * valeDiario;
+      }, 0);
+  }, [colaboradoresFiltrados, turnos, valeDiario]);
 
   return (
     <DashboardLayout alertMessage={alertMessage}>
@@ -293,14 +378,45 @@ export default function DashboardPage() {
             </div>
 
             {/* KPI Cards — Relatórios */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
               {[
-                { icon: Users,      label: "Utilizaram VT",       value: ativosRel.toString(),    sub: "colaboradores ativos",                color: "text-green-600", bg: "bg-green-50  border-green-100" },
-                { icon: Users,      label: "Não utilizaram",      value: inativosRel.toString(),  sub: `fora do sistema (${diasPeriodo} dias)`, color: "text-amber-600", bg: "bg-amber-50  border-amber-100" },
-                { icon: Calendar,   label: "Dias contabilizados", value: diasPeriodo.toString(),  sub: PERIODO_CONFIG[periodo].label,          color: "text-blue-600",  bg: "bg-blue-50   border-blue-100"  },
-                { icon: DollarSign, label: "Economia estimada",   value: fmt(totalEconomia),      sub: "vales não utilizados no período",       color: "text-accent",    bg: "bg-accent/5  border-accent/20" },
+                {
+                  icon: CheckCircle2,
+                  label: "Vales utilizados",
+                  value: loadingPedidos ? "…" : valesUtilizados.toLocaleString("pt-BR"),
+                  sub: "Total de vales emitidos (pedidos não cancelados)",
+                  color: "text-green-700", bg: "bg-green-50 border-green-100",
+                },
+                {
+                  icon: XCircle,
+                  label: "Vales não utilizados",
+                  value: `${valesNaoUtilizados.toLocaleString("pt-BR")}`,
+                  sub: `${inativosHoje.length} colaborador(es) inativo(s) × 2 vales/dia × ${diasMesAtual} dias`,
+                  color: "text-orange-600", bg: "bg-orange-50 border-orange-100",
+                },
+                {
+                  icon: DollarSign,
+                  label: "Valor total das compras",
+                  value: loadingPedidos ? "…" : fmt(valorTotalCompras),
+                  sub: "Soma de todos os pedidos não cancelados",
+                  color: "text-blue-700", bg: "bg-blue-50 border-blue-100",
+                },
+                {
+                  icon: TrendingDown,
+                  label: "Economia atual",
+                  value: fmt(economiaMensal),
+                  sub: `Estimativa mensal — colaboradores fora do sistema × R$ ${valeDiario.toFixed(2)}/dia`,
+                  color: "text-emerald-700", bg: "bg-emerald-50 border-emerald-100",
+                },
+                {
+                  icon: FileSpreadsheet,
+                  label: "Nota a ser gerada",
+                  value: fmt(notaASerGerada),
+                  sub: `Previsão para ${nextPeriodoLabel} com base nos colaboradores ativos`,
+                  color: "text-violet-700", bg: "bg-violet-50 border-violet-100",
+                },
               ].map(item => (
-                <div key={item.label} className={`border rounded-xl p-4 shadow-sm ${item.bg}`}>
+                <div key={item.label} className={`border rounded-xl p-5 shadow-sm ${item.bg}`}>
                   <div className={`flex items-center gap-2 mb-2 ${item.color}`}>
                     <item.icon size={15} />
                     <p className="text-xs font-semibold uppercase tracking-wide">{item.label}</p>
