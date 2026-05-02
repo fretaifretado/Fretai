@@ -7,3 +7,5 @@ export * from "./audit";
 export * from "./scheduled_movements";
 export * from "./purchase_orders";
 export * from "./company_shifts";
+export * from "./vehicle_types";
+export * from "./budgets";

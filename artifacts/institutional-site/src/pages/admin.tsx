@@ -7,7 +7,7 @@ import {
   Users, Plus, LogOut, Pencil, Trash2, X, Check, AlertCircle, Hexagon, Search,
   LayoutDashboard, FileBarChart2, Settings, ChevronRight, Menu as MenuIcon,
   Activity, Building2, Truck, ScrollText, TrendingUp, UserCheck, RefreshCw,
-  CalendarDays, ShieldCheck,
+  CalendarDays, ShieldCheck, Car, FileText,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
@@ -16,6 +16,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import CompaniesSection from "./admin-sections/CompaniesSection";
 import PartnersSection from "./admin-sections/PartnersSection";
 import AuditSection from "./admin-sections/AuditSection";
+import VehicleTypesSection from "./admin-sections/VehicleTypesSection";
+import BudgetsSection from "./admin-sections/BudgetsSection";
 
 interface Client {
   id: number;
@@ -70,6 +72,8 @@ const NAV_ITEMS = [
   { icon: LayoutDashboard, label: "Dashboard",    section: "dashboard" },
   { icon: Building2,       label: "Empresas",     section: "companies" },
   { icon: Truck,           label: "Parceiros",    section: "partners" },
+  { icon: FileText,        label: "Orçamentos",   section: "budgets" },
+  { icon: Car,             label: "Veículos",     section: "vehicle-types" },
   { icon: Users,           label: "Usuários",     section: "clients" },
   { icon: ScrollText,      label: "Auditoria",    section: "audit" },
   { icon: FileBarChart2,   label: "Relatórios",   section: "relatorios" },
@@ -477,6 +481,12 @@ export default function Admin() {
 
             {/* AUDITORIA */}
             {activeSection === "audit" && <AuditSection token={token} />}
+
+            {/* ORÇAMENTOS */}
+            {activeSection === "budgets" && <BudgetsSection token={token} />}
+
+            {/* VEÍCULOS */}
+            {activeSection === "vehicle-types" && <VehicleTypesSection token={token} />}
 
             {/* USUÁRIOS (clientes legado) */}
             {activeSection === "clients" && (

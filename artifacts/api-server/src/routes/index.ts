@@ -7,6 +7,8 @@ import partnersRouter from "./partners";
 import auditRouter from "./audit";
 import scheduledMovementsRouter from "./scheduled-movements";
 import purchaseOrdersRouter from "./purchase-orders";
+import vehicleTypesRouter from "./vehicle-types";
+import budgetsRouter from "./budgets";
 
 const router: IRouter = Router();
 
@@ -18,5 +20,7 @@ router.use(partnersRouter);
 router.use(auditRouter);
 router.use(scheduledMovementsRouter);
 router.use(purchaseOrdersRouter);
+router.use(vehicleTypesRouter);
+router.use(budgetsRouter);
 
 export default router;
