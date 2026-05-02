@@ -1,9 +1,16 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import DashboardLayout from "./layout";
 import { useDashboard, formatCepProgressive, type Colaborador } from "./context";
 import { AlertTriangle, Pencil, CheckCircle, XCircle, X, AlertCircle, PhoneOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+
+const API_URL = import.meta.env.VITE_API_URL ?? "";
+
+function getAuthHeaders(): HeadersInit {
+  const token = localStorage.getItem("auth_token");
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
 
 function StatusCell({ ok }: { ok: boolean }) {
   return ok
@@ -12,7 +19,7 @@ function StatusCell({ ok }: { ok: boolean }) {
 }
 
 export default function PendenciasPage() {
-  const { colaboradoresDaFilial: colaboradores, updateColaborador, turnos, empresaAtiva } = useDashboard();
+  const { colaboradoresDaFilial: colaboradores, updateColaborador, turnos, empresaAtiva, filialAtiva } = useDashboard();
   const [editing, setEditing] = useState<Colaborador | null>(null);
   const [fTelefone, setFTelefone] = useState("");
   const [fEndereco, setFEndereco] = useState("");
@@ -20,11 +27,43 @@ export default function PendenciasPage() {
   const [fTurno, setFTurno] = useState("");
   const [error, setError] = useState("");
   const [savedIds, setSavedIds] = useState<Set<number>>(new Set());
+  const [valesMap, setValesMap] = useState<Map<number, number>>(new Map());
+
+  const fetchVales = useCallback(async (companyId: number) => {
+    try {
+      const res = await fetch(`${API_URL}/api/me/purchase-orders?companyId=${companyId}`, {
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) return;
+      const data = await res.json() as {
+        employeeId: number | null;
+        vales: number;
+        status: string;
+      }[];
+      const map = new Map<number, number>();
+      for (const o of data) {
+        if (o.employeeId && o.status !== "Cancelado") {
+          const prev = map.get(o.employeeId) ?? 0;
+          map.set(o.employeeId, prev + o.vales);
+        }
+      }
+      setValesMap(map);
+    } catch {
+      // silently ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    const cid = filialAtiva?.id ?? empresaAtiva?.id;
+    if (cid) void fetchVales(cid);
+  }, [filialAtiva?.id, empresaAtiva?.id, fetchVales]);
 
   const empresaTemVale = !!(empresaAtiva.valeValue && parseFloat(empresaAtiva.valeValue) > 0);
 
   function valeOk(c: Colaborador) {
-    return empresaTemVale || (!(!c.vale || c.vale === "—"));
+    return empresaTemVale ||
+      (!(!c.vale || c.vale === "—")) ||
+      valesMap.has(c.id);
   }
 
   function hasPendencias(c: Colaborador) {
