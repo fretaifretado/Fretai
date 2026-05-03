@@ -1043,7 +1043,7 @@ router.post("/admin/budgets/:id/finalize-manual", requireAdmin, async (req, res)
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
 
   const { shiftRoutes } = req.body as {
-    shiftRoutes: Array<{ shiftTime: string; vehicleTypeId: number }>;
+    shiftRoutes: Array<{ shiftTime: string; direction?: string; vehicleTypeId: number }>;
   };
   if (!Array.isArray(shiftRoutes) || shiftRoutes.length === 0) {
     res.status(400).json({ error: "shiftRoutes[] obrigatório" }); return;
@@ -1112,10 +1112,12 @@ router.post("/admin/budgets/:id/finalize-manual", requireAdmin, async (req, res)
       const totalCost = (distKm * 2 * costPerKm + fixedCost).toFixed(2);
       const occupancy = ((totalPassengers / vt.capacity) * 100).toFixed(2);
 
+      const dir = sr.direction ?? "ida";
       const [route] = await db.insert(budgetRoutesTable).values({
         budgetId: id,
-        name: `Rota ${sr.shiftTime}`,
+        name: `Rota ${sr.shiftTime} - ${dir === "volta" ? "Volta" : "Ida"}`,
         shiftTime: sr.shiftTime,
+        direction: dir,
         vehicleBlockId: 1,
         totalPassengers,
         totalDistanceKm: String(distKm),

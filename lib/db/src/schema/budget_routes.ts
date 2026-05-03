@@ -14,6 +14,7 @@ export const budgetRoutesTable = pgTable("budget_routes", {
   occupancyPct: numeric("occupancy_pct", { precision: 5, scale: 2 }).notNull().default("0"),
   totalCost: numeric("total_cost", { precision: 12, scale: 2 }),
   vehicleAssignments: jsonb("vehicle_assignments").notNull().default([]),
+  direction: text("direction"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

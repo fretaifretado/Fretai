@@ -49,6 +49,7 @@ interface ManualBP {
 }
 interface ExtRoute {
   id: number; name: string; shiftTime: string | null; vehicleBlockId: number | null;
+  direction: string | null;
   totalPassengers: number; totalDistanceKm: number; estimatedMinutes: number;
   occupancyPct: number; totalCost: number | null;
   vehicleAssignments: Array<{ vehicleType: string; count: number; capacity: number }>;
@@ -727,12 +728,21 @@ function UploadStep({ budgetId, token, existingWorkers, onComplete, onSkip }: {
 }
 
 /* ─── Finalize step ──────────────────────────────────────────────────────── */
+type Direction = "ida" | "volta";
+const DIRECTIONS: { key: Direction; label: string; icon: string; desc: string }[] = [
+  { key: "ida",   label: "Ida",   icon: "→", desc: "Casa → Empresa" },
+  { key: "volta", label: "Volta", icon: "←", desc: "Empresa → Casa"  },
+];
+
 function FinalizeStep({ budgetId, token, onComplete, onBack }: {
   budgetId: number; token: string | null; onComplete: () => void; onBack: () => void;
 }) {
   const [bps, setBps] = useState<ManualBP[]>([]);
   const [vehicleTypes, setVehicleTypes] = useState<VehicleType[]>([]);
+  // key: `${shift}:${direction}` → vehicleTypeId
   const [selections, setSelections] = useState<Record<string, number>>({});
+  // which directions are enabled per shift (both enabled by default)
+  const [enabled, setEnabled] = useState<Record<string, Record<Direction, boolean>>>({});
   const [creating, setCreating] = useState(false);
   const [err, setErr] = useState("");
   const hdrs = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
@@ -745,18 +755,23 @@ function FinalizeStep({ budgetId, token, onComplete, onBack }: {
       setBps(bpsData);
       const vt = vtData.sort((a, b) => b.capacity - a.capacity);
       setVehicleTypes(vt);
-      // Auto-select recommended vehicle per shift
       const shiftPax = new Map<string, number>();
       for (const bp of bpsData) {
         const k = bp.shiftTime ?? "06:00";
         shiftPax.set(k, (shiftPax.get(k) ?? 0) + bp.passengerCount);
       }
-      const init: Record<string, number> = {};
+      const initSel: Record<string, number> = {};
+      const initEn: Record<string, Record<Direction, boolean>> = {};
       for (const [shift, pax] of shiftPax) {
         const rec = [...vt].reverse().find(v => v.capacity >= pax) ?? vt[vt.length - 1];
-        if (rec) init[shift] = rec.id;
+        if (rec) {
+          initSel[`${shift}:ida`] = rec.id;
+          initSel[`${shift}:volta`] = rec.id;
+        }
+        initEn[shift] = { ida: true, volta: true };
       }
-      setSelections(init);
+      setSelections(initSel);
+      setEnabled(initEn);
     });
   }, [budgetId]);
 
@@ -770,14 +785,30 @@ function FinalizeStep({ budgetId, token, onComplete, onBack }: {
     return m;
   }, [bps]);
 
+  const toggleDir = (shift: string, dir: Direction) =>
+    setEnabled(prev => ({ ...prev, [shift]: { ...prev[shift], [dir]: !(prev[shift]?.[dir] ?? true) } }));
+
+  const totalRoutes = [...shiftGroups.keys()].reduce((s, shift) => {
+    const en = enabled[shift] ?? { ida: true, volta: true };
+    return s + (en.ida ? 1 : 0) + (en.volta ? 1 : 0);
+  }, 0);
+
   const handleCreate = async () => {
-    if (!Object.keys(selections).length) { setErr("Selecione um veículo para cada turno."); return; }
+    if (totalRoutes === 0) { setErr("Habilite ao menos uma rota."); return; }
     setCreating(true); setErr("");
     try {
-      const shiftRoutes = [...shiftGroups.keys()].map(shift => ({
-        shiftTime: shift,
-        vehicleTypeId: selections[shift] ?? vehicleTypes[0]?.id ?? 3,
-      }));
+      const shiftRoutes: Array<{ shiftTime: string; direction: string; vehicleTypeId: number }> = [];
+      for (const shift of [...shiftGroups.keys()].sort()) {
+        const en = enabled[shift] ?? { ida: true, volta: true };
+        for (const dir of ["ida", "volta"] as Direction[]) {
+          if (!en[dir]) continue;
+          shiftRoutes.push({
+            shiftTime: shift,
+            direction: dir,
+            vehicleTypeId: selections[`${shift}:${dir}`] ?? vehicleTypes[0]?.id ?? 3,
+          });
+        }
+      }
       const r = await fetch(`/api/admin/budgets/${budgetId}/finalize-manual`, {
         method: "POST", headers: hdrs,
         body: JSON.stringify({ shiftRoutes }),
@@ -798,75 +829,123 @@ function FinalizeStep({ budgetId, token, onComplete, onBack }: {
   );
 
   return (
-    <div className="space-y-4 max-w-3xl">
+    <div className="space-y-4 max-w-4xl">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold">Selecionar Veículos</h2>
-          <p className="text-muted-foreground text-sm">Escolha o tipo de veículo para cada turno. A rota será criada com a sequência definida no mapa.</p>
+          <h2 className="text-xl font-bold">Selecionar Veículos por Sentido</h2>
+          <p className="text-muted-foreground text-sm">Configure o veículo para cada turno e sentido (Ida e/ou Volta). Desative os que não precisar.</p>
         </div>
         <Button variant="ghost" size="sm" onClick={onBack}>← Ajustar Pontos</Button>
       </div>
 
       {err && <div className="flex items-center gap-2 text-sm text-destructive bg-destructive/10 rounded-lg px-3 py-2"><AlertCircle size={14} />{err}</div>}
 
-      <div className="grid gap-4">
+      <div className="space-y-6">
         {[...shiftGroups.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([shift, shiftBps]) => {
           const totalPax = shiftBps.reduce((s, b) => s + b.passengerCount, 0);
-          const selectedVt = vehicleTypes.find(v => v.id === selections[shift]);
-          const occupancy = selectedVt ? totalPax / selectedVt.capacity * 100 : 0;
-          const occupancyColor = occupancy >= 80 ? "text-emerald-600" : occupancy >= 60 ? "text-amber-600" : "text-red-600";
+          const en = enabled[shift] ?? { ida: true, volta: true };
 
           return (
-            <Card key={shift}>
-              <CardContent className="pt-5">
-                <div className="flex items-start gap-4">
-                  <div className="bg-primary/10 px-3 py-2 rounded-lg flex-shrink-0 text-center">
-                    <p className="text-xs text-muted-foreground">Turno</p>
-                    <p className="text-lg font-bold text-primary">{shift}</p>
-                  </div>
-                  <div className="flex-1 grid grid-cols-3 gap-4 text-sm">
-                    <div><p className="text-xs text-muted-foreground">Passageiros</p><p className="font-bold text-lg">{totalPax}</p></div>
-                    <div><p className="text-xs text-muted-foreground">Pontos de Embarque</p><p className="font-bold text-lg">{shiftBps.length}</p></div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Ocupação</p>
-                      <p className={`font-bold text-lg ${occupancyColor}`}>{selectedVt ? `${occupancy.toFixed(0)}%` : "—"}</p>
-                    </div>
-                  </div>
-                  <div className="flex-shrink-0 w-48">
-                    <Label className="text-xs text-muted-foreground mb-1 block">Tipo de Veículo</Label>
-                    <Select value={String(selections[shift] ?? "")} onValueChange={v => setSelections(s => ({ ...s, [shift]: parseInt(v) }))}>
-                      <SelectTrigger className="h-9">
-                        <SelectValue placeholder="Selecione…" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {vehicleTypes.map(vt => {
-                          const occ = (totalPax / vt.capacity * 100).toFixed(0);
-                          return (
-                            <SelectItem key={vt.id} value={String(vt.id)}>
-                              <span className="font-medium">{vt.type}</span>
-                              <span className="text-muted-foreground ml-2 text-xs">{vt.capacity} lug. · {occ}%</span>
-                            </SelectItem>
-                          );
-                        })}
-                      </SelectContent>
-                    </Select>
-                    {selectedVt && (
-                      <p className="text-xs text-muted-foreground mt-1">
-                        {totalPax}/{selectedVt.capacity} lugares
-                        {totalPax > selectedVt.capacity && <span className="text-red-500 ml-1">· Excede capacidade!</span>}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+            <div key={shift} className="space-y-2">
+              {/* Shift header */}
+              <div className="flex items-center gap-3">
+                <div className="h-px flex-1 bg-border" />
+                <span className="text-xs font-bold text-muted-foreground uppercase tracking-widest px-2">
+                  Turno {shift} · {totalPax} passageiros · {shiftBps.length} pontos
+                </span>
+                <div className="h-px flex-1 bg-border" />
+              </div>
+
+              {/* Ida + Volta cards side by side */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {DIRECTIONS.map(({ key: dir, label, icon, desc }) => {
+                  const selKey = `${shift}:${dir}`;
+                  const isEnabled = en[dir];
+                  const selectedVt = vehicleTypes.find(v => v.id === selections[selKey]);
+                  const occupancy = selectedVt ? totalPax / selectedVt.capacity * 100 : 0;
+                  const occupancyColor = occupancy >= 80 ? "text-emerald-600" : occupancy >= 60 ? "text-amber-600" : "text-red-500";
+                  const dirColor = dir === "ida" ? "text-blue-600 bg-blue-50 border-blue-200" : "text-violet-600 bg-violet-50 border-violet-200";
+                  const dirColorDisabled = "text-muted-foreground bg-muted/30 border-border";
+
+                  return (
+                    <Card key={dir} className={`border-2 transition-all duration-150 ${isEnabled ? (dir === "ida" ? "border-blue-200" : "border-violet-200") : "border-border opacity-60"}`}>
+                      <CardContent className="pt-4 pb-4">
+                        {/* Direction header with toggle */}
+                        <div className="flex items-center justify-between mb-3">
+                          <div className={`flex items-center gap-2 px-2.5 py-1 rounded-lg text-sm font-bold border ${isEnabled ? dirColor : dirColorDisabled}`}>
+                            <span className="text-base leading-none">{icon}</span>
+                            <span>{label}</span>
+                            <span className="text-xs font-normal opacity-70">{desc}</span>
+                          </div>
+                          <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                            <span className="text-xs text-muted-foreground">{isEnabled ? "Habilitado" : "Desativado"}</span>
+                            <div className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${isEnabled ? (dir === "ida" ? "bg-blue-500" : "bg-violet-500") : "bg-muted"}`}
+                              onClick={() => toggleDir(shift, dir)} role="button" tabIndex={0}
+                              onKeyDown={e => e.key === "Enter" && toggleDir(shift, dir)}>
+                              <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${isEnabled ? "translate-x-4" : "translate-x-1"}`} />
+                            </div>
+                          </label>
+                        </div>
+
+                        {isEnabled ? (
+                          <div className="space-y-3">
+                            {/* Stats */}
+                            <div className="grid grid-cols-3 gap-2 text-center">
+                              <div className="bg-muted/30 rounded-lg py-2">
+                                <p className="text-xs text-muted-foreground">Passageiros</p>
+                                <p className="font-bold">{totalPax}</p>
+                              </div>
+                              <div className="bg-muted/30 rounded-lg py-2">
+                                <p className="text-xs text-muted-foreground">Pontos</p>
+                                <p className="font-bold">{shiftBps.length}</p>
+                              </div>
+                              <div className="bg-muted/30 rounded-lg py-2">
+                                <p className="text-xs text-muted-foreground">Ocupação</p>
+                                <p className={`font-bold text-sm ${occupancyColor}`}>{selectedVt ? `${occupancy.toFixed(0)}%` : "—"}</p>
+                              </div>
+                            </div>
+                            {/* Vehicle selector */}
+                            <div>
+                              <Label className="text-xs text-muted-foreground mb-1 block">Tipo de Veículo</Label>
+                              <Select value={String(selections[selKey] ?? "")} onValueChange={v => setSelections(s => ({ ...s, [selKey]: parseInt(v) }))}>
+                                <SelectTrigger className="h-9">
+                                  <SelectValue placeholder="Selecione…" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {vehicleTypes.map(vt => {
+                                    const occ = (totalPax / vt.capacity * 100).toFixed(0);
+                                    return (
+                                      <SelectItem key={vt.id} value={String(vt.id)}>
+                                        <span className="font-medium">{vt.type}</span>
+                                        <span className="text-muted-foreground ml-2 text-xs">{vt.capacity} lug. · {occ}%</span>
+                                      </SelectItem>
+                                    );
+                                  })}
+                                </SelectContent>
+                              </Select>
+                              {selectedVt && totalPax > selectedVt.capacity && (
+                                <p className="text-xs text-red-500 mt-1">⚠ Excede a capacidade do veículo!</p>
+                              )}
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="text-xs text-muted-foreground text-center py-3">
+                            Rota de {label.toLowerCase()} desativada. Ative o toggle para configurar.
+                          </p>
+                        )}
+                      </CardContent>
+                    </Card>
+                  );
+                })}
+              </div>
+            </div>
           );
         })}
       </div>
 
       <div className="flex justify-end pt-2">
-        <Button onClick={() => void handleCreate()} disabled={creating} size="lg" className="bg-emerald-600 hover:bg-emerald-700 text-white">
-          {creating ? "Criando Rotas…" : `Criar ${shiftGroups.size} Rota${shiftGroups.size > 1 ? "s" : ""} →`}
+        <Button onClick={() => void handleCreate()} disabled={creating || totalRoutes === 0} size="lg" className="bg-emerald-600 hover:bg-emerald-700 text-white">
+          {creating ? "Criando Rotas…" : `Criar ${totalRoutes} Rota${totalRoutes !== 1 ? "s" : ""} →`}
         </Button>
       </div>
     </div>
@@ -889,7 +968,7 @@ function RoutesStep({ routes, workers, onBack, onReimport }: {
     for (const route of routes) {
       for (const bp of route.boardingPoints) {
         for (const emp of (bpMap.get(bp.id) ?? [])) {
-          rows.push({ Turno: route.shiftTime ?? "", Veículo: route.vehicleAssignments[0]?.vehicleType ?? "", "Ponto de Embarque": bp.name, Nome: emp.name, Endereço: emp.address, Turno_Func: emp.shift ?? "" });
+          rows.push({ Turno: route.shiftTime ?? "", Sentido: route.direction === "volta" ? "Volta" : "Ida", Veículo: route.vehicleAssignments[0]?.vehicleType ?? "", "Ponto de Embarque": bp.name, Nome: emp.name, Endereço: emp.address, Turno_Func: emp.shift ?? "" });
         }
       }
     }
@@ -927,16 +1006,25 @@ function RoutesStep({ routes, workers, onBack, onReimport }: {
 
       {/* Summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        {routes.map(r => (
-          <Card key={r.id} className="border-l-4" style={{ borderLeftColor: r.shiftTime === "06:00" ? "#3b82f6" : r.shiftTime === "14:20" ? "#f59e0b" : "#8b5cf6" }}>
-            <CardContent className="pt-4 pb-3">
-              <p className="text-xs text-muted-foreground">Turno {r.shiftTime}</p>
-              <p className="text-xl font-bold">{r.totalPassengers} pax</p>
-              <p className="text-xs text-muted-foreground">{r.vehicleAssignments[0]?.vehicleType} · {r.totalDistanceKm?.toFixed(1)} km</p>
-              {r.totalCost && <p className="text-xs font-medium text-emerald-600 mt-1">R$ {r.totalCost.toFixed(2)}</p>}
-            </CardContent>
-          </Card>
-        ))}
+        {routes.map(r => {
+          const isIda = r.direction !== "volta";
+          const shiftColor = r.shiftTime === "06:00" ? "#3b82f6" : r.shiftTime === "14:20" ? "#f59e0b" : "#8b5cf6";
+          return (
+            <Card key={r.id} className="border-l-4" style={{ borderLeftColor: shiftColor }}>
+              <CardContent className="pt-4 pb-3">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <p className="text-xs text-muted-foreground">Turno {r.shiftTime}</p>
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${isIda ? "bg-blue-100 text-blue-700" : "bg-violet-100 text-violet-700"}`}>
+                    {isIda ? "→ Ida" : "← Volta"}
+                  </span>
+                </div>
+                <p className="text-xl font-bold">{r.totalPassengers} pax</p>
+                <p className="text-xs text-muted-foreground">{r.vehicleAssignments[0]?.vehicleType} · {r.totalDistanceKm?.toFixed(1)} km</p>
+                {r.totalCost && <p className="text-xs font-medium text-emerald-600 mt-1">R$ {r.totalCost.toFixed(2)}</p>}
+              </CardContent>
+            </Card>
+          );
+        })}
       </div>
 
       <PassengerListCard routes={routes} workers={workers} />
@@ -985,6 +1073,11 @@ function PassengerListCard({ routes, workers }: { routes: ExtRoute[]; workers: B
             <div className="bg-muted/40 px-4 py-2.5 flex items-center gap-3 text-sm font-medium flex-wrap">
               <span className="text-muted-foreground">Turno</span>
               <span className="font-bold">{route.shiftTime ?? "—"}</span>
+              {route.direction && (
+                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${route.direction === "volta" ? "bg-violet-100 text-violet-700" : "bg-blue-100 text-blue-700"}`}>
+                  {route.direction === "volta" ? "← Volta" : "→ Ida"}
+                </span>
+              )}
               <span className="text-muted-foreground">·</span>
               {route.vehicleAssignments[0] && <span className="flex items-center gap-1"><Bus className="h-3.5 w-3.5" />{route.vehicleAssignments[0].vehicleType}</span>}
               <span className="text-muted-foreground">·</span>
