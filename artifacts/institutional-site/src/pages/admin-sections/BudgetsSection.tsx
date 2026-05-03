@@ -349,16 +349,24 @@ function BudgetBuilderView({ id, token, onBack }: { id: number; token: string | 
 
 /* ─── Upload step ────────────────────────────────────────────────────────── */
 interface ParsedEmployee { name: string; address: string; shift: string | null; lat?: number; lng?: number }
+type GeoSource = "coords" | "geocoded" | "failed" | "manual";
+interface ValidatedEmployee { name: string; address: string; shift: string | null; lat?: number; lng?: number; source: GeoSource; editAddress: string; origIdx: number }
+type UploadSub = "idle" | "parsed" | "geocoding" | "review" | "importing";
 
 function UploadStep({ budgetId, token, existingWorkers, onComplete, onSkip }: {
   budgetId: number; token: string | null; existingWorkers: BudgetWorker[];
   onComplete: () => void; onSkip: () => void;
 }) {
+  const [sub, setSub] = useState<UploadSub>("idle");
   const [parsed, setParsed] = useState<ParsedEmployee[]>([]);
-  const [uploading, setUploading] = useState(false);
+  const [validated, setValidated] = useState<ValidatedEmployee[]>([]);
+  const [geoProgress, setGeoProgress] = useState({ current: 0, total: 0 });
+  const [regeocoding, setRegeocoding] = useState<number | null>(null);
+  const [reviewTab, setReviewTab] = useState<"errors" | "all">("errors");
+  const [acceptFailed, setAcceptFailed] = useState(false);
   const [msg, setMsg] = useState("");
-  const [hasGeo, setHasGeo] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const cancelRef = useRef(false);
   const hdrs = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 
   const normKey = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
@@ -373,17 +381,11 @@ function UploadStep({ budgetId, token, existingWorkers, onComplete, onSkip }: {
         const ws = wb.Sheets[wb.SheetNames[0]!]!;
         const rows = XLSX.utils.sheet_to_json<Record<string, string>>(ws, { defval: "" });
         if (!rows.length) { setMsg("Planilha vazia."); return; }
-
         const buildAddr = (n: Record<string, string>) => {
           const single = n["endereco"] || n["address"] || n["logradouro"] || n["endereço"] || "";
           if (single) return single.trim();
-          return [
-            (n["rua"] || n["logradouro"] || "") + (n["numero"] ? ", " + n["numero"] : ""),
-            n["bairro"] || "", n["cidade"] || n["city"] || "", n["estado"] || n["uf"] || "",
-          ].filter(Boolean).join(", ");
+          return [(n["rua"] || n["logradouro"] || "") + (n["numero"] ? ", " + n["numero"] : ""), n["bairro"] || "", n["cidade"] || n["city"] || "", n["estado"] || n["uf"] || ""].filter(Boolean).join(", ");
         };
-
-        let geoCount = 0;
         const employees: ParsedEmployee[] = rows.map(row => {
           const n: Record<string, string> = {};
           for (const [k, v] of Object.entries(row)) n[normKey(k)] = String(v ?? "");
@@ -394,17 +396,10 @@ function UploadStep({ budgetId, token, existingWorkers, onComplete, onSkip }: {
           const lat = latRaw ? parseFloat(latRaw.replace(",", ".")) : NaN;
           const lng = lngRaw ? parseFloat(lngRaw.replace(",", ".")) : NaN;
           const hasCoords = !isNaN(lat) && !isNaN(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
-          if (hasCoords) geoCount++;
-          return {
-            name: name.trim(), address: buildAddr(n),
-            shift: shift?.trim() || null,
-            ...(hasCoords ? { lat, lng } : {}),
-          };
+          return { name: name.trim(), address: buildAddr(n), shift: shift?.trim() || null, ...(hasCoords ? { lat, lng } : {}) };
         }).filter(e => e.name);
-
-        setHasGeo(geoCount > 0);
-        setParsed(employees);
-        if (!employees.length) setMsg("Nenhum funcionário encontrado. Verifique a coluna 'Nome'.");
+        if (!employees.length) { setMsg("Nenhum funcionário encontrado. Verifique a coluna 'Nome'."); return; }
+        setParsed(employees); setMsg(""); setSub("parsed");
       } catch { setMsg("Erro ao ler o arquivo."); }
     };
     reader.readAsArrayBuffer(file);
@@ -412,54 +407,102 @@ function UploadStep({ budgetId, token, existingWorkers, onComplete, onSkip }: {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]; if (!f) return;
-    setParsed([]); setMsg(""); parseFile(f);
+    setParsed([]); setValidated([]); setMsg(""); setSub("idle"); parseFile(f);
   };
 
-  const handleImport = async (replace = false) => {
-    if (!parsed.length) return;
-    setUploading(true);
+  async function nominatim(addr: string): Promise<{ lat: number; lng: number } | null> {
+    if (!addr.trim()) return null;
+    try {
+      const r = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(addr)}&format=json&limit=1&countrycodes=br&accept-language=pt-BR`);
+      const d = await r.json() as Array<{ lat: string; lon: string }>;
+      if (d.length && d[0]) return { lat: parseFloat(d[0].lat), lng: parseFloat(d[0].lon) };
+      return null;
+    } catch { return null; }
+  }
+
+  const startGeocoding = async (employees: ParsedEmployee[]) => {
+    cancelRef.current = false;
+    setAcceptFailed(false);
+    const init: ValidatedEmployee[] = employees.map((e, i) => ({
+      ...e, source: (e.lat != null && e.lng != null ? "coords" : "failed") as GeoSource,
+      editAddress: e.address, origIdx: i,
+    }));
+    const needsGeo = init.filter(e => e.source === "failed");
+    setGeoProgress({ current: 0, total: needsGeo.length });
+    setValidated([...init]);
+    setSub("geocoding");
+    const addrCache = new globalThis.Map<string, { lat: number; lng: number } | null>();
+    for (let i = 0; i < needsGeo.length; i++) {
+      if (cancelRef.current) break;
+      const emp = needsGeo[i]!;
+      setGeoProgress({ current: i + 1, total: needsGeo.length });
+      const key = emp.editAddress.trim().toLowerCase();
+      let geo: { lat: number; lng: number } | null;
+      if (addrCache.has(key)) { geo = addrCache.get(key)!; }
+      else {
+        geo = await nominatim(emp.editAddress);
+        addrCache.set(key, geo);
+        if (i < needsGeo.length - 1) await new Promise(r => setTimeout(r, 1100));
+      }
+      init[emp.origIdx] = { ...init[emp.origIdx]!, lat: geo?.lat, lng: geo?.lng, source: geo ? "geocoded" : "failed" };
+      setValidated([...init]);
+    }
+    setReviewTab(init.some(e => e.source === "failed") ? "errors" : "all");
+    setSub("review");
+  };
+
+  const regeocodeOne = async (idx: number) => {
+    setRegeocoding(idx);
+    const emp = validated[idx]; if (!emp) { setRegeocoding(null); return; }
+    const geo = await nominatim(emp.editAddress);
+    setValidated(prev => prev.map((e, i) => i !== idx ? e : { ...e, lat: geo?.lat, lng: geo?.lng, source: (geo ? "manual" : "failed") as GeoSource }));
+    setRegeocoding(null);
+  };
+
+  const handleImport = async (replace = true) => {
+    const employees = validated.map(e => ({
+      name: e.name, address: e.editAddress !== e.address ? e.editAddress : e.address,
+      shift: e.shift, ...(e.lat != null && e.lng != null ? { lat: e.lat, lng: e.lng } : {}),
+    }));
+    setSub("importing"); setMsg("");
     try {
       const r = await fetch(`/api/admin/budgets/${budgetId}/employees`, {
-        method: "POST", headers: hdrs,
-        body: JSON.stringify({ employees: parsed, replace }),
+        method: "POST", headers: hdrs, body: JSON.stringify({ employees, replace }),
       });
       const res = await r.json() as { total?: number; error?: string };
-      if (!r.ok) { setMsg(res.error ?? "Erro ao importar"); return; }
-      setMsg(`✓ ${res.total ?? parsed.length} funcionários importados com sucesso.`);
+      if (!r.ok) { setMsg(res.error ?? "Erro ao importar"); setSub("review"); return; }
+      setMsg(`✓ ${res.total ?? employees.length} funcionários importados com sucesso.`);
       setTimeout(onComplete, 800);
-    } finally { setUploading(false); if (fileRef.current) fileRef.current.value = ""; }
+    } catch { setMsg("Erro de comunicação."); setSub("review"); }
   };
 
-  const geoWithCoords = parsed.filter(e => e.lat != null).length;
+  const coordsCount = validated.filter(e => e.source === "coords").length;
+  const geocodedCount = validated.filter(e => e.source === "geocoded").length;
+  const manualCount = validated.filter(e => e.source === "manual").length;
+  const failCount = validated.filter(e => e.source === "failed").length;
+  const parsedWithCoords = parsed.filter(e => e.lat != null).length;
 
   return (
     <div className="space-y-4">
       {/* Existing workers summary */}
-      {existingWorkers.length > 0 && !parsed.length && (
+      {existingWorkers.length > 0 && sub === "idle" && (
         <Card>
           <CardContent className="pt-6">
             <div className="flex items-center gap-4">
               <div className="bg-emerald-50 p-3 rounded-xl"><Users className="h-6 w-6 text-emerald-600" /></div>
               <div className="flex-1">
                 <p className="font-semibold">{existingWorkers.length} funcionários já importados</p>
-                <p className="text-sm text-muted-foreground">
-                  {existingWorkers.filter(w => w.lat).length} com coordenadas · Clique em Continuar para ir ao mapa
-                </p>
+                <p className="text-sm text-muted-foreground">{existingWorkers.filter(w => w.lat).length} com coordenadas · Clique em Continuar para ir ao mapa</p>
               </div>
               <div className="flex gap-2">
-                <Button onClick={onSkip} className="bg-emerald-600 hover:bg-emerald-700 text-white">
-                  Continuar para o Mapa →
-                </Button>
-                <Button variant="outline" onClick={() => fileRef.current?.click()}>
-                  <Upload className="mr-2 h-4 w-4" />Re-importar
-                </Button>
+                <Button onClick={onSkip} className="bg-emerald-600 hover:bg-emerald-700 text-white">Continuar para o Mapa →</Button>
+                <Button variant="outline" onClick={() => fileRef.current?.click()}><Upload className="mr-2 h-4 w-4" />Re-importar</Button>
               </div>
             </div>
           </CardContent>
         </Card>
       )}
 
-      {/* File upload */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2"><Upload className="h-5 w-5" />Importar Planilha</CardTitle>
@@ -475,65 +518,199 @@ function UploadStep({ budgetId, token, existingWorkers, onComplete, onSkip }: {
             </div>
           )}
 
-          {!parsed.length ? (
-            <div
-              className="border-2 border-dashed rounded-xl p-10 text-center cursor-pointer hover:border-primary/50 hover:bg-muted/20 transition-colors"
-              onClick={() => fileRef.current?.click()}>
+          {/* ── IDLE: drop zone ── */}
+          {sub === "idle" && (
+            <div className="border-2 border-dashed rounded-xl p-10 text-center cursor-pointer hover:border-primary/50 hover:bg-muted/20 transition-colors" onClick={() => fileRef.current?.click()}>
               <FileText className="h-10 w-10 mx-auto mb-3 text-muted-foreground/50" />
               <p className="font-medium">Clique para selecionar ou arraste o arquivo</p>
               <p className="text-sm text-muted-foreground mt-1">Excel, CSV, ODS</p>
             </div>
-          ) : (
+          )}
+
+          {/* ── PARSED: preview + validate button ── */}
+          {sub === "parsed" && (
             <div className="space-y-4">
-              {/* Detection status */}
               <div className="flex flex-wrap gap-2 text-xs">
-                <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-full font-medium">
-                  ✓ {parsed.length} funcionários
-                </span>
-                {hasGeo ? (
-                  <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-full font-medium">
-                    ✓ {geoWithCoords} com coordenadas reais
-                  </span>
-                ) : (
-                  <span className="px-2.5 py-1 bg-amber-50 text-amber-700 rounded-full font-medium">
-                    ⚠ Sem coordenadas — posição aproximada pelo endereço
-                  </span>
+                <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-full font-medium">✓ {parsed.length} funcionários detectados</span>
+                {parsedWithCoords > 0
+                  ? <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-full font-medium">✓ {parsedWithCoords} com coordenadas na planilha</span>
+                  : <span className="px-2.5 py-1 bg-amber-50 text-amber-700 rounded-full font-medium">⚠ Sem coordenadas — endereços serão geocodificados</span>}
+                {parsed.length - parsedWithCoords > 0 && parsedWithCoords > 0 && (
+                  <span className="px-2.5 py-1 bg-amber-50 text-amber-700 rounded-full font-medium">⚠ {parsed.length - parsedWithCoords} precisam geocodificação</span>
                 )}
               </div>
-
-              {/* Preview table */}
               <div className="border rounded-lg overflow-hidden">
                 <Table>
-                  <TableHeader>
-                    <TableRow className="bg-muted/40">
-                      <TableHead className="w-8">#</TableHead>
-                      <TableHead>Nome</TableHead>
-                      <TableHead>Turno</TableHead>
-                      <TableHead>Latitude</TableHead>
-                      <TableHead>Longitude</TableHead>
-                    </TableRow>
-                  </TableHeader>
+                  <TableHeader><TableRow className="bg-muted/40">
+                    <TableHead className="w-8">#</TableHead><TableHead>Nome</TableHead>
+                    <TableHead>Turno</TableHead><TableHead>Endereço</TableHead>
+                    <TableHead>Lat</TableHead><TableHead>Lng</TableHead>
+                  </TableRow></TableHeader>
                   <TableBody>
-                    {parsed.slice(0, 6).map((e, i) => (
+                    {parsed.slice(0, 5).map((e, i) => (
                       <TableRow key={i}>
                         <TableCell className="text-muted-foreground text-xs">{i + 1}</TableCell>
-                        <TableCell className="font-medium">{e.name}</TableCell>
+                        <TableCell className="font-medium text-sm">{e.name}</TableCell>
                         <TableCell className="text-xs">{e.shift ?? "—"}</TableCell>
-                        <TableCell className="text-xs font-mono">{e.lat?.toFixed(5) ?? <span className="text-muted-foreground">—</span>}</TableCell>
-                        <TableCell className="text-xs font-mono">{e.lng?.toFixed(5) ?? <span className="text-muted-foreground">—</span>}</TableCell>
+                        <TableCell className="text-xs max-w-[180px] truncate text-muted-foreground">{e.address || "—"}</TableCell>
+                        <TableCell className="text-xs font-mono">{e.lat != null ? e.lat.toFixed(4) : <span className="text-muted-foreground">—</span>}</TableCell>
+                        <TableCell className="text-xs font-mono">{e.lng != null ? e.lng.toFixed(4) : <span className="text-muted-foreground">—</span>}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
                 </Table>
-                {parsed.length > 6 && <p className="text-xs text-muted-foreground text-center py-2">…e mais {parsed.length - 6} funcionários</p>}
+                {parsed.length > 5 && <p className="text-xs text-muted-foreground text-center py-2">…e mais {parsed.length - 5} funcionários</p>}
+              </div>
+              <div className="flex gap-2">
+                <Button onClick={() => void startGeocoding(parsed)} className="flex-1 bg-primary">
+                  <Navigation className="mr-2 h-4 w-4" />Validar Geolocalização ({parsed.length - parsedWithCoords} endereços)
+                </Button>
+                <Button variant="ghost" onClick={() => { setSub("idle"); setParsed([]); if (fileRef.current) fileRef.current.value = ""; }}>Cancelar</Button>
+              </div>
+            </div>
+          )}
+
+          {/* ── GEOCODING: progress ── */}
+          {sub === "geocoding" && (
+            <div className="space-y-5 py-4">
+              <div className="text-center space-y-1">
+                <p className="font-semibold">Validando geolocalização dos endereços…</p>
+                <p className="text-sm text-muted-foreground">
+                  {geoProgress.current} de {geoProgress.total} endereços processados
+                  {geoProgress.total > 10 && <span className="text-xs"> · ~{Math.round((geoProgress.total - geoProgress.current) * 1.1)}s restantes</span>}
+                </p>
+              </div>
+              <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
+                <div className="bg-primary h-2.5 rounded-full transition-all duration-500"
+                  style={{ width: geoProgress.total > 0 ? `${Math.round(geoProgress.current / geoProgress.total * 100)}%` : "0%" }} />
+              </div>
+              {/* Live partial results */}
+              {validated.length > 0 && (
+                <div className="grid grid-cols-3 gap-3 text-center text-sm">
+                  <div className="bg-emerald-50 rounded-lg p-3">
+                    <p className="text-xl font-bold text-emerald-700">{validated.filter(e => e.source === "coords" || e.source === "geocoded").length}</p>
+                    <p className="text-xs text-emerald-600">OK</p>
+                  </div>
+                  <div className="bg-red-50 rounded-lg p-3">
+                    <p className="text-xl font-bold text-red-700">{validated.filter(e => e.source === "failed").length}</p>
+                    <p className="text-xs text-red-600">Erros</p>
+                  </div>
+                  <div className="bg-muted rounded-lg p-3">
+                    <p className="text-xl font-bold text-muted-foreground">{geoProgress.total - geoProgress.current}</p>
+                    <p className="text-xs text-muted-foreground">Restantes</p>
+                  </div>
+                </div>
+              )}
+              <Button variant="ghost" size="sm" className="w-full text-muted-foreground" onClick={() => { cancelRef.current = true; }}>
+                Cancelar e revisar resultados parciais
+              </Button>
+            </div>
+          )}
+
+          {/* ── REVIEW: validation results ── */}
+          {sub === "review" && (
+            <div className="space-y-4">
+              {/* Summary */}
+              <div className="flex flex-wrap gap-2 text-xs">
+                {coordsCount > 0 && <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-full font-medium">📍 {coordsCount} com coordenadas</span>}
+                {geocodedCount + manualCount > 0 && <span className="px-2.5 py-1 bg-blue-50 text-blue-700 rounded-full font-medium">🗺 {geocodedCount + manualCount} geocodificados</span>}
+                {failCount > 0 && <span className="px-2.5 py-1 bg-red-50 text-red-700 rounded-full font-medium">❌ {failCount} endereço{failCount !== 1 ? "s" : ""} não encontrado{failCount !== 1 ? "s" : ""}</span>}
               </div>
 
+              {/* Tabs */}
+              <div className="flex gap-1 border-b">
+                {failCount > 0 && (
+                  <button onClick={() => setReviewTab("errors")}
+                    className={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors -mb-px ${reviewTab === "errors" ? "border-destructive text-destructive" : "border-transparent text-muted-foreground hover:text-foreground"}`}>
+                    Erros ({failCount})
+                  </button>
+                )}
+                <button onClick={() => setReviewTab("all")}
+                  className={`px-3 py-2 text-xs font-semibold border-b-2 transition-colors -mb-px ${reviewTab === "all" ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"}`}>
+                  Todos ({validated.length})
+                </button>
+              </div>
+
+              {/* Table */}
+              <div className="border rounded-lg overflow-hidden max-h-[340px] overflow-y-auto">
+                <Table>
+                  <TableHeader><TableRow className="bg-muted/40 sticky top-0">
+                    <TableHead className="w-6">#</TableHead>
+                    <TableHead>Nome</TableHead>
+                    <TableHead>Endereço</TableHead>
+                    <TableHead className="w-28">Coordenadas</TableHead>
+                    <TableHead className="w-20">Status</TableHead>
+                    <TableHead className="w-24"></TableHead>
+                  </TableRow></TableHeader>
+                  <TableBody>
+                    {validated
+                      .filter(e => reviewTab === "errors" ? e.source === "failed" : true)
+                      .map((e, _listIdx) => {
+                        const rowIdx = e.origIdx;
+                        const isFailed = e.source === "failed";
+                        const isRegeo = regeocoding === rowIdx;
+                        return (
+                          <TableRow key={rowIdx} className={isFailed ? "bg-red-50/60" : e.source === "coords" ? "bg-emerald-50/40" : "bg-blue-50/30"}>
+                            <TableCell className="text-muted-foreground text-xs py-2">{rowIdx + 1}</TableCell>
+                            <TableCell className="py-2">
+                              <p className="text-xs font-semibold truncate max-w-[100px]">{e.name}</p>
+                              <p className="text-[10px] text-muted-foreground">{e.shift ?? "—"}</p>
+                            </TableCell>
+                            <TableCell className="py-2 max-w-[200px]">
+                              {isFailed ? (
+                                <Input
+                                  value={e.editAddress}
+                                  onChange={ev => setValidated(prev => prev.map((x, i) => i !== rowIdx ? x : { ...x, editAddress: ev.target.value }))}
+                                  className="h-7 text-xs px-2 border-destructive/50 focus:border-destructive"
+                                  placeholder="Corrija o endereço…"
+                                />
+                              ) : (
+                                <p className="text-xs text-muted-foreground truncate">{e.editAddress}</p>
+                              )}
+                            </TableCell>
+                            <TableCell className="py-2">
+                              {e.lat != null && e.lng != null
+                                ? <span className="text-[10px] font-mono text-muted-foreground">{e.lat.toFixed(3)}, {e.lng.toFixed(3)}</span>
+                                : <span className="text-[10px] text-red-500">Sem coordenadas</span>}
+                            </TableCell>
+                            <TableCell className="py-2">
+                              {e.source === "coords" && <span className="text-[10px] font-semibold text-emerald-600 bg-emerald-100 px-1.5 py-0.5 rounded">Planilha</span>}
+                              {e.source === "geocoded" && <span className="text-[10px] font-semibold text-blue-600 bg-blue-100 px-1.5 py-0.5 rounded">Geocod.</span>}
+                              {e.source === "manual" && <span className="text-[10px] font-semibold text-violet-600 bg-violet-100 px-1.5 py-0.5 rounded">Corrigido</span>}
+                              {e.source === "failed" && <span className="text-[10px] font-semibold text-red-600 bg-red-100 px-1.5 py-0.5 rounded">Erro</span>}
+                            </TableCell>
+                            <TableCell className="py-2">
+                              {isFailed && (
+                                <Button size="sm" variant="outline" disabled={isRegeo || !e.editAddress.trim()} onClick={() => void regeocodeOne(rowIdx)}
+                                  className="h-6 text-[10px] px-2 border-primary/40 text-primary hover:bg-primary/5">
+                                  {isRegeo ? "…" : "Re-geocodificar"}
+                                </Button>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                  </TableBody>
+                </Table>
+              </div>
+
+              {/* Confirm section */}
+              {failCount > 0 && (
+                <label className="flex items-start gap-2 cursor-pointer select-none">
+                  <input type="checkbox" checked={acceptFailed} onChange={e => setAcceptFailed(e.target.checked)} className="mt-0.5 accent-primary" />
+                  <span className="text-xs text-muted-foreground leading-relaxed">
+                    Importar os <strong className="text-foreground">{failCount} funcionário{failCount !== 1 ? "s" : ""} sem coordenadas</strong> mesmo assim (posição aproximada pelo endereço)
+                  </span>
+                </label>
+              )}
+
               <div className="flex gap-2">
-                <Button onClick={() => void handleImport(true)} disabled={uploading} className="flex-1">
-                  {uploading ? "Importando…" : `Importar ${parsed.length} funcionários (substituir)`}
+                <Button onClick={() => void handleImport(true)} disabled={failCount > 0 && !acceptFailed} className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white">
+                  <CheckCircle2 className="mr-2 h-4 w-4" />
+                  Confirmar e Importar {validated.length} funcionários
                 </Button>
                 {existingWorkers.length > 0 && (
-                  <Button variant="outline" onClick={() => void handleImport(false)} disabled={uploading}>
+                  <Button variant="outline" onClick={() => void handleImport(false)} disabled={failCount > 0 && !acceptFailed}>
                     Adicionar aos existentes
                   </Button>
                 )}
