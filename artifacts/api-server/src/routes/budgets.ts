@@ -32,34 +32,15 @@ function fakeGeocode(address: string, baseLat = -23.5505, baseLng = -46.6333) {
 const geoCache = new Map<string, { lat: number; lng: number }>();
 
 /**
- * Geocode a single address via Nominatim.
- *
- * When `viewbox` is supplied (the company destination lat/lng), Nominatim is
- * constrained to a ±0.4° bounding box (≈ 45 km) around that point with
- * `bounded=1`.  This prevents the very common case where generic Brazilian
- * street names (e.g. "Rua XV de Novembro") are resolved to a completely
- * different city that happens to share the name.
+ * Geocode a single address string via Nominatim (single HTTP call, no fallback).
+ * Returns null if not found or on error. Results are cached in-process.
  */
-async function geocodeNominatim(
-  address: string,
-  viewbox?: { lat: number; lng: number }
-): Promise<{ lat: number; lng: number } | null> {
+async function geocodeNominatim(address: string): Promise<{ lat: number; lng: number } | null> {
   if (!address.trim()) return null;
-  // Cache key includes the viewbox so the same address near different companies
-  // can return different results.
-  const vbSuffix = viewbox ? `@${viewbox.lat.toFixed(2)},${viewbox.lng.toFixed(2)}` : "";
-  const key = address.trim().toLowerCase() + vbSuffix;
+  const key = address.trim().toLowerCase();
   if (geoCache.has(key)) return geoCache.get(key)!;
   try {
-    let url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1&countrycodes=br`;
-    if (viewbox) {
-      const delta = 0.4; // ≈ 45 km in each direction
-      const left  = (viewbox.lng - delta).toFixed(6);
-      const right = (viewbox.lng + delta).toFixed(6);
-      const bottom = (viewbox.lat - delta).toFixed(6);
-      const top    = (viewbox.lat + delta).toFixed(6);
-      url += `&viewbox=${left},${bottom},${right},${top}&bounded=1`;
-    }
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1&countrycodes=br`;
     const res = await fetch(url, {
       headers: { "User-Agent": "FretaiApp/1.0 (geocoding)" },
       signal: AbortSignal.timeout(8000),
@@ -70,50 +51,121 @@ async function geocodeNominatim(
       geoCache.set(key, result);
       return result;
     }
+    geoCache.set(key, null as unknown as { lat: number; lng: number }); // cache miss
     return null;
   } catch {
     return null;
   }
 }
 
-/** Rate-limited batch geocoding: 1 request per 1.1s, up to maxItems.
+/**
+ * Build a list of progressively simplified address queries to try when the
+ * full address fails Nominatim geocoding.
  *
- * `viewbox` is the company destination coord — passed to every Nominatim call
- * so that employee addresses are resolved within the correct metro area.
+ * Strategy (Brazilian address format):
+ *   Full:  "RUA JOAO CONTI, 472, JD CAMPO BELO, LIMEIRA, SP"
+ *   → [0] street + number + city + state  (strip neighborhood)
+ *   → [1] street + city + state            (strip number too)
+ *   → [2] city + state                     (fallback to city centroid)
+ */
+function buildFallbackQueries(address: string): string[] {
+  const parts = address.split(",").map(p => p.trim()).filter(Boolean);
+  if (parts.length < 3) return []; // nothing to strip
+
+  const state = parts[parts.length - 1]!;
+  const city  = parts[parts.length - 2]!;
+  const cityState = `${city}, ${state}`;
+
+  const fallbacks: string[] = [];
+
+  if (parts.length >= 4) {
+    // Strip middle sections (neighborhoods, complements), keep street + number + city + state
+    const street = parts[0]!;
+    const num    = parts[1]!;
+    // heuristic: if second part looks like a number, it's the house number
+    const isNum  = /^\d/.test(num);
+    if (isNum) {
+      fallbacks.push(`${street}, ${num}, ${cityState}`); // street + number + city
+      fallbacks.push(`${street}, ${cityState}`);          // street only + city
+    } else {
+      fallbacks.push(`${street}, ${cityState}`);          // street only + city
+    }
+  } else if (parts.length === 3) {
+    // "STREET NUMBER, CITY, STATE" — try just city
+  }
+
+  fallbacks.push(cityState); // always try city centroid as last resort
+  return fallbacks;
+}
+
+/**
+ * Progressive geocoding: tries the full address first, then progressively
+ * simpler queries until one succeeds.
+ *
+ * Each attempt is separated by a 1.1 s delay to respect Nominatim's
+ * usage policy (max 1 req/s). Returns null only if every attempt fails.
+ */
+async function geocodeProgressive(address: string): Promise<{ lat: number; lng: number } | null> {
+  // Attempt 1: full address as-is
+  const r1 = await geocodeNominatim(address);
+  if (r1) return r1;
+
+  const fallbacks = buildFallbackQueries(address);
+  for (const q of fallbacks) {
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    const r = await geocodeNominatim(q);
+    if (r) return r;
+  }
+  return null;
+}
+
+/**
+ * Rate-limited batch geocoding with progressive fallback per address.
+ *
+ * Key design points:
+ * - Deduplication happens across ALL items (not just the first N workers).
+ *   This ensures that if worker #300 and worker #5 share an address, both
+ *   benefit from the same geocoding call.
+ * - The cap `maxUniqueAddrs` limits the number of UNIQUE addresses that are
+ *   geocoded via Nominatim.  Any worker whose address falls outside the cap
+ *   receives a `fakeGeocode` scatter point near the company.
+ * - Each unique address is tried with progressive fallback (full → strip
+ *   neighbourhood → strip number → city centroid) before falling back to the
+ *   dummy scatter.
+ *
+ * Rate limit: 1 Nominatim request per 1.1 s (OSM usage policy).
  */
 async function batchGeocode(
   items: Array<{ id: number; address: string }>,
   baseLat: number,
   baseLng: number,
-  maxItems = 60,
-  viewbox?: { lat: number; lng: number }
+  maxUniqueAddrs = 80
 ): Promise<Map<number, { lat: number; lng: number }>> {
   const result = new Map<number, { lat: number; lng: number }>();
-  // Cache key must include viewbox so same addr near different companies differs
-  const vbSuffix = viewbox ? `@${viewbox.lat.toFixed(2)},${viewbox.lng.toFixed(2)}` : "";
-  const uniqueAddrs = new Map<string, { lat: number; lng: number } | null>();
 
-  for (const item of items.slice(0, maxItems)) {
-    const key = item.address.trim().toLowerCase() + vbSuffix;
-    if (!uniqueAddrs.has(key)) uniqueAddrs.set(key, null);
+  // --- Step 1: collect unique addresses from ALL items -----------------------
+  const allUnique: string[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const key = item.address.trim().toLowerCase();
+    if (!seen.has(key)) { seen.add(key); allUnique.push(key); }
   }
 
-  // Geocode unique addresses sequentially with rate limiting
-  for (const [key, _] of uniqueAddrs.entries()) {
-    const addr = key.replace(vbSuffix, "");
-    const r = await geocodeNominatim(addr, viewbox);
-    uniqueAddrs.set(key, r ?? fakeGeocode(addr, baseLat, baseLng));
+  // --- Step 2: geocode the first `maxUniqueAddrs` unique addresses -----------
+  const geocodedMap = new Map<string, { lat: number; lng: number }>();
+  for (const key of allUnique.slice(0, maxUniqueAddrs)) {
+    const r = await geocodeProgressive(key);
+    geocodedMap.set(key, r ?? fakeGeocode(key, baseLat, baseLng));
+    // geocodeProgressive already inserts 1.1 s gaps between its own attempts;
+    // add one final gap before the next address to stay within the rate limit.
     await new Promise(resolve => setTimeout(resolve, 1100));
   }
 
-  for (const item of items.slice(0, maxItems)) {
-    const key = item.address.trim().toLowerCase() + vbSuffix;
-    const geo = uniqueAddrs.get(key) ?? fakeGeocode(item.address, baseLat, baseLng);
+  // --- Step 3: map every worker to its geocoded result ----------------------
+  for (const item of items) {
+    const key = item.address.trim().toLowerCase();
+    const geo = geocodedMap.get(key) ?? fakeGeocode(item.address, baseLat, baseLng);
     result.set(item.id, geo);
-  }
-  // For items beyond maxItems, use scatter
-  for (const item of items.slice(maxItems)) {
-    result.set(item.id, fakeGeocode(item.address, baseLat, baseLng));
   }
   return result;
 }
@@ -699,15 +751,13 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
       : null;
     const companyGeo = companyGeoReal ?? fakeGeocode(budget.destinationAddress ?? "São Paulo");
 
-    // Geocode individual employee addresses (rate-limited, up to 60 unique addresses).
-    // Pass companyGeo as viewbox so Nominatim restricts results to the correct city.
+    // Geocode individual employee addresses (progressive fallback, up to 60 unique addresses).
     req.log.info({ budgetId: id }, "Geocodificando endereços dos funcionários via Nominatim...");
     const workerGeoMap = await batchGeocode(
       workers.map(w => ({ id: w.id, address: w.address ?? "" })),
       companyGeo.lat,
       companyGeo.lng,
-      60,
-      companyGeoReal ? companyGeo : undefined
+      60
     );
     // Update workers with real coordinates in DB
     for (const [wid, geo] of workerGeoMap.entries()) {

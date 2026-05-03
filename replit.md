@@ -91,8 +91,12 @@ A página `/painel/compras` gera e exibe o histórico de pedidos de vale-transpo
 - Agrupa workers por turno (parse "06:00/14:20" → start "06:00")
 - Bin-packing usando vehicle_types ordenados por strategy
 - vehicleBlockId reusado entre turnos compatíveis (turno B começa quando A termina ±30min)
-- Geocodificação determinística por hash do endereço (scatter ao redor do endereço da empresa)
-- 1 boarding_point por grupo de endereço similar dentro de cada rota
+- Geocodificação **progressiva com fallback**: 1) endereço completo, 2) sem bairro, 3) só rua+cidade, 4) centroide da cidade — último recurso: fakeGeocode scatter
+  - Remove `bounded=1` e viewbox do Nominatim: cidade no endereço já disambigua, viewbox bloqueava workers de outras cidades
+  - Deduplicação por endereço único em TODOS os workers (não apenas os primeiros N)
+  - Cap de 80 endereços únicos por processamento (~3 min com fallbacks)
+- Clusterização MCLP (Maximum Coverage Location Problem) dos boarding points
+- TSP via OSRM Trip API para sequência ótima dos boarding points por rota
 
 ### Frontend (`BudgetsSection.tsx`) — 3 views, 4 abas
 - **List view**: tabela com status badge, employeeCount, routeCount, botão criar/ver/deletar
