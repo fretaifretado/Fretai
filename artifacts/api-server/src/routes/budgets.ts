@@ -378,6 +378,25 @@ router.post("/admin/budgets", requireAdmin, async (req, res) => {
   }
 });
 
+/* ─── Vehicle types (for finalize form) ─────────────────────────────────── */
+router.get("/admin/budgets/vehicle-types", requireAdmin, async (req, res) => {
+  try {
+    let types = await db.select().from(vehicleTypesTable).orderBy(desc(vehicleTypesTable.capacity));
+    if (types.length === 0) {
+      types = [
+        { id: 1, type: "Ônibus", capacity: 44, costPerKm: "4.50", fixedCost: "150.00", createdAt: new Date() },
+        { id: 2, type: "Micro-ônibus", capacity: 30, costPerKm: "3.20", fixedCost: "100.00", createdAt: new Date() },
+        { id: 3, type: "Van", capacity: 15, costPerKm: "2.10", fixedCost: "60.00", createdAt: new Date() },
+        { id: 4, type: "Mini-Van", capacity: 6, costPerKm: "1.50", fixedCost: "30.00", createdAt: new Date() },
+      ];
+    }
+    res.json(types);
+  } catch (err) {
+    req.log.error({ err }, "Error fetching vehicle types");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
 /* ─── Get budget detail ───────────────────────────────────────────────────── */
 router.get("/admin/budgets/:id", requireAdmin, async (req, res) => {
   const id = parseInt(String(req.params.id), 10);
@@ -520,7 +539,7 @@ router.post("/admin/budgets/:id/employees", requireAdmin, async (req, res) => {
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
 
   const { employees, replace = false } = req.body as {
-    employees: Array<{ name: string; address: string; shift?: string | null }>;
+    employees: Array<{ name: string; address?: string; shift?: string | null; lat?: number; lng?: number }>;
     replace?: boolean;
   };
   if (!Array.isArray(employees) || employees.length === 0) {
@@ -543,7 +562,10 @@ router.post("/admin/budgets/:id/employees", requireAdmin, async (req, res) => {
       .filter(e => e.name?.trim())
       .map(e => {
         const addr = (e.address ?? "").trim();
-        const geo = addr ? fakeGeocode(addr, companyGeo.lat, companyGeo.lng) : { lat: companyGeo.lat, lng: companyGeo.lng };
+        const hasRealGeo = e.lat != null && e.lng != null && !isNaN(Number(e.lat)) && !isNaN(Number(e.lng));
+        const geo = hasRealGeo
+          ? { lat: Number(e.lat), lng: Number(e.lng) }
+          : (addr ? fakeGeocode(addr, companyGeo.lat, companyGeo.lng) : { lat: companyGeo.lat, lng: companyGeo.lng });
         return {
           budgetId: id,
           name: e.name.trim(),
@@ -551,7 +573,7 @@ router.post("/admin/budgets/:id/employees", requireAdmin, async (req, res) => {
           shift: e.shift?.trim() || null,
           lat: String(geo.lat),
           lng: String(geo.lng),
-          geocoded: !!addr,
+          geocoded: hasRealGeo || !!addr,
         };
       });
 
@@ -901,6 +923,228 @@ router.delete("/admin/budgets/:id/employees/:wid", requireAdmin, async (req, res
   } catch (err) {
     req.log.error({ err }, "Error deleting worker");
     res.status(500).json({ error: "Erro ao deletar" });
+  }
+});
+
+/* ─── Boarding points — list (manual) ───────────────────────────────────── */
+router.get("/admin/budgets/:id/boarding-points", requireAdmin, async (req, res) => {
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  try {
+    const bps = await db.select().from(budgetBoardingPointsTable)
+      .where(eq(budgetBoardingPointsTable.budgetId, id))
+      .orderBy(budgetBoardingPointsTable.sequenceOrder);
+
+    const allWorkers = await db.select({ id: budgetWorkersTable.id, boardingPointId: budgetWorkersTable.boardingPointId })
+      .from(budgetWorkersTable).where(eq(budgetWorkersTable.budgetId, id));
+
+    const workersByBP = new Map<number, number[]>();
+    for (const w of allWorkers) {
+      if (!w.boardingPointId) continue;
+      if (!workersByBP.has(w.boardingPointId)) workersByBP.set(w.boardingPointId, []);
+      workersByBP.get(w.boardingPointId)!.push(w.id);
+    }
+
+    res.json(bps.map(bp => ({
+      id: bp.id,
+      name: bp.name,
+      lat: parseFloat(String(bp.lat)),
+      lng: parseFloat(String(bp.lng)),
+      radiusKm: bp.radiusKm ? parseFloat(String(bp.radiusKm)) : 1.0,
+      shiftTime: bp.shiftTime,
+      passengerCount: bp.passengerCount,
+      sequenceOrder: bp.sequenceOrder,
+      workerIds: workersByBP.get(bp.id) ?? [],
+    })));
+  } catch (err) {
+    req.log.error({ err }, "Error listing boarding points");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ─── Boarding points — create ───────────────────────────────────────────── */
+router.post("/admin/budgets/:id/boarding-points", requireAdmin, async (req, res) => {
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const { lat, lng, radiusKm, shiftTime, workerIds, name } = req.body as {
+    lat: number; lng: number; radiusKm?: number; shiftTime?: string;
+    workerIds?: number[]; name?: string;
+  };
+  try {
+    const existing = await db.select({ id: budgetBoardingPointsTable.id })
+      .from(budgetBoardingPointsTable).where(eq(budgetBoardingPointsTable.budgetId, id));
+    const seqNum = existing.length + 1;
+
+    const [bp] = await db.insert(budgetBoardingPointsTable).values({
+      budgetId: id,
+      name: name ?? `Ponto ${seqNum}`,
+      lat: String(lat),
+      lng: String(lng),
+      radiusKm: radiusKm ? String(radiusKm) : "1.000",
+      shiftTime: shiftTime ?? null,
+      passengerCount: workerIds?.length ?? 0,
+      sequenceOrder: seqNum,
+    }).returning();
+
+    if (bp && workerIds?.length) {
+      await db.update(budgetWorkersTable)
+        .set({ boardingPointId: bp.id })
+        .where(inArray(budgetWorkersTable.id, workerIds));
+    }
+
+    res.status(201).json({ ...bp, workerIds: workerIds ?? [] });
+  } catch (err) {
+    req.log.error({ err }, "Error creating boarding point");
+    res.status(500).json({ error: "Erro ao criar ponto de embarque" });
+  }
+});
+
+/* ─── Boarding points — update (move) ───────────────────────────────────── */
+router.put("/admin/budgets/:id/boarding-points/:bpId", requireAdmin, async (req, res) => {
+  const bpId = parseInt(String(req.params.bpId), 10);
+  if (isNaN(bpId)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const { lat, lng, radiusKm, workerIds } = req.body as {
+    lat: number; lng: number; radiusKm?: number; workerIds?: number[];
+  };
+  try {
+    await db.update(budgetWorkersTable).set({ boardingPointId: null }).where(eq(budgetWorkersTable.boardingPointId, bpId));
+    if (workerIds?.length) {
+      await db.update(budgetWorkersTable).set({ boardingPointId: bpId }).where(inArray(budgetWorkersTable.id, workerIds));
+    }
+    await db.update(budgetBoardingPointsTable).set({
+      lat: String(lat), lng: String(lng),
+      ...(radiusKm != null ? { radiusKm: String(radiusKm) } : {}),
+      passengerCount: workerIds?.length ?? 0,
+    }).where(eq(budgetBoardingPointsTable.id, bpId));
+    res.json({ ok: true });
+  } catch (err) {
+    req.log.error({ err }, "Error updating boarding point");
+    res.status(500).json({ error: "Erro ao atualizar ponto" });
+  }
+});
+
+/* ─── Boarding points — delete ───────────────────────────────────────────── */
+router.delete("/admin/budgets/:id/boarding-points/:bpId", requireAdmin, async (req, res) => {
+  const bpId = parseInt(String(req.params.bpId), 10);
+  if (isNaN(bpId)) { res.status(400).json({ error: "ID inválido" }); return; }
+  try {
+    await db.update(budgetWorkersTable).set({ boardingPointId: null }).where(eq(budgetWorkersTable.boardingPointId, bpId));
+    await db.delete(budgetBoardingPointsTable).where(eq(budgetBoardingPointsTable.id, bpId));
+    res.json({ ok: true });
+  } catch (err) {
+    req.log.error({ err }, "Error deleting boarding point");
+    res.status(500).json({ error: "Erro ao deletar ponto" });
+  }
+});
+
+/* ─── Finalize manual routes ─────────────────────────────────────────────── */
+router.post("/admin/budgets/:id/finalize-manual", requireAdmin, async (req, res) => {
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+
+  const { shiftRoutes } = req.body as {
+    shiftRoutes: Array<{ shiftTime: string; vehicleTypeId: number }>;
+  };
+  if (!Array.isArray(shiftRoutes) || shiftRoutes.length === 0) {
+    res.status(400).json({ error: "shiftRoutes[] obrigatório" }); return;
+  }
+
+  try {
+    // Load vehicle types
+    let vehicleTypes = await db.select().from(vehicleTypesTable).orderBy(desc(vehicleTypesTable.capacity));
+    if (vehicleTypes.length === 0) {
+      vehicleTypes = [
+        { id: 1, type: "Ônibus", capacity: 44, costPerKm: "4.50", fixedCost: "150.00", createdAt: new Date() },
+        { id: 2, type: "Micro-ônibus", capacity: 30, costPerKm: "3.20", fixedCost: "100.00", createdAt: new Date() },
+        { id: 3, type: "Van", capacity: 15, costPerKm: "2.10", fixedCost: "60.00", createdAt: new Date() },
+        { id: 4, type: "Mini-Van", capacity: 6, costPerKm: "1.50", fixedCost: "30.00", createdAt: new Date() },
+      ];
+    }
+
+    // Load budget
+    const [budget] = await db.select().from(budgetsTable).where(eq(budgetsTable.id, id)).limit(1);
+    if (!budget) { res.status(404).json({ error: "Orçamento não encontrado" }); return; }
+
+    // Load boarding points
+    const allBPs = await db.select().from(budgetBoardingPointsTable).where(eq(budgetBoardingPointsTable.budgetId, id));
+    if (allBPs.length === 0) { res.status(400).json({ error: "Nenhum ponto de embarque criado" }); return; }
+
+    const companyGeoReal = budget.destinationAddress ? await geocodeNominatim(budget.destinationAddress) : null;
+    const companyGeo = companyGeoReal ?? fakeGeocode(budget.destinationAddress ?? "São Paulo");
+
+    // Clear existing routes (keep BPs)
+    await db.delete(budgetRoutesTable).where(eq(budgetRoutesTable.budgetId, id));
+    await db.update(budgetBoardingPointsTable).set({ routeId: null }).where(eq(budgetBoardingPointsTable.budgetId, id));
+
+    const createdRoutes: Array<typeof budgetRoutesTable.$inferSelect> = [];
+
+    for (const sr of shiftRoutes) {
+      const shiftBPs = allBPs.filter(bp => (bp.shiftTime ?? "06:00") === sr.shiftTime);
+      if (shiftBPs.length === 0) continue;
+
+      const vt = vehicleTypes.find(v => v.id === sr.vehicleTypeId) ?? vehicleTypes[vehicleTypes.length - 1]!;
+      const totalPassengers = shiftBPs.reduce((s, bp) => s + bp.passengerCount, 0);
+
+      // Optimize route with TSP
+      const bpCentroids = shiftBPs.map(bp => ({ lat: parseFloat(String(bp.lat)), lng: parseFloat(String(bp.lng)) }));
+      const tspResult = await optimizeTSP(bpCentroids, companyGeo.lat, companyGeo.lng);
+
+      let distKm: number;
+      const orderedBPs: typeof shiftBPs = tspResult
+        ? tspResult.order.map(i => shiftBPs[i]!).filter(Boolean)
+        : shiftBPs;
+
+      if (tspResult) {
+        distKm = Math.max(1.0, tspResult.distanceKm);
+      } else {
+        const pts = [...bpCentroids, companyGeo];
+        let hav = 0;
+        for (let i = 0; i < pts.length - 1; i++) {
+          hav += haversineKm(pts[i]!.lat, pts[i]!.lng, pts[i + 1]!.lat, pts[i + 1]!.lng);
+        }
+        distKm = Math.max(1.0, hav * 1.4);
+      }
+      distKm = parseFloat(distKm.toFixed(2));
+
+      const estimatedMinutes = Math.round(10 + shiftBPs.length * 4 + distKm * 2);
+      const costPerKm = parseFloat(String(vt.costPerKm ?? "3.50"));
+      const fixedCost = parseFloat(String(vt.fixedCost ?? "80.00"));
+      const totalCost = (distKm * 2 * costPerKm + fixedCost).toFixed(2);
+      const occupancy = ((totalPassengers / vt.capacity) * 100).toFixed(2);
+
+      const [route] = await db.insert(budgetRoutesTable).values({
+        budgetId: id,
+        name: `Rota ${sr.shiftTime}`,
+        shiftTime: sr.shiftTime,
+        vehicleBlockId: 1,
+        totalPassengers,
+        totalDistanceKm: String(distKm),
+        estimatedMinutes,
+        occupancyPct: occupancy,
+        totalCost,
+        vehicleAssignments: [{ vehicleType: vt.type, count: 1, capacity: vt.capacity }],
+      }).returning();
+
+      if (route) {
+        for (let i = 0; i < orderedBPs.length; i++) {
+          await db.update(budgetBoardingPointsTable)
+            .set({ routeId: route.id, sequenceOrder: i + 1 })
+            .where(eq(budgetBoardingPointsTable.id, orderedBPs[i]!.id));
+        }
+        createdRoutes.push(route);
+      }
+    }
+
+    await db.update(budgetsTable).set({
+      status: "ready",
+      routesCount: createdRoutes.length,
+      updatedAt: new Date(),
+    }).where(eq(budgetsTable.id, id));
+
+    res.json({ routes: createdRoutes.length });
+  } catch (err) {
+    req.log.error({ err }, "Error finalizing manual routes");
+    res.status(500).json({ error: "Erro ao criar rotas" });
   }
 });
 
