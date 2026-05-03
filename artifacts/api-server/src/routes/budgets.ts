@@ -146,6 +146,67 @@ function addressKey(address: string): string {
 
 /* ─── Geospatial helpers ─────────────────────────────────────────────────── */
 
+/**
+ * OSRM Trip API — Traveling Salesman Problem solver.
+ *
+ * Given N boarding-point centroids + the company destination, asks the OSRM
+ * public routing engine to find the shortest road-network path that visits all
+ * boarding points exactly once and ends at the company.
+ *
+ * Returns the optimal visit order as an array of original BP indices, e.g.
+ * [2, 0, 1] means "visit cluster[2] first, then cluster[0], then cluster[1],
+ * then drive to the company". Also returns the total road distance in km.
+ *
+ * Falls back gracefully (null) if the API call fails so the original insertion
+ * order is kept.
+ */
+async function optimizeTSP(
+  bpCentroids: Array<{ lat: number; lng: number }>,
+  companyLat: number,
+  companyLng: number
+): Promise<{ order: number[]; distanceKm: number } | null> {
+  if (bpCentroids.length <= 1) {
+    // Single stop — nothing to optimize; compute straight-line distance only
+    const d = bpCentroids.length === 1
+      ? haversineKm(bpCentroids[0]!.lat, bpCentroids[0]!.lng, companyLat, companyLng) * 1.4
+      : 0;
+    return { order: bpCentroids.map((_, i) => i), distanceKm: parseFloat(d.toFixed(2)) };
+  }
+
+  // Coordinates string: all BPs first, company last (fixed destination)
+  const coords = [
+    ...bpCentroids.map(c => `${c.lng},${c.lat}`),
+    `${companyLng},${companyLat}`,
+  ].join(";");
+
+  const url =
+    `https://router.project-osrm.org/trip/v1/driving/${coords}` +
+    `?roundtrip=false&source=any&destination=last&overview=false&annotations=false`;
+
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": "FretaiApp/1.0 (route-optimization)" },
+      signal: AbortSignal.timeout(12000),
+    });
+    const data = await res.json() as {
+      code: string;
+      trips?: Array<{ distance: number }>;
+      waypoints?: Array<{ waypoint_index: number }>;
+    };
+    if (data.code !== "Ok" || !data.waypoints || !data.trips?.[0]) return null;
+
+    // waypoints are in visit order (TSP solution); last entry is always the company
+    const order = data.waypoints
+      .slice(0, -1)               // drop the company (last waypoint)
+      .map(w => w.waypoint_index); // original BP index
+
+    const distanceKm = parseFloat((data.trips[0].distance / 1000).toFixed(2));
+    return { order, distanceKm };
+  } catch {
+    return null;
+  }
+}
+
 /** Haversine distance in km between two lat/lng points */
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
@@ -753,16 +814,34 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
         // passengers walk to it instead of being picked up at home.
         const boardingClusters = clusterByRadius(batch, radiusKm, companyGeo.lat, companyGeo.lng);
 
-        // Route distance: sum of haversine legs between consecutive boarding points
-        // plus the final leg to the company destination
-        let distKm = 0;
-        const pts = [...boardingClusters.map(c => c.centroid), companyGeo];
-        for (let i = 0; i < pts.length - 1; i++) {
-          distKm += haversineKm(pts[i]!.lat, pts[i]!.lng, pts[i + 1]!.lat, pts[i + 1]!.lng);
-        }
-        distKm = parseFloat(Math.max(1.0, distKm * 1.4).toFixed(2));
+        // ── TSP optimisation via OSRM Trip API ───────────────────────────────
+        // Asks the OSRM public routing engine to find the shortest road-network
+        // path that visits all boarding-point centroids and ends at the company.
+        // Returns both the optimal visit ORDER and the real road distance in km.
+        // Falls back to Haversine estimate if the API call fails.
+        const bpCentroids = boardingClusters.map(c => c.centroid);
+        const tspResult = await optimizeTSP(bpCentroids, companyGeo.lat, companyGeo.lng);
 
-        const numStops = boardingClusters.length;
+        // Reorder clusters according to TSP-optimal sequence
+        const orderedClusters = tspResult
+          ? tspResult.order.map(i => boardingClusters[i]!).filter(Boolean)
+          : boardingClusters;
+
+        // Use OSRM real road distance; fall back to Haversine if TSP failed
+        let distKm: number;
+        if (tspResult) {
+          distKm = Math.max(1.0, tspResult.distanceKm);
+        } else {
+          const pts = [...bpCentroids, companyGeo];
+          let hav = 0;
+          for (let i = 0; i < pts.length - 1; i++) {
+            hav += haversineKm(pts[i]!.lat, pts[i]!.lng, pts[i + 1]!.lat, pts[i + 1]!.lng);
+          }
+          distKm = Math.max(1.0, hav * 1.4);
+        }
+        distKm = parseFloat(distKm.toFixed(2));
+
+        const numStops = orderedClusters.length;
         const durationMins = Math.round(10 + numStops * 5 + distKm * 2.0);
         const costPerKm = parseFloat(String(chosen.costPerKm ?? "3.50"));
         const fixedCost = parseFloat(String(chosen.fixedCost ?? "80.00"));
@@ -785,7 +864,7 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
         // One boarding point per cluster; track exact worker IDs per cluster
         const thisRouteClusters: Array<{ bpInsertIdx: number; workerIds: number[] }> = [];
         let seq = 1;
-        for (const cluster of boardingClusters) {
+        for (const cluster of orderedClusters) {
           const label = cluster.workers[0]?.address?.split(",").slice(0, 2).join(",").trim()
             ?? `Ponto de Embarque ${seq}`;
           const bpInsertIdx = bpsToInsert.length;
