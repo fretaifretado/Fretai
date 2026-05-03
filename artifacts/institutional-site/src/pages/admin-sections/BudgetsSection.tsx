@@ -44,7 +44,7 @@ interface VehicleType {
 }
 interface ManualBP {
   id: number; name: string; lat: number; lng: number;
-  radiusKm: number; shiftTime: string | null;
+  radiusKm: number; shiftTime: string | null; direction: string | null;
   passengerCount: number; sequenceOrder: number | null; workerIds: number[];
 }
 interface ExtRoute {
@@ -728,21 +728,13 @@ function UploadStep({ budgetId, token, existingWorkers, onComplete, onSkip }: {
 }
 
 /* ─── Finalize step ──────────────────────────────────────────────────────── */
-type Direction = "ida" | "volta";
-const DIRECTIONS: { key: Direction; label: string; icon: string; desc: string }[] = [
-  { key: "ida",   label: "Ida",   icon: "→", desc: "Casa → Empresa" },
-  { key: "volta", label: "Volta", icon: "←", desc: "Empresa → Casa"  },
-];
-
 function FinalizeStep({ budgetId, token, onComplete, onBack }: {
   budgetId: number; token: string | null; onComplete: () => void; onBack: () => void;
 }) {
   const [bps, setBps] = useState<ManualBP[]>([]);
   const [vehicleTypes, setVehicleTypes] = useState<VehicleType[]>([]);
-  // key: `${shift}:${direction}` → vehicleTypeId
+  // key: `${shiftTime}|${direction}` → vehicleTypeId
   const [selections, setSelections] = useState<Record<string, number>>({});
-  // which directions are enabled per shift (both enabled by default)
-  const [enabled, setEnabled] = useState<Record<string, Record<Direction, boolean>>>({});
   const [creating, setCreating] = useState(false);
   const [err, setErr] = useState("");
   const hdrs = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
@@ -755,60 +747,44 @@ function FinalizeStep({ budgetId, token, onComplete, onBack }: {
       setBps(bpsData);
       const vt = vtData.sort((a, b) => b.capacity - a.capacity);
       setVehicleTypes(vt);
-      const shiftPax = new Map<string, number>();
+      // Auto-select best vehicle per (shiftTime, direction) group
+      const groupPax = new Map<string, number>();
       for (const bp of bpsData) {
-        const k = bp.shiftTime ?? "06:00";
-        shiftPax.set(k, (shiftPax.get(k) ?? 0) + bp.passengerCount);
+        const k = `${bp.shiftTime ?? "06:00"}|${bp.direction ?? "ida"}`;
+        groupPax.set(k, (groupPax.get(k) ?? 0) + bp.passengerCount);
       }
       const initSel: Record<string, number> = {};
-      const initEn: Record<string, Record<Direction, boolean>> = {};
-      for (const [shift, pax] of shiftPax) {
+      for (const [key, pax] of groupPax) {
         const rec = [...vt].reverse().find(v => v.capacity >= pax) ?? vt[vt.length - 1];
-        if (rec) {
-          initSel[`${shift}:ida`] = rec.id;
-          initSel[`${shift}:volta`] = rec.id;
-        }
-        initEn[shift] = { ida: true, volta: true };
+        if (rec) initSel[key] = rec.id;
       }
       setSelections(initSel);
-      setEnabled(initEn);
     });
   }, [budgetId]);
 
+  /* Group boarding points by (shiftTime|direction) */
   const shiftGroups = useMemo(() => {
     const m = new Map<string, ManualBP[]>();
     for (const bp of bps) {
-      const k = bp.shiftTime ?? "06:00";
+      const k = `${bp.shiftTime ?? "06:00"}|${bp.direction ?? "ida"}`;
       if (!m.has(k)) m.set(k, []);
       m.get(k)!.push(bp);
     }
     return m;
   }, [bps]);
 
-  const toggleDir = (shift: string, dir: Direction) =>
-    setEnabled(prev => ({ ...prev, [shift]: { ...prev[shift], [dir]: !(prev[shift]?.[dir] ?? true) } }));
-
-  const totalRoutes = [...shiftGroups.keys()].reduce((s, shift) => {
-    const en = enabled[shift] ?? { ida: true, volta: true };
-    return s + (en.ida ? 1 : 0) + (en.volta ? 1 : 0);
-  }, 0);
-
   const handleCreate = async () => {
-    if (totalRoutes === 0) { setErr("Habilite ao menos uma rota."); return; }
+    if (!shiftGroups.size) { setErr("Nenhum ponto de embarque encontrado."); return; }
     setCreating(true); setErr("");
     try {
-      const shiftRoutes: Array<{ shiftTime: string; direction: string; vehicleTypeId: number }> = [];
-      for (const shift of [...shiftGroups.keys()].sort()) {
-        const en = enabled[shift] ?? { ida: true, volta: true };
-        for (const dir of ["ida", "volta"] as Direction[]) {
-          if (!en[dir]) continue;
-          shiftRoutes.push({
-            shiftTime: shift,
-            direction: dir,
-            vehicleTypeId: selections[`${shift}:${dir}`] ?? vehicleTypes[0]?.id ?? 3,
-          });
-        }
-      }
+      const shiftRoutes = [...shiftGroups.keys()].sort().map(key => {
+        const [shiftTime, direction] = key.split("|");
+        return {
+          shiftTime: shiftTime!,
+          direction: direction!,
+          vehicleTypeId: selections[key] ?? vehicleTypes[0]?.id ?? 3,
+        };
+      });
       const r = await fetch(`/api/admin/budgets/${budgetId}/finalize-manual`, {
         method: "POST", headers: hdrs,
         body: JSON.stringify({ shiftRoutes }),
@@ -829,123 +805,90 @@ function FinalizeStep({ budgetId, token, onComplete, onBack }: {
   );
 
   return (
-    <div className="space-y-4 max-w-4xl">
+    <div className="space-y-4 max-w-3xl">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold">Selecionar Veículos por Sentido</h2>
-          <p className="text-muted-foreground text-sm">Configure o veículo para cada turno e sentido (Ida e/ou Volta). Desative os que não precisar.</p>
+          <h2 className="text-xl font-bold">Selecionar Veículos</h2>
+          <p className="text-muted-foreground text-sm">
+            Cada grupo de pontos (turno + sentido) gera uma rota. Escolha o veículo para cada uma.
+          </p>
         </div>
         <Button variant="ghost" size="sm" onClick={onBack}>← Ajustar Pontos</Button>
       </div>
 
       {err && <div className="flex items-center gap-2 text-sm text-destructive bg-destructive/10 rounded-lg px-3 py-2"><AlertCircle size={14} />{err}</div>}
 
-      <div className="space-y-6">
-        {[...shiftGroups.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([shift, shiftBps]) => {
-          const totalPax = shiftBps.reduce((s, b) => s + b.passengerCount, 0);
-          const en = enabled[shift] ?? { ida: true, volta: true };
+      <div className="grid gap-3">
+        {[...shiftGroups.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, groupBps]) => {
+          const [shiftTime, direction] = key.split("|");
+          const isIda = direction !== "volta";
+          const totalPax = groupBps.reduce((s, b) => s + b.passengerCount, 0);
+          const selectedVt = vehicleTypes.find(v => v.id === selections[key]);
+          const occupancy = selectedVt ? totalPax / selectedVt.capacity * 100 : 0;
+          const occupancyColor = occupancy >= 80 ? "text-emerald-600" : occupancy >= 60 ? "text-amber-600" : "text-red-500";
+          const borderColor = isIda ? "#bfdbfe" : "#ddd6fe";
 
           return (
-            <div key={shift} className="space-y-2">
-              {/* Shift header */}
-              <div className="flex items-center gap-3">
-                <div className="h-px flex-1 bg-border" />
-                <span className="text-xs font-bold text-muted-foreground uppercase tracking-widest px-2">
-                  Turno {shift} · {totalPax} passageiros · {shiftBps.length} pontos
-                </span>
-                <div className="h-px flex-1 bg-border" />
-              </div>
+            <Card key={key} className="border-l-4" style={{ borderLeftColor: borderColor }}>
+              <CardContent className="pt-4 pb-4">
+                <div className="flex items-start gap-4">
+                  {/* Shift + direction badge */}
+                  <div className="flex-shrink-0 text-center">
+                    <div className={`px-3 py-2 rounded-lg ${isIda ? "bg-blue-50" : "bg-violet-50"}`}>
+                      <p className="text-xs text-muted-foreground">Turno</p>
+                      <p className={`text-lg font-bold ${isIda ? "text-blue-700" : "text-violet-700"}`}>{shiftTime}</p>
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${isIda ? "bg-blue-100 text-blue-700" : "bg-violet-100 text-violet-700"}`}>
+                        {isIda ? "→ Ida" : "← Volta"}
+                      </span>
+                    </div>
+                  </div>
 
-              {/* Ida + Volta cards side by side */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {DIRECTIONS.map(({ key: dir, label, icon, desc }) => {
-                  const selKey = `${shift}:${dir}`;
-                  const isEnabled = en[dir];
-                  const selectedVt = vehicleTypes.find(v => v.id === selections[selKey]);
-                  const occupancy = selectedVt ? totalPax / selectedVt.capacity * 100 : 0;
-                  const occupancyColor = occupancy >= 80 ? "text-emerald-600" : occupancy >= 60 ? "text-amber-600" : "text-red-500";
-                  const dirColor = dir === "ida" ? "text-blue-600 bg-blue-50 border-blue-200" : "text-violet-600 bg-violet-50 border-violet-200";
-                  const dirColorDisabled = "text-muted-foreground bg-muted/30 border-border";
+                  {/* Stats */}
+                  <div className="flex-1 grid grid-cols-3 gap-3 text-sm">
+                    <div><p className="text-xs text-muted-foreground">Passageiros</p><p className="font-bold text-lg">{totalPax}</p></div>
+                    <div><p className="text-xs text-muted-foreground">Pontos</p><p className="font-bold text-lg">{groupBps.length}</p></div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Ocupação</p>
+                      <p className={`font-bold text-lg ${occupancyColor}`}>{selectedVt ? `${occupancy.toFixed(0)}%` : "—"}</p>
+                    </div>
+                  </div>
 
-                  return (
-                    <Card key={dir} className={`border-2 transition-all duration-150 ${isEnabled ? (dir === "ida" ? "border-blue-200" : "border-violet-200") : "border-border opacity-60"}`}>
-                      <CardContent className="pt-4 pb-4">
-                        {/* Direction header with toggle */}
-                        <div className="flex items-center justify-between mb-3">
-                          <div className={`flex items-center gap-2 px-2.5 py-1 rounded-lg text-sm font-bold border ${isEnabled ? dirColor : dirColorDisabled}`}>
-                            <span className="text-base leading-none">{icon}</span>
-                            <span>{label}</span>
-                            <span className="text-xs font-normal opacity-70">{desc}</span>
-                          </div>
-                          <label className="flex items-center gap-1.5 cursor-pointer select-none">
-                            <span className="text-xs text-muted-foreground">{isEnabled ? "Habilitado" : "Desativado"}</span>
-                            <div className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${isEnabled ? (dir === "ida" ? "bg-blue-500" : "bg-violet-500") : "bg-muted"}`}
-                              onClick={() => toggleDir(shift, dir)} role="button" tabIndex={0}
-                              onKeyDown={e => e.key === "Enter" && toggleDir(shift, dir)}>
-                              <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${isEnabled ? "translate-x-4" : "translate-x-1"}`} />
-                            </div>
-                          </label>
-                        </div>
-
-                        {isEnabled ? (
-                          <div className="space-y-3">
-                            {/* Stats */}
-                            <div className="grid grid-cols-3 gap-2 text-center">
-                              <div className="bg-muted/30 rounded-lg py-2">
-                                <p className="text-xs text-muted-foreground">Passageiros</p>
-                                <p className="font-bold">{totalPax}</p>
-                              </div>
-                              <div className="bg-muted/30 rounded-lg py-2">
-                                <p className="text-xs text-muted-foreground">Pontos</p>
-                                <p className="font-bold">{shiftBps.length}</p>
-                              </div>
-                              <div className="bg-muted/30 rounded-lg py-2">
-                                <p className="text-xs text-muted-foreground">Ocupação</p>
-                                <p className={`font-bold text-sm ${occupancyColor}`}>{selectedVt ? `${occupancy.toFixed(0)}%` : "—"}</p>
-                              </div>
-                            </div>
-                            {/* Vehicle selector */}
-                            <div>
-                              <Label className="text-xs text-muted-foreground mb-1 block">Tipo de Veículo</Label>
-                              <Select value={String(selections[selKey] ?? "")} onValueChange={v => setSelections(s => ({ ...s, [selKey]: parseInt(v) }))}>
-                                <SelectTrigger className="h-9">
-                                  <SelectValue placeholder="Selecione…" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {vehicleTypes.map(vt => {
-                                    const occ = (totalPax / vt.capacity * 100).toFixed(0);
-                                    return (
-                                      <SelectItem key={vt.id} value={String(vt.id)}>
-                                        <span className="font-medium">{vt.type}</span>
-                                        <span className="text-muted-foreground ml-2 text-xs">{vt.capacity} lug. · {occ}%</span>
-                                      </SelectItem>
-                                    );
-                                  })}
-                                </SelectContent>
-                              </Select>
-                              {selectedVt && totalPax > selectedVt.capacity && (
-                                <p className="text-xs text-red-500 mt-1">⚠ Excede a capacidade do veículo!</p>
-                              )}
-                            </div>
-                          </div>
-                        ) : (
-                          <p className="text-xs text-muted-foreground text-center py-3">
-                            Rota de {label.toLowerCase()} desativada. Ative o toggle para configurar.
-                          </p>
-                        )}
-                      </CardContent>
-                    </Card>
-                  );
-                })}
-              </div>
-            </div>
+                  {/* Vehicle selector */}
+                  <div className="flex-shrink-0 w-48">
+                    <Label className="text-xs text-muted-foreground mb-1 block">Tipo de Veículo</Label>
+                    <Select value={String(selections[key] ?? "")} onValueChange={v => setSelections(s => ({ ...s, [key]: parseInt(v) }))}>
+                      <SelectTrigger className="h-9">
+                        <SelectValue placeholder="Selecione…" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {vehicleTypes.map(vt => {
+                          const occ = (totalPax / vt.capacity * 100).toFixed(0);
+                          return (
+                            <SelectItem key={vt.id} value={String(vt.id)}>
+                              <span className="font-medium">{vt.type}</span>
+                              <span className="text-muted-foreground ml-2 text-xs">{vt.capacity} lug. · {occ}%</span>
+                            </SelectItem>
+                          );
+                        })}
+                      </SelectContent>
+                    </Select>
+                    {selectedVt && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {totalPax}/{selectedVt.capacity} lugares
+                        {totalPax > selectedVt.capacity && <span className="text-red-500 ml-1">· Excede capacidade!</span>}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
           );
         })}
       </div>
 
       <div className="flex justify-end pt-2">
-        <Button onClick={() => void handleCreate()} disabled={creating || totalRoutes === 0} size="lg" className="bg-emerald-600 hover:bg-emerald-700 text-white">
-          {creating ? "Criando Rotas…" : `Criar ${totalRoutes} Rota${totalRoutes !== 1 ? "s" : ""} →`}
+        <Button onClick={() => void handleCreate()} disabled={creating} size="lg" className="bg-emerald-600 hover:bg-emerald-700 text-white">
+          {creating ? "Criando Rotas…" : `Criar ${shiftGroups.size} Rota${shiftGroups.size !== 1 ? "s" : ""} →`}
         </Button>
       </div>
     </div>

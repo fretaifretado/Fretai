@@ -17,7 +17,7 @@ export interface MapWorker {
 
 export interface ManualBP {
   id: number; name: string; lat: number; lng: number;
-  radiusKm: number; shiftTime: string | null;
+  radiusKm: number; shiftTime: string | null; direction: string | null;
   passengerCount: number; sequenceOrder: number | null;
   workerIds: number[];
 }
@@ -36,21 +36,50 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function parseShiftStart(shift: string | null): string | null {
-  if (!shift) return null;
-  const m = shift.match(/^(\d{1,2}:\d{2})/);
-  if (m) return m[1]!.padStart(5, "0");
+/* Parse both entry (start) and exit (end) times from a shift string.
+   Supports formats: "06:00/14:20 SEG/SAB", "06:00", "MANHÃ", etc. */
+function parseShiftTimes(shift: string | null): { entry: string | null; exit: string | null } {
+  if (!shift) return { entry: null, exit: null };
+  const times = shift.match(/\d{1,2}:\d{2}/g);
+  if (times && times.length >= 2) {
+    return { entry: times[0]!.padStart(5, "0"), exit: times[1]!.padStart(5, "0") };
+  }
+  if (times && times.length === 1) {
+    return { entry: times[0]!.padStart(5, "0"), exit: null };
+  }
   const s = shift.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  if (s.startsWith("man")) return "06:00";
-  if (s.startsWith("tar")) return "14:20";
-  if (s.startsWith("noi")) return "22:30";
-  return shift.trim().substring(0, 5);
+  if (s.startsWith("man")) return { entry: "06:00", exit: "14:20" };
+  if (s.startsWith("tar")) return { entry: "14:20", exit: "22:30" };
+  if (s.startsWith("noi")) return { entry: "22:30", exit: "06:00" };
+  return { entry: shift.trim().substring(0, 5) || null, exit: null };
+}
+
+/* Backward compat: extract just the start time */
+function parseShiftStart(shift: string | null): string | null {
+  return parseShiftTimes(shift).entry;
+}
+
+/* Shift option key format: "${time}|${direction}"  e.g. "06:00|ida", "06:00|volta" */
+type ShiftKey = string;
+
+interface ShiftOption {
+  key: ShiftKey;
+  time: string;
+  direction: "ida" | "volta";
+  count: number;
 }
 
 const SHIFT_COLORS: Record<string, string> = { "06:00": "#3b82f6", "14:20": "#f59e0b", "22:30": "#8b5cf6" };
-function getShiftColor(shift: string | null): string {
-  if (!shift) return "#6b7280";
-  return SHIFT_COLORS[shift] ?? "#10b981";
+
+function getShiftColor(timeOrKey: string | null): string {
+  if (!timeOrKey) return "#6b7280";
+  const time = timeOrKey.includes("|") ? timeOrKey.split("|")[0]! : timeOrKey;
+  return SHIFT_COLORS[time] ?? "#10b981";
+}
+
+function parseShiftKey(key: ShiftKey): { time: string; direction: "ida" | "volta" } {
+  const parts = key.split("|");
+  return { time: parts[0] ?? "", direction: (parts[1] ?? "ida") as "ida" | "volta" };
 }
 
 const companyIcon = L.divIcon({
@@ -70,10 +99,11 @@ function makeWorkerIcon(color: string, inRadius: boolean, assigned: boolean): L.
   });
 }
 
-function makeBPIcon(seq: number, color: string, selected: boolean): L.DivIcon {
+function makeBPIcon(seq: number, color: string, selected: boolean, direction: string | null): L.DivIcon {
+  const arrow = direction === "volta" ? "←" : "→";
   return L.divIcon({
-    html: `<div style="width:30px;height:30px;background:${selected ? "#1d4ed8" : color};border:3px solid white;border-radius:50%;box-shadow:0 2px 10px rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;color:white;font-weight:800;font-size:13px;">${seq}</div>`,
-    className: "", iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -18],
+    html: `<div style="width:32px;height:32px;background:${selected ? "#1d4ed8" : color};border:3px solid white;border-radius:50%;box-shadow:0 2px 10px rgba(0,0,0,0.4);display:flex;flex-direction:column;align-items:center;justify-content:center;color:white;font-weight:800;font-size:11px;line-height:1;">${seq}<span style="font-size:8px;opacity:0.85;">${arrow}</span></div>`,
+    className: "", iconSize: [32, 32], iconAnchor: [16, 16], popupAnchor: [0, -20],
   });
 }
 
@@ -105,21 +135,39 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
   const [bps, setBps] = useState<ManualBP[]>([]);
   const [mode, setMode] = useState<"view" | "draw" | "move">("view");
   const [radiusKm, setRadiusKm] = useState(1.0);
-  const [selectedShift, setSelectedShift] = useState("all");
+  const [selectedShiftKey, setSelectedShiftKey] = useState<ShiftKey>("all");
   const [tempBP, setTempBP] = useState<{ lat: number; lng: number } | null>(null);
-  const [tempBPShift, setTempBPShift] = useState("");
+  const [tempBPKey, setTempBPKey] = useState<ShiftKey>("");
   const [selectedBpId, setSelectedBpId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
 
   const hdrs = useMemo(() => ({ "Content-Type": "application/json", Authorization: `Bearer ${token}` }), [token]);
 
-  const shifts = useMemo(() => {
-    const s = new Set<string>();
-    for (const w of workers) { const st = parseShiftStart(w.shift); if (st) s.add(st); }
-    return [...s].sort();
+  /* Generate shift options from worker data — one entry per (time, direction) combination */
+  const shiftOptions = useMemo((): ShiftOption[] => {
+    const counts = new Map<ShiftKey, number>();
+    for (const w of workers) {
+      const { entry, exit } = parseShiftTimes(w.shift);
+      if (entry) {
+        const k = `${entry}|ida`;
+        counts.set(k, (counts.get(k) ?? 0) + 1);
+      }
+      if (exit) {
+        const k = `${exit}|volta`;
+        counts.set(k, (counts.get(k) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()]
+      .map(([key, count]) => {
+        const { time, direction } = parseShiftKey(key);
+        return { key, time, direction, count };
+      })
+      .sort((a, b) => a.time.localeCompare(b.time) || (a.direction === "ida" ? -1 : 1));
   }, [workers]);
 
-  useEffect(() => { if (shifts.length > 0 && !tempBPShift) setTempBPShift(shifts[0]!); }, [shifts, tempBPShift]);
+  useEffect(() => {
+    if (shiftOptions.length > 0 && !tempBPKey) setTempBPKey(shiftOptions[0]!.key);
+  }, [shiftOptions, tempBPKey]);
 
   const loadBPs = useCallback(async () => {
     const r = await fetch(`/api/admin/budgets/${budgetId}/boarding-points`, { headers: hdrs });
@@ -128,17 +176,29 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
 
   useEffect(() => { void loadBPs(); }, [loadBPs]);
 
-  const displayWorkers = useMemo(() =>
-    selectedShift === "all" ? workers : workers.filter(w => parseShiftStart(w.shift) === selectedShift),
-    [workers, selectedShift]);
+  /* Filter workers shown on map based on selected shift+direction */
+  const displayWorkers = useMemo(() => {
+    if (selectedShiftKey === "all") return workers;
+    const { time, direction } = parseShiftKey(selectedShiftKey);
+    return workers.filter(w => {
+      const { entry, exit } = parseShiftTimes(w.shift);
+      return direction === "volta" ? exit === time : entry === time;
+    });
+  }, [workers, selectedShiftKey]);
 
   const assignedIds = useMemo(() => new Set(bps.flatMap(b => b.workerIds)), [bps]);
 
+  /* Workers captured by the temp boarding point preview circle */
   const tempWorkerIds = useMemo(() => {
-    if (!tempBP || !tempBPShift) return new Set<number>();
-    const eligible = workers.filter(w => parseShiftStart(w.shift) === tempBPShift && !assignedIds.has(w.id));
+    if (!tempBP || !tempBPKey) return new Set<number>();
+    const { time, direction } = parseShiftKey(tempBPKey);
+    const eligible = workers.filter(w => {
+      const { entry, exit } = parseShiftTimes(w.shift);
+      const matches = direction === "volta" ? exit === time : entry === time;
+      return matches && !assignedIds.has(w.id);
+    });
     return new Set(eligible.filter(w => haversineKm(w.lat, w.lng, tempBP.lat, tempBP.lng) <= radiusKm).map(w => w.id));
-  }, [tempBP, radiusKm, tempBPShift, workers, assignedIds]);
+  }, [tempBP, radiusKm, tempBPKey, workers, assignedIds]);
 
   const tempEstKm = useMemo(() =>
     tempBP ? parseFloat((haversineKm(tempBP.lat, tempBP.lng, companyLat, companyLng) * 1.4).toFixed(1)) : 0,
@@ -154,10 +214,16 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
   const doSaveBP = async () => {
     if (!tempBP) return;
     setSaving(true);
+    const { time, direction } = parseShiftKey(tempBPKey);
     try {
       await fetch(`/api/admin/budgets/${budgetId}/boarding-points`, {
         method: "POST", headers: hdrs,
-        body: JSON.stringify({ lat: tempBP.lat, lng: tempBP.lng, radiusKm, shiftTime: tempBPShift, workerIds: [...tempWorkerIds], name: `Ponto ${bps.length + 1}` }),
+        body: JSON.stringify({
+          lat: tempBP.lat, lng: tempBP.lng, radiusKm,
+          shiftTime: time, direction,
+          workerIds: [...tempWorkerIds],
+          name: `Ponto ${bps.length + 1}`,
+        }),
       });
       await loadBPs();
       setTempBP(null);
@@ -168,7 +234,12 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
   const doMoveBP = async (bpId: number, newLat: number, newLng: number) => {
     const bp = bps.find(b => b.id === bpId);
     if (!bp) return;
-    const eligible = workers.filter(w => parseShiftStart(w.shift) === bp.shiftTime);
+    const bpDir = bp.direction ?? "ida";
+    const bpTime = bp.shiftTime ?? "";
+    const eligible = workers.filter(w => {
+      const { entry, exit } = parseShiftTimes(w.shift);
+      return bpDir === "volta" ? exit === bpTime : entry === bpTime;
+    });
     const newWorkerIds = eligible.filter(w => haversineKm(w.lat, w.lng, newLat, newLng) <= bp.radiusKm).map(w => w.id);
     await fetch(`/api/admin/budgets/${budgetId}/boarding-points/${bpId}`, {
       method: "PUT", headers: hdrs,
@@ -198,18 +269,35 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
         <div className="p-3 border-b bg-muted/20">
           <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">Turno visível no mapa</p>
           <div className="flex flex-wrap gap-1.5">
-            <button onClick={() => setSelectedShift("all")}
-              className={`px-2.5 py-1 rounded-full text-xs font-semibold transition-colors ${selectedShift === "all" ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:bg-muted/80"}`}>
+            <button onClick={() => setSelectedShiftKey("all")}
+              className={`px-2.5 py-1 rounded-full text-xs font-semibold transition-colors ${selectedShiftKey === "all" ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:bg-muted/80"}`}>
               Todos
             </button>
-            {shifts.map(s => (
-              <button key={s} onClick={() => setSelectedShift(s)}
-                style={selectedShift === s ? { backgroundColor: getShiftColor(s) } : undefined}
-                className={`px-2.5 py-1 rounded-full text-xs font-semibold transition-colors ${selectedShift === s ? "text-white" : "bg-muted text-muted-foreground hover:bg-muted/80"}`}>
-                {s}
-              </button>
-            ))}
+            {shiftOptions.map(opt => {
+              const isSelected = selectedShiftKey === opt.key;
+              const color = getShiftColor(opt.time);
+              const arrow = opt.direction === "volta" ? "←" : "→";
+              return (
+                <button key={opt.key} onClick={() => setSelectedShiftKey(opt.key)}
+                  style={isSelected ? { backgroundColor: color } : undefined}
+                  title={`${opt.time} ${opt.direction === "volta" ? "Volta (saída do trabalho)" : "Ida (entrada no trabalho)"} · ${opt.count} funcionários`}
+                  className={`px-2.5 py-1 rounded-full text-xs font-semibold transition-colors flex items-center gap-1 ${isSelected ? "text-white" : "bg-muted text-muted-foreground hover:bg-muted/80"}`}>
+                  <span>{opt.time}</span>
+                  <span className="opacity-90">{arrow}</span>
+                </button>
+              );
+            })}
           </div>
+          {selectedShiftKey !== "all" && (() => {
+            const { direction } = parseShiftKey(selectedShiftKey);
+            return (
+              <p className="text-[10px] text-muted-foreground mt-1.5">
+                {direction === "volta"
+                  ? "← Volta: funcionários que saem do trabalho nesse horário"
+                  : "→ Ida: funcionários que entram no trabalho nesse horário"}
+              </p>
+            );
+          })()}
         </div>
 
         {/* Radius slider */}
@@ -227,7 +315,7 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
         </div>
 
         {/* Mode panel */}
-        <div className="p-3 border-b min-h-[120px]">
+        <div className="p-3 border-b min-h-[130px]">
           {mode === "view" && !selectedBP && (
             <button onClick={() => { setMode("draw"); setTempBP(null); }}
               className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground py-2.5 px-3 rounded-lg text-sm font-semibold hover:bg-primary/90 transition-colors">
@@ -241,7 +329,7 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
                 <span className="w-2 h-2 bg-primary rounded-full animate-pulse inline-block flex-shrink-0" />
                 Clique no mapa para posicionar
               </div>
-              <p className="text-xs text-muted-foreground">O raio capturará funcionários do turno selecionado</p>
+              <p className="text-xs text-muted-foreground">O raio capturará funcionários do turno e sentido selecionados</p>
               <button onClick={() => setMode("view")} className="w-full border rounded-lg py-1.5 text-sm text-muted-foreground hover:bg-muted/50">Cancelar</button>
             </div>
           )}
@@ -250,10 +338,14 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
             <div className="space-y-2.5">
               <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Novo Ponto de Embarque</p>
               <div>
-                <label className="text-xs text-muted-foreground">Turno dos passageiros</label>
-                <select value={tempBPShift} onChange={e => setTempBPShift(e.target.value)}
+                <label className="text-xs text-muted-foreground">Turno e sentido</label>
+                <select value={tempBPKey} onChange={e => setTempBPKey(e.target.value)}
                   className="w-full border rounded-lg px-2 py-1.5 text-sm bg-background mt-1 focus:outline-none focus:ring-1 focus:ring-primary">
-                  {shifts.map(s => <option key={s} value={s}>{s}</option>)}
+                  {shiftOptions.map(opt => (
+                    <option key={opt.key} value={opt.key}>
+                      {opt.time} {opt.direction === "volta" ? "← Volta" : "→ Ida"} ({opt.count} func.)
+                    </option>
+                  ))}
                 </select>
               </div>
               <div className="bg-muted/30 rounded-lg p-2.5 grid grid-cols-3 gap-2 text-center">
@@ -268,7 +360,7 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
                 </button>
                 <button onClick={() => { setTempBP(null); setMode("view"); }} className="border rounded-lg py-2 text-sm hover:bg-muted/50">✕ Cancelar</button>
               </div>
-              {tempWorkerIds.size === 0 && <p className="text-xs text-destructive text-center">Nenhum funcionário nesse raio/turno</p>}
+              {tempWorkerIds.size === 0 && <p className="text-xs text-destructive text-center">Nenhum funcionário nesse raio/turno/sentido</p>}
               <button onClick={() => setTempBP(null)} className="w-full text-xs text-muted-foreground hover:text-foreground text-center">Reposicionar →</button>
             </div>
           )}
@@ -282,7 +374,14 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
                 </div>
                 <div className="min-w-0">
                   <p className="text-sm font-semibold truncate">{selectedBP.name}</p>
-                  <p className="text-xs text-muted-foreground">Turno {selectedBP.shiftTime}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {selectedBP.shiftTime}
+                    {selectedBP.direction && (
+                      <span className={`ml-1 font-semibold ${selectedBP.direction === "volta" ? "text-violet-600" : "text-blue-600"}`}>
+                        {selectedBP.direction === "volta" ? "← Volta" : "→ Ida"}
+                      </span>
+                    )}
+                  </p>
                 </div>
               </div>
               <div className="bg-muted/30 rounded-lg p-2.5 grid grid-cols-3 gap-1 text-center">
@@ -328,7 +427,12 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex justify-between items-center gap-1">
-                        <span className="text-xs font-semibold">{bp.shiftTime}</span>
+                        <span className="text-xs font-semibold flex items-center gap-1">
+                          {bp.shiftTime}
+                          <span className={`text-[10px] font-bold ${bp.direction === "volta" ? "text-violet-500" : "text-blue-500"}`}>
+                            {bp.direction === "volta" ? "←" : "→"}
+                          </span>
+                        </span>
                         <span className="text-xs font-bold flex-shrink-0">{bp.passengerCount} pax</span>
                       </div>
                       <p className="text-[10px] text-muted-foreground">
@@ -368,21 +472,28 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
             <Popup><strong>Empresa / Destino</strong></Popup>
           </Marker>
 
-          {displayWorkers.map(w => (
-            <Marker key={w.id} position={[w.lat, w.lng]}
-              icon={makeWorkerIcon(getShiftColor(parseShiftStart(w.shift)), tempBP ? tempWorkerIds.has(w.id) : false, !!w.boardingPointId)}>
-              <Popup><strong>{w.name}</strong><br /><span style={{ color: "#6b7280" }}>{w.shift ?? "—"}</span></Popup>
-            </Marker>
-          ))}
+          {displayWorkers.map(w => {
+            const { entry } = parseShiftTimes(w.shift);
+            return (
+              <Marker key={w.id} position={[w.lat, w.lng]}
+                icon={makeWorkerIcon(getShiftColor(entry), tempBP ? tempWorkerIds.has(w.id) : false, !!w.boardingPointId)}>
+                <Popup><strong>{w.name}</strong><br /><span style={{ color: "#6b7280" }}>{w.shift ?? "—"}</span></Popup>
+              </Marker>
+            );
+          })}
 
           {bps.map(bp => (
             <Fragment key={bp.id}>
               <Circle center={[bp.lat, bp.lng]} radius={bp.radiusKm * 1000}
                 pathOptions={{ color: getShiftColor(bp.shiftTime), fillColor: getShiftColor(bp.shiftTime), fillOpacity: selectedBpId === bp.id ? 0.15 : 0.07, weight: selectedBpId === bp.id ? 2.5 : 1.5 }}
                 eventHandlers={{ click: (e) => { e.originalEvent.stopPropagation(); setSelectedBpId(bp.id === selectedBpId ? null : bp.id); setMode("view"); setTempBP(null); } }} />
-              <Marker position={[bp.lat, bp.lng]} icon={makeBPIcon(bp.sequenceOrder ?? 0, getShiftColor(bp.shiftTime), selectedBpId === bp.id)}
+              <Marker position={[bp.lat, bp.lng]} icon={makeBPIcon(bp.sequenceOrder ?? 0, getShiftColor(bp.shiftTime), selectedBpId === bp.id, bp.direction)}
                 eventHandlers={{ click: (e) => { e.originalEvent.stopPropagation(); setSelectedBpId(bp.id === selectedBpId ? null : bp.id); setMode("view"); setTempBP(null); } }}>
-                <Popup><strong>{bp.name}</strong><br />Turno: {bp.shiftTime} · {bp.passengerCount} passageiros</Popup>
+                <Popup>
+                  <strong>{bp.name}</strong><br />
+                  Turno: {bp.shiftTime} {bp.direction === "volta" ? "← Volta" : "→ Ida"}<br />
+                  {bp.passengerCount} passageiros
+                </Popup>
               </Marker>
             </Fragment>
           ))}

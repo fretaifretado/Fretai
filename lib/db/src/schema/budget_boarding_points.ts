@@ -11,6 +11,7 @@ export const budgetBoardingPointsTable = pgTable("budget_boarding_points", {
   lng: numeric("lng", { precision: 10, scale: 7 }).notNull(),
   radiusKm: numeric("radius_km", { precision: 6, scale: 3 }),
   shiftTime: text("shift_time"),
+  direction: text("direction"),
   passengerCount: integer("passenger_count").notNull().default(0),
   sequenceOrder: integer("sequence_order"),
   createdAt: timestamp("created_at").notNull().defaultNow(),

@@ -952,6 +952,7 @@ router.get("/admin/budgets/:id/boarding-points", requireAdmin, async (req, res) 
       lng: parseFloat(String(bp.lng)),
       radiusKm: bp.radiusKm ? parseFloat(String(bp.radiusKm)) : 1.0,
       shiftTime: bp.shiftTime,
+      direction: bp.direction ?? "ida",
       passengerCount: bp.passengerCount,
       sequenceOrder: bp.sequenceOrder,
       workerIds: workersByBP.get(bp.id) ?? [],
@@ -966,9 +967,9 @@ router.get("/admin/budgets/:id/boarding-points", requireAdmin, async (req, res) 
 router.post("/admin/budgets/:id/boarding-points", requireAdmin, async (req, res) => {
   const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const { lat, lng, radiusKm, shiftTime, workerIds, name } = req.body as {
+  const { lat, lng, radiusKm, shiftTime, direction, workerIds, name } = req.body as {
     lat: number; lng: number; radiusKm?: number; shiftTime?: string;
-    workerIds?: number[]; name?: string;
+    direction?: string; workerIds?: number[]; name?: string;
   };
   try {
     const existing = await db.select({ id: budgetBoardingPointsTable.id })
@@ -982,6 +983,7 @@ router.post("/admin/budgets/:id/boarding-points", requireAdmin, async (req, res)
       lng: String(lng),
       radiusKm: radiusKm ? String(radiusKm) : "1.000",
       shiftTime: shiftTime ?? null,
+      direction: direction ?? "ida",
       passengerCount: workerIds?.length ?? 0,
       sequenceOrder: seqNum,
     }).returning();
@@ -1079,7 +1081,11 @@ router.post("/admin/budgets/:id/finalize-manual", requireAdmin, async (req, res)
     const createdRoutes: Array<typeof budgetRoutesTable.$inferSelect> = [];
 
     for (const sr of shiftRoutes) {
-      const shiftBPs = allBPs.filter(bp => (bp.shiftTime ?? "06:00") === sr.shiftTime);
+      const srDir = sr.direction ?? "ida";
+      const shiftBPs = allBPs.filter(bp =>
+        (bp.shiftTime ?? "06:00") === sr.shiftTime &&
+        (bp.direction ?? "ida") === srDir
+      );
       if (shiftBPs.length === 0) continue;
 
       const vt = vehicleTypes.find(v => v.id === sr.vehicleTypeId) ?? vehicleTypes[vehicleTypes.length - 1]!;
