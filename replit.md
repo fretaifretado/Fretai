@@ -91,10 +91,8 @@ A página `/painel/compras` gera e exibe o histórico de pedidos de vale-transpo
 - Agrupa workers por turno (parse "06:00/14:20" → start "06:00")
 - Bin-packing usando vehicle_types ordenados por strategy
 - vehicleBlockId reusado entre turnos compatíveis (turno B começa quando A termina ±30min)
-- Geocodificação **progressiva com fallback**: 1) endereço completo, 2) sem bairro, 3) só rua+cidade, 4) centroide da cidade — último recurso: fakeGeocode scatter
-  - Remove `bounded=1` e viewbox do Nominatim: cidade no endereço já disambigua, viewbox bloqueava workers de outras cidades
-  - Deduplicação por endereço único em TODOS os workers (não apenas os primeiros N)
-  - Cap de 80 endereços únicos por processamento (~3 min com fallbacks)
+- Geocodificação dos **workers**: `fakeGeocode` determinístico baseado no hash do endereço — espalha cada worker em posição consistente ao redor do endereço da empresa. Rápido e sem dependência de API externa.
+- Geocodificação da **empresa** (destinationAddress): única chamada Nominatim para centralizar o mapa na cidade correta; sem rate-limit nem risco de erro.
 - Clusterização MCLP (Maximum Coverage Location Problem) dos boarding points
 - TSP via OSRM Trip API para sequência ótima dos boarding points por rota
 - **Reuso de blocos correto**: `freeBlockAt` armazena `shiftEndMins` (não `+durationMins`) — garante que rotas longas (muitas paradas) não quebrem o encadeamento entre turnos
