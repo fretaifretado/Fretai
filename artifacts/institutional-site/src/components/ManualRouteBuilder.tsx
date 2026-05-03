@@ -59,10 +59,14 @@ const companyIcon = L.divIcon({
 });
 
 function makeWorkerIcon(color: string, inRadius: boolean, assigned: boolean): L.DivIcon {
-  const sz = inRadius ? 12 : 7;
+  const sz = inRadius ? 28 : 20;
+  const opacity = assigned && !inRadius ? 0.3 : 1;
+  const border = inRadius ? `3px solid white` : `2px solid white`;
+  const shadow = inRadius ? `box-shadow:0 2px 8px rgba(0,0,0,0.35),0 0 0 3px ${color}50;` : `box-shadow:0 1px 4px rgba(0,0,0,0.25);`;
+  const personSvg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='white' width='${Math.round(sz * 0.58)}' height='${Math.round(sz * 0.58)}'><circle cx='12' cy='7' r='4'/><path d='M12 14c-5.33 0-8 2.67-8 4v1h16v-1c0-1.33-2.67-4-8-4z'/></svg>`;
   return L.divIcon({
-    html: `<div style="width:${sz}px;height:${sz}px;background:${color};border:${inRadius ? "2px" : "1.5px"} solid white;border-radius:50%;opacity:${assigned && !inRadius ? 0.3 : 1};${inRadius ? `box-shadow:0 0 0 2px ${color}40;` : ""}transition:all 0.1s;"></div>`,
-    className: "", iconSize: [sz, sz], iconAnchor: [sz / 2, sz / 2], popupAnchor: [0, -8],
+    html: `<div style="width:${sz}px;height:${sz}px;background:${color};border:${border};border-radius:50%;opacity:${opacity};${shadow}display:flex;align-items:center;justify-content:center;transition:all 0.15s;">${personSvg}</div>`,
+    className: "", iconSize: [sz, sz], iconAnchor: [sz / 2, sz / 2], popupAnchor: [0, -sz / 2 - 2],
   });
 }
 
