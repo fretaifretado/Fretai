@@ -97,6 +97,8 @@ A página `/painel/compras` gera e exibe o histórico de pedidos de vale-transpo
   - Cap de 80 endereços únicos por processamento (~3 min com fallbacks)
 - Clusterização MCLP (Maximum Coverage Location Problem) dos boarding points
 - TSP via OSRM Trip API para sequência ótima dos boarding points por rota
+- **Reuso de blocos correto**: `freeBlockAt` armazena `shiftEndMins` (não `+durationMins`) — garante que rotas longas (muitas paradas) não quebrem o encadeamento entre turnos
+- **Custo Ida+Volta**: `totalCost = distKm × 2 × costPerKm + fixedCost` — a mesma rota é percorrida nos dois sentidos por viagem
 
 ### Frontend (`BudgetsSection.tsx`) — 3 views, 4 abas
 - **List view**: tabela com status badge, employeeCount, routeCount, botão criar/ver/deletar

@@ -751,13 +751,13 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
       : null;
     const companyGeo = companyGeoReal ?? fakeGeocode(budget.destinationAddress ?? "São Paulo");
 
-    // Geocode individual employee addresses (progressive fallback, up to 60 unique addresses).
+    // Geocode individual employee addresses (progressive fallback, up to 80 unique addresses).
     req.log.info({ budgetId: id }, "Geocodificando endereços dos funcionários via Nominatim...");
     const workerGeoMap = await batchGeocode(
       workers.map(w => ({ id: w.id, address: w.address ?? "" })),
       companyGeo.lat,
       companyGeo.lng,
-      60
+      80
     );
     // Update workers with real coordinates in DB
     for (const [wid, geo] of workerGeoMap.entries()) {
@@ -849,7 +849,12 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
         const batchSize = Math.min(chosen.capacity, remaining.length);
         const batch = remaining.splice(0, batchSize);
 
-        // Find a reusable block (block that becomes free at this shiftMins ±30min)
+        // Find a reusable block: a block "wakes up" exactly when the shift it served ends
+        // (shiftEndMins of the previous shift), so we match any block whose stored free-time
+        // equals the current shiftMins within ±30 min (clock-wrap aware).
+        // We intentionally store shiftEndMins — not shiftEndMins + durationMins — so that
+        // long routes (many stops, large distKm) don't push the free-time past the tolerance
+        // window and accidentally allocate an extra physical vehicle.
         let assignedBlock = -1;
         for (const [bid, freeMins] of freeBlockAt.entries()) {
           const diff = Math.abs(freeMins - shiftMins);
@@ -895,10 +900,18 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
         const durationMins = Math.round(10 + numStops * 5 + distKm * 2.0);
         const costPerKm = parseFloat(String(chosen.costPerKm ?? "3.50"));
         const fixedCost = parseFloat(String(chosen.fixedCost ?? "80.00"));
-        const totalCost = (distKm * costPerKm + fixedCost).toFixed(2);
+        // Cost covers BOTH Ida (going to company) and Volta (returning home) since the
+        // same vehicle makes both trips: variable part is 2× distKm; fixed cost is once
+        // per shift-period (daily driver/fuel base fee applied once per service block).
+        const totalCost = (distKm * 2 * costPerKm + fixedCost).toFixed(2);
         const occupancy = ((batch.length / chosen.capacity) * 100).toFixed(2);
 
-        freeBlockAt.set(assignedBlock, shiftEndMins + durationMins);
+        // Store shift END time (not shift-end + durationMins) as the "available at" marker.
+        // A vehicle that finished serving shift X (Ida + Volta) is ready for shift Y exactly
+        // when shift X ends — regardless of how long the route is.  Using
+        // shiftEndMins + durationMins caused long routes to push the marker past the ±30 min
+        // tolerance window and incorrectly allocate a brand-new physical vehicle.
+        freeBlockAt.set(assignedBlock, shiftEndMins);
 
         // Record route index before pushing (used for cluster→route mapping)
         const routeInsertIdx = routesToInsert.length;
