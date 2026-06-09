@@ -9,6 +9,7 @@ import scheduledMovementsRouter from "./scheduled-movements";
 import purchaseOrdersRouter from "./purchase-orders";
 import vehicleTypesRouter from "./vehicle-types";
 import budgetsRouter from "./budgets";
+import adminMovementsRouter from "./admin-movements";
 
 const router: IRouter = Router();
 
@@ -22,5 +23,6 @@ router.use(scheduledMovementsRouter);
 router.use(purchaseOrdersRouter);
 router.use(vehicleTypesRouter);
 router.use(budgetsRouter);
+router.use(adminMovementsRouter);
 
 export default router;

@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer, date, pgEnum } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, date, pgEnum, unique } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { companiesTable } from "./companies";
@@ -15,7 +15,7 @@ export const employeesTable = pgTable("employees", {
   id: serial("id").primaryKey(),
   companyId: integer("company_id").notNull().references(() => companiesTable.id),
   name: text("name").notNull(),
-  cpf: text("cpf").notNull().unique(),
+  cpf: text("cpf").notNull(),
   matricula: text("matricula").notNull(),
   admissionDate: date("admission_date").notNull(),
   route: text("route"),
@@ -39,6 +39,10 @@ export const employeesTable = pgTable("employees", {
   grupoId: integer("grupo_id"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => {
+  return {
+    unq: unique().on(table.companyId, table.cpf),
+  };
 });
 
 export const employeeMovementsTable = pgTable("employee_movements", {

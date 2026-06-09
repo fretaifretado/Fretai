@@ -11,7 +11,7 @@ interface Company {
   address: string;
   phone: string;
   email: string;
-  valeValue: number;
+  valeValue: string | number | null;
   masterUserId: number | null;
   createdAt: string;
 }
@@ -42,6 +42,14 @@ function formatCPF(v: string) {
   return d.replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d{1,2})$/, "$1-$2");
 }
 
+function formatPhone(v: string) {
+  const d = v.replace(/\D/g, "").slice(0, 11);
+  if (d.length <= 10) {
+    return d.replace(/(\d{2})(\d)/, "($1) $2").replace(/(\d{4})(\d{1,4})$/, "$1-$2");
+  }
+  return d.replace(/(\d{2})(\d)/, "($1) $2").replace(/(\d{5})(\d{1,4})$/, "$1-$2");
+}
+
 const EMPTY_FORM = { name: "", cnpj: "", address: "", phone: "", email: "", masterName: "", masterCpf: "", masterEmail: "", valeValue: "8.50"  };
 const EMPTY_BRANCH_FORM = { name: "", cnpj: "", city: "", state: "", address: "", phone: "", email: "" };
 
@@ -54,8 +62,9 @@ export default function CompaniesSection({ token }: Props) {
   const [form, setForm] = useState(EMPTY_FORM);
   const [formError, setFormError] = useState("");
   const [formLoading, setFormLoading] = useState(false);
+  const [extraUsers, setExtraUsers] = useState<{ name: string; email: string; role: "cliente_master" | "cliente_subadmin" }[]>([]);
   const [deleteId, setDeleteId] = useState<number | null>(null);
-  const [createdInfo, setCreatedInfo] = useState<{ email: string; password: string } | null>(null);
+  const [createdInfo, setCreatedInfo] = useState<{ email: string; password: string; extras: { email: string; password: string; role: string }[] } | null>(null);
 
   /* detail panel */
   const [detailCompany, setDetailCompany] = useState<Company | null>(null);
@@ -164,9 +173,25 @@ export default function CompaniesSection({ token }: Props) {
       });
       const data = await res.json() as Company & { masterUser?: { email: string; initialPassword: string }; error?: string };
       if (!res.ok) { setFormError(data.error ?? "Erro ao salvar."); return; }
-      setCreatedInfo(data.masterUser ? { email: data.masterUser.email, password: data.masterUser.initialPassword } : null);
+      // Criar usuários extras e coletar senhas
+      const extrasCreated: { email: string; password: string; role: string }[] = [];
+      for (const u of extraUsers.filter(x => x.email && x.name)) {
+        try {
+          const r = await fetch(`/api/companies/${data.id}/users`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            body: JSON.stringify(u),
+          });
+          if (r.ok) {
+            const ud = await r.json() as { initialPassword?: string; email?: string };
+            extrasCreated.push({ email: u.email, password: ud.initialPassword ?? "—", role: u.role });
+          }
+        } catch { /* ignora erros individuais */ }
+      }
+      setCreatedInfo(data.masterUser ? { email: data.masterUser.email, password: data.masterUser.initialPassword, extras: extrasCreated } : null);
       setShowForm(false);
       setForm(EMPTY_FORM);
+      setExtraUsers([]);
       await fetchCompanies();
     } catch { setFormError("Erro de conexão."); }
     finally { setFormLoading(false); }
@@ -205,13 +230,27 @@ export default function CompaniesSection({ token }: Props) {
       {createdInfo && (
         <div className="bg-green-50 border border-green-200 rounded-xl p-4 mb-6 flex items-start gap-3">
           <User size={18} className="text-green-600 shrink-0 mt-0.5" />
-          <div className="flex-1">
-            <p className="font-semibold text-green-800 text-sm">Empresa criada com sucesso!</p>
-            <p className="text-green-700 text-sm mt-1">
-              Administrador: <strong>{createdInfo.email}</strong><br />
-              Senha inicial: <code className="bg-green-100 px-1.5 py-0.5 rounded font-mono">{createdInfo.password}</code>
-              <span className="text-green-600 ml-2 text-xs">(6 primeiros dígitos do CPF — troca obrigatória no 1º acesso)</span>
-            </p>
+          <div className="flex-1 space-y-2">
+            <p className="font-semibold text-green-800 text-sm">Empresa criada com sucesso! Guarde as senhas abaixo — elas não serão exibidas novamente.</p>
+            {/* Master principal */}
+            <div className="bg-green-100/60 rounded-lg px-3 py-2">
+              <p className="text-xs font-semibold text-green-700 mb-0.5">Administrador principal (Master)</p>
+              <p className="text-green-800 text-sm">
+                {createdInfo.email} · Senha: <code className="bg-white px-1.5 py-0.5 rounded font-mono">{createdInfo.password}</code>
+                <span className="text-green-600 ml-1 text-xs">(6 primeiros dígitos do CPF)</span>
+              </p>
+            </div>
+            {/* Extras */}
+            {createdInfo.extras.map((u, i) => (
+              <div key={i} className="bg-green-100/60 rounded-lg px-3 py-2">
+                <p className="text-xs font-semibold text-green-700 mb-0.5">
+                  Usuário adicional {i + 2} ({u.role === "cliente_master" ? "Master" : "Subadmin"})
+                </p>
+                <p className="text-green-800 text-sm">
+                  {u.email} · Senha: <code className="bg-white px-1.5 py-0.5 rounded font-mono">{u.password}</code>
+                </p>
+              </div>
+            ))}
           </div>
           <button onClick={() => setCreatedInfo(null)}><X size={15} className="text-green-600" /></button>
         </div>
@@ -386,7 +425,7 @@ export default function CompaniesSection({ token }: Props) {
                 </div>
                 <div>
                   <label className="text-sm font-medium text-foreground block mb-1.5">Telefone *</label>
-                  <Input placeholder="(11) 99999-9999" value={form.phone} onChange={e => setField("phone", e.target.value)} required />
+                  <Input placeholder="(11) 99999-9999" value={form.phone} onChange={e => setField("phone", formatPhone(e.target.value))} required />
                 </div>
                 <div>
                   <label className="text-sm font-medium text-foreground block mb-1.5">E-mail principal *</label>
@@ -415,25 +454,79 @@ export default function CompaniesSection({ token }: Props) {
               </div>
               </div>
 
-              <div className="border-t border-border pt-4">
-                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-3">Administrador Master</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div className="sm:col-span-2">
-                    <label className="text-sm font-medium text-foreground block mb-1.5">Nome completo *</label>
-                    <Input placeholder="João da Silva" value={form.masterName} onChange={e => setField("masterName", e.target.value)} required />
-                  </div>
-                  <div>
-                    <label className="text-sm font-medium text-foreground block mb-1.5">CPF *</label>
-                    <Input placeholder="000.000.000-00" value={form.masterCpf} onChange={e => setField("masterCpf", formatCPF(e.target.value))} required />
-                  </div>
-                  <div>
-                    <label className="text-sm font-medium text-foreground block mb-1.5">E-mail *</label>
-                    <Input type="email" placeholder="admin@empresa.com" value={form.masterEmail} onChange={e => setField("masterEmail", e.target.value)} required />
-                  </div>
+              <div className="border-t border-border pt-4 space-y-4">
+                {/* Usuário Master principal */}
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Administradores</p>
+                  <button type="button"
+                    className="flex items-center gap-1 text-xs font-medium text-accent hover:text-accent/80 transition-colors"
+                    onClick={() => setExtraUsers(prev => [...prev, { name: "", email: "", role: "cliente_master" }])}>
+                    <Plus size={13} />Adicionar outro usuário
+                  </button>
                 </div>
-                <p className="text-xs text-muted-foreground mt-2">
-                  A senha inicial será os <strong>6 primeiros dígitos do CPF</strong>. Troca obrigatória no 1º acesso.
-                </p>
+
+                {/* Master principal */}
+                <div className="bg-muted/30 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center gap-2 mb-1">
+                    <div className="w-5 h-5 rounded-full bg-accent/20 flex items-center justify-center shrink-0">
+                      <span className="text-[10px] font-bold text-accent">1</span>
+                    </div>
+                    <span className="text-xs font-semibold text-foreground">Administrador principal</span>
+                    <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full font-medium">Master</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="sm:col-span-2">
+                      <label className="text-xs font-medium text-muted-foreground block mb-1">Nome completo *</label>
+                      <Input className="h-9" placeholder="João da Silva" value={form.masterName} onChange={e => setField("masterName", e.target.value)} required />
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-muted-foreground block mb-1">CPF *</label>
+                      <Input className="h-9" placeholder="000.000.000-00" value={form.masterCpf} onChange={e => setField("masterCpf", formatCPF(e.target.value))} required />
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-muted-foreground block mb-1">E-mail *</label>
+                      <Input className="h-9" type="email" placeholder="admin@empresa.com" value={form.masterEmail} onChange={e => setField("masterEmail", e.target.value)} required />
+                    </div>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Senha inicial: <strong>6 primeiros dígitos do CPF</strong>.
+                  </p>
+                </div>
+
+                {/* Usuários extras */}
+                {extraUsers.map((u, i) => (
+                  <div key={i} className="bg-muted/30 rounded-xl p-4 space-y-3 relative">
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className="w-5 h-5 rounded-full bg-accent/20 flex items-center justify-center shrink-0">
+                        <span className="text-[10px] font-bold text-accent">{i + 2}</span>
+                      </div>
+                      <span className="text-xs font-semibold text-foreground">Usuário adicional</span>
+                      <select className="text-[10px] bg-card border border-border rounded-full px-2 py-0.5 text-foreground font-medium"
+                        value={u.role}
+                        onChange={e => setExtraUsers(prev => prev.map((x, j) => j === i ? { ...x, role: e.target.value as "cliente_master" | "cliente_subadmin" } : x))}>
+                        <option value="cliente_master">Master</option>
+                        <option value="cliente_subadmin">Subadmin</option>
+                      </select>
+                      <button type="button" className="ml-auto text-muted-foreground hover:text-destructive transition-colors"
+                        onClick={() => setExtraUsers(prev => prev.filter((_, j) => j !== i))}>
+                        <X size={14} />
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="sm:col-span-2">
+                        <label className="text-xs font-medium text-muted-foreground block mb-1">Nome completo</label>
+                        <Input className="h-9" placeholder="Nome do usuário" value={u.name}
+                          onChange={e => setExtraUsers(prev => prev.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <label className="text-xs font-medium text-muted-foreground block mb-1">E-mail</label>
+                        <Input className="h-9" type="email" placeholder="usuario@empresa.com" value={u.email}
+                          onChange={e => setExtraUsers(prev => prev.map((x, j) => j === i ? { ...x, email: e.target.value } : x))} />
+                      </div>
+                    </div>
+                    <p className="text-xs text-muted-foreground">Senha gerada automaticamente e exibida após criar a empresa.</p>
+                  </div>
+                ))}
               </div>
 
               {formError && (
@@ -496,7 +589,7 @@ export default function CompaniesSection({ token }: Props) {
                   <Input
                     placeholder="(11) 99999-9999"
                     value={branchForm.phone}
-                    onChange={e => setBranchField("phone", e.target.value)}
+                    onChange={e => setBranchField("phone", formatPhone(e.target.value))}
                     data-testid="input-branch-phone"
                   />
                 </div>

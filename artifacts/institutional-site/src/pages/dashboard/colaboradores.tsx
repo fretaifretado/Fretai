@@ -26,6 +26,8 @@ type XlsxModule = {
   write: (book: unknown, opts: { bookType: string; type: string }) => ArrayBuffer;
 };
 
+declare module "https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs";
+
 let xlsxPromise: Promise<XlsxModule> | null = null;
 function loadXlsx(): Promise<XlsxModule> {
   if (!xlsxPromise) {
@@ -158,6 +160,50 @@ function pick(row: Record<string, string>, ...aliases: string[]): string {
   return "";
 }
 
+function parseExcelDate(raw: string): string {
+  if (!raw) return "";
+  const s = raw.trim();
+  if (!s) return "";
+
+  function fmt(day: number, month: number, year: number): string {
+    return `${String(day).padStart(2,"0")}/${String(month).padStart(2,"0")}/${year}`;
+  }
+
+  // Número serial do Excel (ex: 45678) — usa UTC para evitar fuso
+  const serial = Number(s);
+  if (!isNaN(serial) && serial > 1000 && serial < 100000) {
+    const d = new Date(Math.round((serial - 25569) * 86400 * 1000));
+    if (!isNaN(d.getTime())) return fmt(d.getUTCDate(), d.getUTCMonth() + 1, d.getUTCFullYear());
+  }
+
+  // yyyy-mm-dd (ISO) → dd/mm/yyyy
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return fmt(Number(iso[3]), Number(iso[2]), Number(iso[1]));
+
+  // x/x/xx ou x/x/xxxx — dd/mm/yyyy ou mm/dd/yyyy
+  const parts = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (parts) {
+    let a = Number(parts[1]), b = Number(parts[2]), y = Number(parts[3]);
+    if (y < 100) y += (y > 50 ? 1900 : 2000);
+    
+    if (b > 12 && a <= 12) return fmt(b, a, y); // b só pode ser dia → mm/dd americano
+    if (a > 12 && b <= 12) return fmt(a, b, y); // a só pode ser dia → dd/mm brasileiro
+    
+    // Ambos <= 12 ou ambos inválidos: Prioriza padrão brasileiro dd/mm
+    return fmt(a, b, y);
+  }
+
+  // dd-mm-yyyy ou dd-mm-yy
+  const dash = s.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})$/);
+  if (dash) {
+    let d = Number(dash[1]), m = Number(dash[2]), y = Number(dash[3]);
+    if (y < 100) y += (y > 50 ? 1900 : 2000);
+    if (m <= 12) return fmt(d, m, y);
+  }
+
+  return s;
+}
+
 function downloadBlob(buffer: ArrayBuffer | Blob, filename: string, mime: string) {
   const blob = buffer instanceof Blob ? buffer : new Blob([buffer], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -198,15 +244,55 @@ function parseCsv(text: string): Record<string, string>[] {
   });
 }
 
+function toIsoDate(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const s = raw.trim();
+  if (!s) return null;
+  const dmY = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (dmY) return `${dmY[3]}-${dmY[2].padStart(2,"0")}-${dmY[1].padStart(2,"0")}`;
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  return null;
+}
+
+function toIsoDateOrToday(raw: string | null | undefined): string {
+  return toIsoDate(raw) ?? new Date().toISOString().slice(0, 10);
+}
+
 const STATUS_STYLES: Record<Status, string> = {
   "Ativo":     "bg-green-100 text-green-700 border-green-200",
-  "Inativo":   "bg-gray-100 text-gray-600 border-gray-200",
+  "Home Office":   "bg-gray-100 text-gray-600 border-gray-200",
   "Férias":    "bg-blue-100 text-blue-700 border-blue-200",
   "Licença":   "bg-yellow-100 text-yellow-700 border-yellow-200",
   "Afastado":  "bg-orange-100 text-orange-700 border-orange-200",
   "Desligado": "bg-red-100 text-red-700 border-red-200",
+  "Admissão":  "bg-purple-100 text-purple-700 border-purple-200",
 };
-const STATUSES: Status[] = ["Ativo", "Inativo", "Férias", "Licença", "Afastado", "Desligado"];
+const STATUSES: Status[] = ["Ativo", "Home Office", "Admissão", "Férias", "Licença", "Afastado", "Desligado"];
+
+/** Returns true when inicioOperacao is a future date (after today).
+ *  Accepts dd/mm/yyyy (app format). Always parses as LOCAL date to avoid UTC shift. */
+function isFutureDate(raw: string | undefined | null): boolean {
+  if (!raw) return false;
+  const s = raw.trim();
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  
+  // dd/mm/yyyy ou dd/mm/yy
+  const dmY = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (dmY) {
+    let day = Number(dmY[1]), month = Number(dmY[2]), year = Number(dmY[3]);
+    if (year < 100) year += (year > 50 ? 1900 : 2000);
+    const d = new Date(year, month - 1, day);
+    return !isNaN(d.getTime()) && d > today;
+  }
+  
+  // yyyy-mm-dd — ISO
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) {
+    const d = new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+    return !isNaN(d.getTime()) && d > today;
+  }
+  return false;
+}
 
 interface TurnoDetectado {
   nome: string;
@@ -275,7 +361,7 @@ function getAuthHeaders(): HeadersInit {
 }
 
 export default function ColaboradoresPage() {
-  const { colaboradoresDaFilial: colaboradores, colaboradores: todosColaboradores, addColaborador, updateColaborador, deleteColaborador, turnos, addTurno, updateTurno, filiais, filialAtiva, nomeEmpresaAtiva } = useDashboard();
+  const { colaboradoresDaFilial: colaboradores, colaboradores: todosColaboradores, addColaborador, addColaboradorLocal, updateColaborador, deleteColaborador, turnos, addTurno, updateTurno, filiais, filialAtiva, empresaAtiva, nomeEmpresaAtiva } = useDashboard();
   const [search, setSearch] = useState("");
   const [activeStatus, setActiveStatus] = useState<Status | "Todos">("Todos");
 
@@ -359,7 +445,7 @@ export default function ColaboradoresPage() {
         const firstSheetName = wb.SheetNames[0];
         if (!firstSheetName) throw new Error("Planilha vazia");
         const sheet = wb.Sheets[firstSheetName];
-        const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "", raw: false });
+        const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "", raw: true });
         rows = raw.map(r => {
           const out: Record<string, string> = {};
           Object.keys(r).forEach(k => { out[normalizeHeader(k)] = String(r[k] ?? "").trim(); });
@@ -368,8 +454,14 @@ export default function ColaboradoresPage() {
       }
 
       let skipped = 0;
+      const _tok1 = localStorage.getItem("jwt_token") ?? "";
+      const _pay1 = _tok1 ? (() => { try { return JSON.parse(atob(_tok1.split(".")[1].replace(/-/g,"+").replace(/_/g,"/"))); } catch { return null; } })() : null;
+      const companyIdParaImport = (_pay1?.entityId as number | undefined) ?? filialAtiva?.id ?? empresaAtiva?.id;
       const existingCpfs = new Set(
-        todosColaboradores.map(c => normalizeCpf(c.cpf)).filter(Boolean)
+        todosColaboradores
+          .filter(c => c.filialId === companyIdParaImport)
+          .map(c => normalizeCpf(c.cpf))
+          .filter(Boolean)
       );
       const batchCpfs = new Set<string>();
 
@@ -500,8 +592,8 @@ export default function ColaboradoresPage() {
           nascimento: dataNascimento,
           matricula,
           dataNascimento,
-          // All collaborators imported via spreadsheet start as Ativo.
-          // Any Status column in the file is intentionally ignored.
+          // Todos os colaboradores importados começam como "Ativo" no banco.
+          // "Admissão" é exibição visual apenas (derivado da data futura no frontend).
           status: "Ativo",
           turno: turno || "—",
           local: filialAtiva?.nome ?? nomeEmpresaAtiva ?? "",
@@ -515,7 +607,7 @@ export default function ColaboradoresPage() {
           cep,
           horarioEntrada: horarioEntradaRow,
           horarioSaida: horarioSaidaRow,
-          inicioOperacao: pick(r, "Início da operação", "Inicio da operacao", "Início operação", "Inicio operacao").trim(),
+          inicioOperacao: parseExcelDate(pick(r, "Início da operação", "Inicio da operacao", "Início operação", "Inicio operacao", "Data de início", "Data de inicio", "Data início", "Data inicio", "Admissão", "Admissao", "Data admissão", "Data admissao", "Data de admissão", "Data de admissao", "Início", "Inicio", "Data início operação", "Data inicio operacao", "Dt. Início", "Dt. Inicio", "dt_inicio", "inicio_operacao", "data_inicio")),
           vale: "—",
           grupoId: null,
         });
@@ -541,7 +633,7 @@ export default function ColaboradoresPage() {
         // without re-picking; clearing happens only after apply or cancel.
         setPendingImport(pending);
       } else {
-        applyPendingImport(pending);
+        void applyPendingImport(pending);
       }
     } catch (err) {
       setImportError(err instanceof Error ? err.message : "Erro ao processar a planilha.");
@@ -594,7 +686,7 @@ export default function ColaboradoresPage() {
    * colaborador is reassigned to the numbered turno that matches the
    * horário in their own row, so no horário is silently dropped.
    */
-  function applyPendingImport(pending: PendingImport) {
+  async function applyPendingImport(pending: PendingImport) {
     const renameMap = buildConflictRenameMap(pending);
 
     // Reassign each colaborador whose turno is in conflict to the numbered
@@ -609,11 +701,96 @@ export default function ColaboradoresPage() {
       return { ...a, turno: newName };
     });
 
+    // Filtra duplicatas locais antes de enviar
+    const existingCpfsSet = new Set(
+      todosColaboradores
+        .filter(c => c.filialId === companyIdForBatch)
+        .map(c => c.cpf.replace(/\D/g, ""))
+    );
+    const toImport = remappedActions.filter(a => {
+      const cpfClean = (a.cpf ?? "").replace(/\D/g, "");
+      return cpfClean && !existingCpfsSet.has(cpfClean);
+    });
+
     let ok = 0;
-    for (const a of remappedActions) {
-      const added = addColaborador(a);
-      if (added) ok++;
-      // duplicates returned from addColaborador are silently ignored by design
+
+    // Tenta importar em lote via endpoint batch (garante persistência no banco)
+    const batchToken = localStorage.getItem("jwt_token") ?? "";
+    // Deriva o companyId do JWT atual — nunca do estado React, que pode estar
+    // desatualizado quando o usuário troca de empresa sem recarregar a página.
+    const jwtPayload = batchToken ? (() => { try { return JSON.parse(atob(batchToken.split(".")[1].replace(/-/g,"+").replace(/_/g,"/"))); } catch { return null; } })() : null;
+    const companyIdForBatch = (jwtPayload?.entityId as number | undefined) ?? filialAtiva?.id ?? empresaAtiva?.id ?? null;
+    if (companyIdForBatch && batchToken && toImport.length > 0) {
+      try {
+        const batchBody = toImport.map(a => {
+          const codigo = `COL-${String(Date.now() + Math.random()).slice(-6)}`;
+          return {
+            name: a.nome,
+            cpf: (a.cpf ?? "").replace(/\D/g, ""),
+            matricula: a.matricula || "000000",
+            admissionDate: toIsoDateOrToday(a.inicioOperacao),
+            route: a.turno && a.turno !== "—" ? a.turno : null,
+            status: "Ativo",
+            email: a.email || null,
+            phone: a.telefone ? a.telefone.replace(/\D/g, "") : null,
+            address: a.endereco || null,
+            addressNumber: a.numero || null,
+            addressComplement: a.complemento || null,
+            neighborhood: a.bairro || null,
+            city: a.cidade || null,
+            state: a.estado || null,
+            zipCode: a.cep ? a.cep.replace(/\D/g, "") : null,
+            shiftStart: a.horarioEntrada || null,
+            shiftEnd: a.horarioSaida || null,
+            operationStart: a.inicioOperacao ? toIsoDate(a.inicioOperacao) : null,
+            valeValue: a.vale && a.vale !== "—" ? a.vale : null,
+            codigo,
+            grupoId: a.grupoId ? String(a.grupoId) : null,
+          };
+        });
+
+        const res = await fetch(`${API_URL}/api/companies/${companyIdForBatch}/employees/batch`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${batchToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ employees: batchBody }),
+        });
+
+        if (res.ok) {
+          const result = await res.json() as { inserted: number; skipped: string[]; ids?: number[] };
+          ok = result.inserted;
+          
+          // Se nenhum foi inserido no banco (ex: todos duplicados na mesma empresa), não adiciona nada localmente
+          if (ok > 0 && result.ids) {
+            // Filtra apenas os colaboradores que foram realmente inseridos (tem ID correspondente)
+            const insertedColabs = toImport
+              .slice(0, result.ids.length)
+              .map((a, idx) => ({
+                c: a,
+                id: result.ids![idx],
+              }));
+            
+            addColaboradorLocal(insertedColabs);
+          }
+        } else {
+          // Fallback: tenta um a um
+          for (const a of toImport) {
+            const added = addColaborador(a);
+            if (added) ok++;
+          }
+        }
+      } catch {
+        // Fallback: tenta um a um
+        for (const a of toImport) {
+          const added = addColaborador(a);
+          if (added) ok++;
+        }
+      }
+    } else {
+      // Sem companyId ou token, usa o método normal
+      for (const a of remappedActions) {
+        const added = addColaborador(a);
+        if (added) ok++;
+      }
     }
 
     // Replace each conflicted base entry in the aggregation with one entry
@@ -842,14 +1019,18 @@ export default function ColaboradoresPage() {
   }
 
   const filtered = colaboradores.filter(c => {
-    const matchStatus = activeStatus === "Todos" || c.status === activeStatus;
+    const efetivo: Status = isFutureDate(c.inicioOperacao) ? "Admissão" : c.status;
+    const matchStatus = activeStatus === "Todos" || efetivo === activeStatus;
     const q = search.toLowerCase();
     const matchSearch = !q || c.nome.toLowerCase().includes(q) || c.cpf.includes(q) || (c.matricula || "").toLowerCase().includes(q) || c.codigo.toLowerCase().includes(q) || c.email.toLowerCase().includes(q);
     return matchStatus && matchSearch;
   });
 
   const statusCounts = STATUSES.reduce((acc, s) => {
-    acc[s] = colaboradores.filter(c => c.status === s).length;
+    acc[s] = colaboradores.filter(c => {
+      const efetivo: Status = isFutureDate(c.inicioOperacao) ? "Admissão" : c.status;
+      return efetivo === s;
+    }).length;
     return acc;
   }, {} as Record<Status, number>);
 
@@ -917,7 +1098,7 @@ export default function ColaboradoresPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-muted/30 border-b">
-                    {["Nome", "Matrícula", "Status", "Turno", "Vale", ""].map(h => (
+                    {["Nome", "Data de Início", "Status", "Turno", "Vale", ""].map(h => (
                       <th key={h} className="text-left px-5 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">{h}</th>
                     ))}
                   </tr>
@@ -929,11 +1110,18 @@ export default function ColaboradoresPage() {
                         <p className="font-medium text-foreground">{c.nome}</p>
                         <p className="text-xs text-muted-foreground font-mono">{c.cpf}</p>
                       </td>
-                      <td className="px-5 py-3.5 text-xs text-muted-foreground font-mono">{c.matricula || "—"}</td>
+                      <td className="px-5 py-3.5 text-xs text-muted-foreground font-mono">
+                        {c.inicioOperacao || "—"}
+                      </td>
                       <td className="px-5 py-3.5">
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded border text-xs font-medium ${STATUS_STYLES[c.status]}`}>
-                          {c.status}
-                        </span>
+                        {(() => {
+                          const efetivo: Status = isFutureDate(c.inicioOperacao) ? "Admissão" : c.status;
+                          return (
+                            <span className={`inline-flex items-center px-2 py-0.5 rounded border text-xs font-medium ${STATUS_STYLES[efetivo]}`}>
+                              {efetivo}
+                            </span>
+                          );
+                        })()}
                       </td>
                       <td className="px-5 py-3.5 text-muted-foreground text-sm">{c.turno}</td>
                       <td className="px-5 py-3.5 text-sm">
@@ -1400,7 +1588,7 @@ export default function ColaboradoresPage() {
                 </Button>
                 <Button
                   className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-semibold"
-                  onClick={() => applyPendingImport(pendingImport)}
+                  onClick={() => void applyPendingImport(pendingImport)}
                 >
                   Prosseguir mesmo assim
                 </Button>

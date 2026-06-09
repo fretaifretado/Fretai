@@ -12,7 +12,7 @@ import { Input } from "@/components/ui/input";
 type Operacao = "turno" | "status" | "filial" | null;
 type ModoSelecao = "tabela" | "planilha" | "txt" | "cpf";
 
-const OPCOES_STATUS: Status[] = ["Ativo", "Inativo", "Férias", "Licença", "Afastado", "Desligado"];
+const OPCOES_STATUS: Status[] = ["Ativo", "Home Office", "Férias", "Licença", "Afastado", "Desligado"];
 
 /* ---------- xlsx loader (mesmo padrão de colaboradores.tsx) ---------- */
 
@@ -140,6 +140,15 @@ export default function MovimentacaoPage() {
   const fileSheetRef = useRef<HTMLInputElement | null>(null);
   const fileTxtRef   = useRef<HTMLInputElement | null>(null);
 
+  // "Afastado" pode ser agendado a partir de 24h (amanhã).
+  // Todos os outros status exigem mínimo 48h (depois de amanhã).
+  const minDate = useMemo(() => {
+    const d = new Date();
+    const isAfastado = operacao === "status" && valorNovo === "Afastado";
+    d.setDate(d.getDate() + (isAfastado ? 1 : 2));
+    return d.toISOString().split("T")[0];
+  }, [operacao, valorNovo]);
+
   const [inicio, setInicio] = useState("");
   const [fim, setFim]       = useState("");
 
@@ -220,7 +229,7 @@ export default function MovimentacaoPage() {
     operacao === "filial" ? filialNova !== null
     : operacao === "turno" || operacao === "status" ? !!valorNovo
     : false;
-  const datasOk = !!inicio && (isDesligado || (!!fim && fim >= inicio));
+  const datasOk = !!inicio && inicio >= minDate && (isDesligado || (!!fim && fim >= inicio));
   const podeAgendar = operacao && valorOk && selecionados.length > 0 && datasOk;
 
   async function agendar() {
@@ -346,13 +355,20 @@ export default function MovimentacaoPage() {
               )}
 
               {operacao === "status" && (
-                <div className="flex flex-wrap gap-2">
-                  {OPCOES_STATUS.map(s => (
-                    <button key={s} onClick={() => setValorNovo(s)}
-                      className={`px-4 py-2 rounded-lg border text-sm font-medium transition-colors ${valorNovo === s ? "bg-accent text-white border-accent" : "bg-card border hover:border-accent/50 text-foreground"}`}>
-                      {s}
-                    </button>
-                  ))}
+                <div className="space-y-3">
+                  <div className="flex flex-wrap gap-2">
+                    {OPCOES_STATUS.map(s => (
+                      <button key={s} onClick={() => setValorNovo(s)}
+                        className={`px-4 py-2 rounded-lg border text-sm font-medium transition-colors ${valorNovo === s ? "bg-accent text-white border-accent" : "bg-card border hover:border-accent/50 text-foreground"}`}>
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                  {valorNovo === "Afastado" && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 flex items-center gap-1.5">
+                      ⚡ <strong>Afastado</strong> pode ser agendado com apenas <strong>24h</strong> de antecedência. Os demais status exigem 48h.
+                    </p>
+                  )}
                 </div>
               )}
             </div>
@@ -529,7 +545,7 @@ export default function MovimentacaoPage() {
               <div className={`grid grid-cols-1 ${isDesligado ? "" : "sm:grid-cols-2"} gap-4 mb-4`}>
                 <div>
                   <label className="text-xs font-medium text-muted-foreground mb-1 block">Início</label>
-                  <Input type="date" value={inicio} onChange={e => setInicio(e.target.value)} className="text-sm" />
+                  <Input type="date" value={inicio} onChange={e => setInicio(e.target.value)} min={minDate} className="text-sm" />
                 </div>
                 {!isDesligado && (
                   <div>
@@ -538,6 +554,14 @@ export default function MovimentacaoPage() {
                   </div>
                 )}
               </div>
+              {inicio && inicio < minDate && (
+                <p className="text-xs text-red-600 mb-3 flex items-center gap-1.5">
+                  <AlertCircle size={12} />
+                  {operacao === "status" && valorNovo === "Afastado"
+                    ? "Afastamento precisa ser agendado com pelo menos 1 dia de antecedência."
+                    : "O agendamento precisa ser feito com pelo menos 2 dias de antecedência."}
+                </p>
+              )}
               {!isDesligado && inicio && fim && fim < inicio && (
                 <p className="text-xs text-red-600 mb-3 flex items-center gap-1.5"><AlertCircle size={12} />A data de fim precisa ser igual ou posterior ao início.</p>
               )}

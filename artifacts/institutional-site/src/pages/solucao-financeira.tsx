@@ -46,7 +46,7 @@ export default function SolucaoFinanceira() {
       <section className="py-16 bg-muted/30 border-b">
         <div className="container mx-auto px-4">
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-            <MetricCard title="Saving Acumulado (YTD)" value="R$ 1.2M" trend="-28.4%" positive />
+            <MetricCard title="Economia Gerada (R$)" value="R$ 1.2M" trend="-28.4%" positive />
             <MetricCard title="Custo Médio / Colaborador" value="R$ 384,50" trend="-12.1%" positive />
             <MetricCard title="Taxa de Ocupação da Frota" value="94.2%" trend="+26.6%" positive />
           </div>

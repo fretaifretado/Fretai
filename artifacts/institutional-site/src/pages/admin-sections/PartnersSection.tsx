@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
-import { Truck, Plus, Trash2, X, Check, AlertCircle, Search, Car, User } from "lucide-react";
+import { Truck, Plus, Trash2, X, Check, AlertCircle, Search, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 interface Partner {
   id: number;
@@ -26,24 +25,46 @@ function formatCPF(v: string) {
   return d.replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d{1,2})$/, "$1-$2");
 }
 
+function formatPhone(v: string) {
+  const d = v.replace(/\D/g, "").slice(0, 11);
+  if (d.length <= 10) {
+    return d.replace(/(\d{2})(\d)/, "($1) $2").replace(/(\d{4})(\d{1,4})$/, "$1-$2");
+  }
+  return d.replace(/(\d{2})(\d)/, "($1) $2").replace(/(\d{5})(\d{1,4})$/, "$1-$2");
+}
+
 const EMPTY_PARTNER = { name: "", cnpj: "", address: "", phone: "", email: "", masterName: "", masterCpf: "", masterEmail: "" };
-const EMPTY_VEHICLE = { type: "", capacity: "", plate: "", internalId: "", status: "ativo" };
-const EMPTY_DRIVER = { name: "", cpf: "", cnh: "", cnhCategory: "", email: "" };
 
 export default function PartnersSection({ token }: Props) {
   const [partners, setPartners] = useState<Partner[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
-  const [showForm, setShowForm] = useState<"partner" | "vehicle" | "driver" | null>(null);
-  const [selectedPartnerId, setSelectedPartnerId] = useState<number | null>(null);
+  const [showForm, setShowForm] = useState(false);
   const [partnerForm, setPartnerForm] = useState(EMPTY_PARTNER);
-  const [vehicleForm, setVehicleForm] = useState(EMPTY_VEHICLE);
-  const [driverForm, setDriverForm] = useState(EMPTY_DRIVER);
   const [formError, setFormError] = useState("");
   const [formLoading, setFormLoading] = useState(false);
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [createdInfo, setCreatedInfo] = useState<{ email: string; password: string } | null>(null);
+  const [geocoding, setGeocoding] = useState(false);
+  const [geocodeError, setGeocodeError] = useState("");
+  const [geocodedCoords, setGeocodedCoords] = useState<{ lat: number; lng: number } | null>(null);
+
+  async function geocodeAddress(address: string) {
+    if (!address.trim()) return;
+    setGeocoding(true); setGeocodeError(""); setGeocodedCoords(null);
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1&addressdetails=1`;
+      const res = await fetch(url, { headers: { "Accept-Language": "pt-BR" } });
+      const data = await res.json() as { lat: string; lon: string; display_name: string }[];
+      if (data.length > 0) {
+        setGeocodedCoords({ lat: parseFloat(data[0]!.lat), lng: parseFloat(data[0]!.lon) });
+      } else {
+        setGeocodeError("Endereço não encontrado. Verifique e tente novamente.");
+      }
+    } catch { setGeocodeError("Erro ao geocodificar. Verifique sua conexão."); }
+    finally { setGeocoding(false); }
+  }
 
   const fetchPartners = useCallback(async () => {
     setLoading(true); setError("");
@@ -55,7 +76,7 @@ export default function PartnersSection({ token }: Props) {
     finally { setLoading(false); }
   }, [token]);
 
-  useEffect(() => { fetchPartners(); }, [fetchPartners]);
+  useEffect(() => { void fetchPartners(); }, [fetchPartners]);
 
   async function submitPartner(e: React.FormEvent) {
     e.preventDefault(); setFormError(""); setFormLoading(true);
@@ -63,43 +84,12 @@ export default function PartnersSection({ token }: Props) {
       const res = await fetch("/api/admin/partners", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(partnerForm),
+        body: JSON.stringify({ ...partnerForm, lat: geocodedCoords?.lat ?? null, lng: geocodedCoords?.lng ?? null }),
       });
       const data = await res.json() as Partner & { masterUser?: { email: string; initialPassword: string }; error?: string };
       if (!res.ok) { setFormError(data.error ?? "Erro."); return; }
       setCreatedInfo(data.masterUser ? { email: data.masterUser.email, password: data.masterUser.initialPassword } : null);
-      setShowForm(null); setPartnerForm(EMPTY_PARTNER); await fetchPartners();
-    } catch { setFormError("Erro de conexão."); }
-    finally { setFormLoading(false); }
-  }
-
-  async function submitVehicle(e: React.FormEvent) {
-    e.preventDefault(); setFormError(""); setFormLoading(true);
-    try {
-      const res = await fetch(`/api/partners/${selectedPartnerId}/vehicles`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(vehicleForm),
-      });
-      const data = await res.json() as { error?: string };
-      if (!res.ok) { setFormError(data.error ?? "Erro."); return; }
-      setShowForm(null); setVehicleForm(EMPTY_VEHICLE);
-    } catch { setFormError("Erro de conexão."); }
-    finally { setFormLoading(false); }
-  }
-
-  async function submitDriver(e: React.FormEvent) {
-    e.preventDefault(); setFormError(""); setFormLoading(true);
-    try {
-      const res = await fetch(`/api/partners/${selectedPartnerId}/drivers`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(driverForm),
-      });
-      const data = await res.json() as { initialPassword?: string; error?: string };
-      if (!res.ok) { setFormError(data.error ?? "Erro."); return; }
-      setCreatedInfo(data.initialPassword ? { email: driverForm.email, password: data.initialPassword } : null);
-      setShowForm(null); setDriverForm(EMPTY_DRIVER);
+      setShowForm(false); setPartnerForm(EMPTY_PARTNER); setGeocodedCoords(null); setGeocodeError(""); await fetchPartners();
     } catch { setFormError("Erro de conexão."); }
     finally { setFormLoading(false); }
   }
@@ -124,9 +114,9 @@ export default function PartnersSection({ token }: Props) {
             <Truck size={18} className="text-accent" />
             <h1 className="text-xl font-bold text-foreground">Parceiros Transportadores</h1>
           </div>
-          <p className="text-muted-foreground text-sm">Gerencie empresas de transporte, veículos e motoristas.</p>
+          <p className="text-muted-foreground text-sm">Gerencie empresas de transporte parceiras.</p>
         </div>
-        <Button onClick={() => { setShowForm("partner"); setCreatedInfo(null); }} className="bg-accent hover:bg-accent/90 text-white font-semibold shrink-0">
+        <Button onClick={() => { setShowForm(true); setCreatedInfo(null); setFormError(""); }} className="bg-accent hover:bg-accent/90 text-white font-semibold shrink-0">
           <Plus size={16} className="mr-2" /> Novo Parceiro
         </Button>
       </div>
@@ -135,9 +125,14 @@ export default function PartnersSection({ token }: Props) {
         <div className="bg-green-50 border border-green-200 rounded-xl p-4 mb-6 flex items-start gap-3">
           <User size={18} className="text-green-600 shrink-0 mt-0.5" />
           <div className="flex-1">
-            <p className="font-semibold text-green-800 text-sm">Cadastro realizado!</p>
+            <p className="font-semibold text-green-800 text-sm">Parceiro cadastrado com sucesso!</p>
             <p className="text-green-700 text-sm mt-1">
-              E-mail: <strong>{createdInfo.email}</strong> · Senha inicial: <code className="bg-green-100 px-1.5 py-0.5 rounded font-mono">{createdInfo.password}</code>
+              E-mail: <strong>{createdInfo.email}</strong> · Senha inicial:{" "}
+              <code className="bg-green-100 px-1.5 py-0.5 rounded font-mono">{createdInfo.password}</code>
+              <span className="text-green-600 ml-2 text-xs">(6 primeiros dígitos do CPF)</span>
+            </p>
+            <p className="text-xs text-green-600 mt-1">
+              O parceiro pode cadastrar seus veículos e motoristas após fazer login no painel dele.
             </p>
           </div>
           <button onClick={() => setCreatedInfo(null)}><X size={15} className="text-green-600" /></button>
@@ -157,7 +152,7 @@ export default function PartnersSection({ token }: Props) {
 
       <div className="bg-card border rounded-xl shadow-sm overflow-hidden">
         {loading ? (
-          <div className="py-16 text-center text-muted-foreground text-sm">Carregando...</div>
+          <div className="py-16 text-center text-muted-foreground text-sm animate-pulse">Carregando...</div>
         ) : filtered.length === 0 ? (
           <div className="py-16 text-center">
             <Truck size={36} className="text-muted-foreground/30 mx-auto mb-3" />
@@ -168,7 +163,7 @@ export default function PartnersSection({ token }: Props) {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b bg-muted/30">
-                  {["Empresa", "CNPJ", "E-mail", "Telefone", "Veículos", "Motoristas", ""].map(h => (
+                  {["Empresa", "CNPJ", "E-mail", "Telefone", "Cadastro", ""].map(h => (
                     <th key={h} className="text-left px-5 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">{h}</th>
                   ))}
                 </tr>
@@ -180,21 +175,18 @@ export default function PartnersSection({ token }: Props) {
                     <td className="px-5 py-3.5 text-muted-foreground font-mono text-xs">{formatCNPJ(p.cnpj)}</td>
                     <td className="px-5 py-3.5 text-muted-foreground">{p.email}</td>
                     <td className="px-5 py-3.5 text-muted-foreground">{p.phone}</td>
-                    <td className="px-5 py-3.5">
-                      <button className="text-xs text-accent hover:underline flex items-center gap-1" onClick={() => { setSelectedPartnerId(p.id); setShowForm("vehicle"); setFormError(""); }}>
-                        <Car size={12} /> Veículos
-                      </button>
-                    </td>
-                    <td className="px-5 py-3.5">
-                      <button className="text-xs text-accent hover:underline flex items-center gap-1" onClick={() => { setSelectedPartnerId(p.id); setShowForm("driver"); setFormError(""); }}>
-                        <User size={12} /> Motoristas
-                      </button>
+                    <td className="px-5 py-3.5 text-xs text-muted-foreground">
+                      {new Date(p.createdAt).toLocaleDateString("pt-BR")}
                     </td>
                     <td className="px-5 py-3.5">
                       {deleteId === p.id ? (
                         <div className="flex gap-1">
-                          <Button size="sm" variant="destructive" className="h-7 px-2 text-xs" onClick={() => handleDelete(p.id)}><Check size={12} className="mr-1" />Confirmar</Button>
-                          <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => setDeleteId(null)}><X size={12} /></Button>
+                          <Button size="sm" variant="destructive" className="h-7 px-2 text-xs" onClick={() => void handleDelete(p.id)}>
+                            <Check size={12} className="mr-1" />Confirmar
+                          </Button>
+                          <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => setDeleteId(null)}>
+                            <X size={12} />
+                          </Button>
                         </div>
                       ) : (
                         <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive" onClick={() => setDeleteId(p.id)}>
@@ -210,13 +202,13 @@ export default function PartnersSection({ token }: Props) {
         )}
       </div>
 
-      {/* Modal parceiro */}
-      {showForm === "partner" && (
+      {/* Modal novo parceiro */}
+      {showForm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
           <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between px-6 py-4 border-b sticky top-0 bg-card">
               <h2 className="font-bold text-lg text-foreground">Novo Parceiro Transportador</h2>
-              <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => setShowForm(null)}><X size={16} /></Button>
+              <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => setShowForm(false)}><X size={16} /></Button>
             </div>
             <form onSubmit={submitPartner} className="p-6 space-y-4">
               <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Dados da Empresa</p>
@@ -231,7 +223,7 @@ export default function PartnersSection({ token }: Props) {
                 </div>
                 <div>
                   <label className="text-sm font-medium text-foreground block mb-1.5">Telefone *</label>
-                  <Input placeholder="(11) 99999-9999" value={partnerForm.phone} onChange={e => setPartnerForm(f => ({ ...f, phone: e.target.value }))} required />
+                  <Input placeholder="(11) 99999-9999" value={partnerForm.phone} onChange={e => setPartnerForm(f => ({ ...f, phone: formatPhone(e.target.value) }))} required />
                 </div>
                 <div>
                   <label className="text-sm font-medium text-foreground block mb-1.5">E-mail principal *</label>
@@ -239,7 +231,30 @@ export default function PartnersSection({ token }: Props) {
                 </div>
                 <div className="sm:col-span-2">
                   <label className="text-sm font-medium text-foreground block mb-1.5">Endereço completo *</label>
-                  <Input placeholder="Rua Exemplo, 123, São Paulo - SP" value={partnerForm.address} onChange={e => setPartnerForm(f => ({ ...f, address: e.target.value }))} required />
+                  <div className="flex gap-2">
+                    <Input
+                      className="flex-1"
+                      placeholder="Rua Exemplo, 123, São Paulo - SP"
+                      value={partnerForm.address}
+                      onChange={e => { setPartnerForm(f => ({ ...f, address: e.target.value })); setGeocodedCoords(null); setGeocodeError(""); }}
+                      required
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="shrink-0 px-3"
+                      disabled={geocoding || !partnerForm.address.trim()}
+                      onClick={() => void geocodeAddress(partnerForm.address)}
+                    >
+                      {geocoding ? "..." : "📍 Validar"}
+                    </Button>
+                  </div>
+                  {geocodeError && <p className="text-xs text-destructive mt-1">{geocodeError}</p>}
+                  {geocodedCoords && (
+                    <p className="text-xs text-emerald-600 mt-1 flex items-center gap-1">
+                      ✓ Endereço localizado · {geocodedCoords.lat.toFixed(5)}, {geocodedCoords.lng.toFixed(5)}
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -260,7 +275,7 @@ export default function PartnersSection({ token }: Props) {
                   </div>
                 </div>
                 <p className="text-xs text-muted-foreground mt-2">
-                  A senha inicial será os <strong>6 primeiros dígitos do CPF</strong>. Troca obrigatória no 1º acesso.
+                  A senha inicial será os <strong>6 primeiros dígitos do CPF</strong>. O parceiro cadastra seus veículos e motoristas após o login.
                 </p>
               </div>
 
@@ -270,102 +285,10 @@ export default function PartnersSection({ token }: Props) {
                 </div>
               )}
               <div className="flex gap-3 pt-2">
-                <Button type="button" variant="outline" className="flex-1" onClick={() => setShowForm(null)}>Cancelar</Button>
+                <Button type="button" variant="outline" className="flex-1" onClick={() => setShowForm(false)}>Cancelar</Button>
                 <Button type="submit" className="flex-1 bg-accent hover:bg-accent/90 text-white font-semibold" disabled={formLoading}>
                   {formLoading ? "Cadastrando..." : "Cadastrar Parceiro"}
                 </Button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Modal veículo */}
-      {showForm === "vehicle" && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
-          <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-md">
-            <div className="flex items-center justify-between px-6 py-4 border-b">
-              <h2 className="font-bold text-lg text-foreground">Cadastrar Veículo</h2>
-              <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => setShowForm(null)}><X size={16} /></Button>
-            </div>
-            <form onSubmit={submitVehicle} className="p-6 space-y-4">
-              <div>
-                <label className="text-sm font-medium block mb-1.5">Tipo *</label>
-                <Select value={vehicleForm.type} onValueChange={v => setVehicleForm(f => ({ ...f, type: v }))}>
-                  <SelectTrigger><SelectValue placeholder="Selecione" /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="van">Van</SelectItem>
-                    <SelectItem value="micro_onibus">Micro-ônibus</SelectItem>
-                    <SelectItem value="onibus">Ônibus</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-sm font-medium block mb-1.5">Placa *</label>
-                  <Input placeholder="ABC-1234" value={vehicleForm.plate} onChange={e => setVehicleForm(f => ({ ...f, plate: e.target.value }))} required />
-                </div>
-                <div>
-                  <label className="text-sm font-medium block mb-1.5">Capacidade *</label>
-                  <Input type="number" placeholder="15" value={vehicleForm.capacity} onChange={e => setVehicleForm(f => ({ ...f, capacity: e.target.value }))} required />
-                </div>
-              </div>
-              <div>
-                <label className="text-sm font-medium block mb-1.5">Identificação interna</label>
-                <Input placeholder="VH-001" value={vehicleForm.internalId} onChange={e => setVehicleForm(f => ({ ...f, internalId: e.target.value }))} />
-              </div>
-              {formError && <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2"><AlertCircle size={14} />{formError}</div>}
-              <div className="flex gap-3 pt-2">
-                <Button type="button" variant="outline" className="flex-1" onClick={() => setShowForm(null)}>Cancelar</Button>
-                <Button type="submit" className="flex-1 bg-accent hover:bg-accent/90 text-white font-semibold" disabled={formLoading}>{formLoading ? "Salvando..." : "Cadastrar Veículo"}</Button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Modal motorista */}
-      {showForm === "driver" && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
-          <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-md">
-            <div className="flex items-center justify-between px-6 py-4 border-b">
-              <h2 className="font-bold text-lg text-foreground">Cadastrar Motorista</h2>
-              <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => setShowForm(null)}><X size={16} /></Button>
-            </div>
-            <form onSubmit={submitDriver} className="p-6 space-y-4">
-              <div>
-                <label className="text-sm font-medium block mb-1.5">Nome completo *</label>
-                <Input value={driverForm.name} onChange={e => setDriverForm(f => ({ ...f, name: e.target.value }))} required />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-sm font-medium block mb-1.5">CPF *</label>
-                  <Input value={driverForm.cpf} onChange={e => setDriverForm(f => ({ ...f, cpf: formatCPF(e.target.value) }))} required />
-                </div>
-                <div>
-                  <label className="text-sm font-medium block mb-1.5">CNH *</label>
-                  <Input value={driverForm.cnh} onChange={e => setDriverForm(f => ({ ...f, cnh: e.target.value }))} required />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-sm font-medium block mb-1.5">Categoria CNH *</label>
-                  <Select value={driverForm.cnhCategory} onValueChange={v => setDriverForm(f => ({ ...f, cnhCategory: v }))}>
-                    <SelectTrigger><SelectValue placeholder="Categoria" /></SelectTrigger>
-                    <SelectContent>
-                      {["A", "B", "C", "D", "E", "AB", "AC", "AD", "AE"].map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div>
-                  <label className="text-sm font-medium block mb-1.5">E-mail *</label>
-                  <Input type="email" value={driverForm.email} onChange={e => setDriverForm(f => ({ ...f, email: e.target.value }))} required />
-                </div>
-              </div>
-              {formError && <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2"><AlertCircle size={14} />{formError}</div>}
-              <div className="flex gap-3 pt-2">
-                <Button type="button" variant="outline" className="flex-1" onClick={() => setShowForm(null)}>Cancelar</Button>
-                <Button type="submit" className="flex-1 bg-accent hover:bg-accent/90 text-white font-semibold" disabled={formLoading}>{formLoading ? "Salvando..." : "Cadastrar Motorista"}</Button>
               </div>
             </form>
           </div>

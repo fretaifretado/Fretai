@@ -43,6 +43,7 @@ export default function Login() {
   const [pendingEmail, setPendingEmail] = useState<string | null>(null);
   const [pendingRole, setPendingRole] = useState<string | null>(null);
   const [pendingName, setPendingName] = useState<string | null>(null);
+  const [pendingEntityId, setPendingEntityId] = useState<number | null>(null);
 
   const form = useForm<LoginForm>({
     resolver: zodResolver(loginSchema),
@@ -93,6 +94,7 @@ export default function Login() {
           name?: string;
           role?: string;
           userId?: number;
+          entityId?: number;
           forcePasswordChange?: boolean;
           error?: string;
         };
@@ -104,6 +106,7 @@ export default function Login() {
           setPendingRole(data.role ?? "");
           setPendingUserId(data.userId ?? null);
           setPendingName(data.name ?? data.email!);
+          setPendingEntityId(data.entityId ?? null);
           setScreen("change-password");
           return;
         }
@@ -112,11 +115,14 @@ export default function Login() {
         localStorage.setItem("jwt_username", data.email!);
         localStorage.setItem("jwt_displayname", data.name ?? data.email!);
         localStorage.setItem("jwt_role", data.role ?? "");
+        if (data.entityId) localStorage.setItem("jwt_entity_id", String(data.entityId));
 
         const redirect = sessionStorage.getItem("redirect_after_login");
         sessionStorage.removeItem("redirect_after_login");
         if (data.role === "platform_admin") {
           setLocation("/admin");
+        } else if (data.role === "parceiro_master") {
+          setLocation("/parceiro");
         } else if (redirect && redirect.startsWith("/painel")) {
           setLocation(redirect);
         } else {
@@ -167,11 +173,14 @@ export default function Login() {
       localStorage.setItem("jwt_username", pendingEmail!);
       localStorage.setItem("jwt_displayname", pendingName ?? pendingEmail!);
       localStorage.setItem("jwt_role", pendingRole ?? "");
+      if (pendingEntityId) localStorage.setItem("jwt_entity_id", String(pendingEntityId));
 
       const redirect = sessionStorage.getItem("redirect_after_login");
       sessionStorage.removeItem("redirect_after_login");
       if (pendingRole === "platform_admin") {
         setLocation("/admin");
+      } else if (pendingRole === "parceiro_master") {
+        setLocation("/parceiro");
       } else if (redirect && redirect.startsWith("/painel")) {
         setLocation(redirect);
       } else {

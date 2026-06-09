@@ -3,22 +3,24 @@ import { db } from "@workspace/db";
 import {
   scheduledMovementsTable,
   scheduledMovementTargetsTable,
+  purchaseOrdersTable,
+  employeesTable,
 } from "@workspace/db/schema";
-import { and, eq, lt, lte, gte, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, lt, lte, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import { requireAuth, getAuth } from "../middlewares/auth";
 import { logAudit } from "../services/audit";
-
+ 
 const router = Router();
-
+ 
 type Tipo = "turno" | "status" | "filial";
 type Estado = "pendente" | "ativo" | "concluido";
-
+ 
 interface AlvoBody {
   colaboradorId: number;
   valorAnterior?: string;
   filialIdAnterior?: number | null;
 }
-
+ 
 function todayIso(): string {
   const d = new Date();
   const y = d.getFullYear();
@@ -26,14 +28,14 @@ function todayIso(): string {
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
-
+ 
 const VALID_TIPOS: ReadonlyArray<Tipo> = ["turno", "status", "filial"];
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
+ 
 function isValidIsoDate(v: unknown): v is string {
   return typeof v === "string" && ISO_DATE_RE.test(v);
 }
-
+ 
 /**
  * Idempotently advances scheduled-movement states for a company AND records
  * the apply/revert effect on each target inside the same transaction.
@@ -69,7 +71,7 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
         .set({ appliedAt: sql`COALESCE(applied_at, NOW())`, revertedAt: sql`COALESCE(reverted_at, NOW())` })
         .where(inArray(scheduledMovementTargetsTable.scheduledMovementId, ids));
     }
-
+ 
     // 2) pendente whose start has arrived → ativo (apply effect on targets).
     const activatedRows = await tx.update(scheduledMovementsTable)
       .set({ estado: "ativo", updatedAt: new Date() })
@@ -88,8 +90,97 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
           inArray(scheduledMovementTargetsTable.scheduledMovementId, ids),
           isNull(scheduledMovementTargetsTable.appliedAt),
         ));
+ 
+      // ── Transferência de filial: cancelar vales e zerar créditos ──────────
+      // Quando um agendamento de tipo "filial" é ativado, o colaborador
+      // muda de empresa. Precisamos:
+      // 1) Cancelar todos os pedidos de compra ativos/aprovados dele na empresa antiga
+      // 2) Registrar um pedido de desconto (vales não utilizados)
+      // 3) Atualizar o companyId do colaborador na tabela employees
+      const filialMovements = await tx
+        .select({
+          id: scheduledMovementsTable.id,
+          tipo: scheduledMovementsTable.tipo,
+          filialIdNovo: scheduledMovementsTable.filialIdNovo,
+        })
+        .from(scheduledMovementsTable)
+        .where(and(
+          inArray(scheduledMovementsTable.id, ids),
+          eq(scheduledMovementsTable.tipo, "filial"),
+        ));
+ 
+      for (const mv of filialMovements) {
+        if (!mv.filialIdNovo) continue;
+ 
+        // Get all targets (colaboradores) of this movement
+        const targets = await tx
+          .select({
+            colaboradorId: scheduledMovementTargetsTable.colaboradorId,
+            filialIdAnterior: scheduledMovementTargetsTable.filialIdAnterior,
+          })
+          .from(scheduledMovementTargetsTable)
+          .where(eq(scheduledMovementTargetsTable.scheduledMovementId, mv.id));
+ 
+        for (const t of targets) {
+          const oldCompanyId = t.filialIdAnterior ?? companyId;
+ 
+          // 1) Get approved/pending purchase orders for this employee in old company
+          const activeOrders = await tx
+            .select()
+            .from(purchaseOrdersTable)
+            .where(and(
+              eq(purchaseOrdersTable.companyId, oldCompanyId),
+              eq(purchaseOrdersTable.employeeId, t.colaboradorId),
+              ne(purchaseOrdersTable.status, "Cancelado"),
+            ));
+ 
+          if (activeOrders.length > 0) {
+            // 2) Cancel all active orders
+            await tx.update(purchaseOrdersTable)
+              .set({ status: "Cancelado", updatedAt: new Date() })
+              .where(and(
+                eq(purchaseOrdersTable.companyId, oldCompanyId),
+                eq(purchaseOrdersTable.employeeId, t.colaboradorId),
+                ne(purchaseOrdersTable.status, "Cancelado"),
+              ));
+ 
+            // 3) Create a "desconto" entry representing unused vales
+            const totalValesNaoUsados = activeOrders.reduce((s, o) => s + o.vales, 0);
+            const totalValor = activeOrders.reduce((s, o) => s + parseFloat(String(o.total)), 0);
+ 
+            if (totalValesNaoUsados > 0) {
+              const employeeRow = await tx
+                .select({ name: employeesTable.name })
+                .from(employeesTable)
+                .where(eq(employeesTable.id, t.colaboradorId))
+                .limit(1);
+ 
+              await tx.insert(purchaseOrdersTable).values({
+                companyId: oldCompanyId,
+                employeeId: t.colaboradorId,
+                nome: employeeRow[0]?.name ?? "Colaborador transferido",
+                turno: "—",
+                periodo: "Transferência de filial",
+                dataInicio: today,
+                dataFim: today,
+                dias: 0,
+                vales: -totalValesNaoUsados,       // negativo = desconto
+                valorUnit: "0",
+                total: String(-totalValor.toFixed(2)), // negativo = estorno
+                status: "Aprovado",
+                proRata: false,
+              });
+            }
+          }
+ 
+          // 4) Update employee's companyId to the new filial
+          await tx.update(employeesTable)
+            .set({ companyId: mv.filialIdNovo, updatedAt: new Date() })
+            .where(eq(employeesTable.id, t.colaboradorId));
+        }
+      }
     }
-
+ 
     // 3) ativo whose end has passed → concluido (revert effect on targets).
     const completedRows = await tx.update(scheduledMovementsTable)
       .set({ estado: "concluido", updatedAt: new Date() })
@@ -110,7 +201,7 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
     }
   });
 }
-
+ 
 interface AgendamentoApi {
   id: number;
   tipo: Tipo;
@@ -128,7 +219,7 @@ interface AgendamentoApi {
     revertedAt: string | null;
   }[];
 }
-
+ 
 async function listAgendamentos(companyId: number): Promise<AgendamentoApi[]> {
   const rows = await db.select().from(scheduledMovementsTable)
     .where(eq(scheduledMovementsTable.companyId, companyId));
@@ -160,7 +251,7 @@ async function listAgendamentos(companyId: number): Promise<AgendamentoApi[]> {
     })),
   }));
 }
-
+ 
 /* ── Admin: listar agendamentos de uma empresa ── */
 router.get("/admin/companies/:id/scheduled-movements",
   requireAuth("platform_admin"),
@@ -178,7 +269,7 @@ router.get("/admin/companies/:id/scheduled-movements",
       res.status(500).json({ error: "Erro interno" });
     }
   });
-
+ 
 /* ---------- Listar ---------- */
 router.get("/me/scheduled-movements",
   requireAuth("cliente_master", "cliente_subadmin"),
@@ -197,7 +288,7 @@ router.get("/me/scheduled-movements",
       res.status(500).json({ error: "Erro interno" });
     }
   });
-
+ 
 /* ---------- Criar ---------- */
 router.post("/me/scheduled-movements",
   requireAuth("cliente_master", "cliente_subadmin"),
@@ -215,7 +306,7 @@ router.post("/me/scheduled-movements",
       fim?: string;
       alvos?: AlvoBody[];
     };
-
+ 
     if (!body.tipo || !VALID_TIPOS.includes(body.tipo as Tipo)) {
       res.status(400).json({ error: "Tipo inválido" }); return;
     }
@@ -234,7 +325,7 @@ router.post("/me/scheduled-movements",
     if (body.tipo === "filial" && (typeof body.filialIdNovo !== "number")) {
       res.status(400).json({ error: "filialIdNovo é obrigatório para tipo=filial" }); return;
     }
-
+ 
     try {
       const created = await db.transaction(async tx => {
         const [row] = await tx.insert(scheduledMovementsTable).values({
@@ -257,12 +348,12 @@ router.post("/me/scheduled-movements",
         await tx.insert(scheduledMovementTargetsTable).values(targetRows);
         return row;
       });
-
+ 
       // advance immediately so the response reflects the correct state
       await advanceStatesForCompany(companyId);
       const list = await listAgendamentos(companyId);
       const fresh = list.find(a => a.id === created.id);
-
+ 
       await logAudit({
         userId: typeof auth.sub === "number" ? auth.sub : 0,
         userEmail: auth.email,
@@ -272,14 +363,14 @@ router.post("/me/scheduled-movements",
         entityId: created.id,
         newValue: { tipo: body.tipo, valorNovo: body.valorNovo, inicio: body.inicio, fim: body.fim, alvos: body.alvos!.length },
       });
-
+ 
       res.status(201).json(fresh ?? null);
     } catch (err) {
       req.log.error({ err }, "Error creating scheduled movement");
       res.status(500).json({ error: "Erro interno" });
     }
   });
-
+ 
 /* ---------- Editar (apenas pendente) ---------- */
 router.patch("/me/scheduled-movements/:id",
   requireAuth("cliente_master", "cliente_subadmin"),
@@ -305,7 +396,7 @@ router.patch("/me/scheduled-movements/:id",
     if (!Array.isArray(body.alvos) || body.alvos.length === 0) {
       res.status(400).json({ error: "Lista de alvos não pode ser vazia" }); return;
     }
-
+ 
     try {
       await advanceStatesForCompany(companyId);
       const [row] = await db.select().from(scheduledMovementsTable)
@@ -317,7 +408,7 @@ router.patch("/me/scheduled-movements/:id",
       if (row.estado !== "pendente") {
         res.status(409).json({ error: "Só é possível editar agendamentos pendentes" }); return;
       }
-
+ 
       await db.transaction(async tx => {
         await tx.update(scheduledMovementsTable).set({
           inicio: body.inicio!,
@@ -335,7 +426,7 @@ router.patch("/me/scheduled-movements/:id",
           })),
         );
       });
-
+ 
       await advanceStatesForCompany(companyId);
       const list = await listAgendamentos(companyId);
       const fresh = list.find(a => a.id === id);
@@ -345,7 +436,7 @@ router.patch("/me/scheduled-movements/:id",
       res.status(500).json({ error: "Erro interno" });
     }
   });
-
+ 
 /* ---------- Cancelar ----------
  * Pendente: deleta a linha (nunca esteve aplicado).
  * Ativo:    transaciona estado=concluido + reverted_at=NOW() em todos os
@@ -372,7 +463,7 @@ router.delete("/me/scheduled-movements/:id",
           eq(scheduledMovementsTable.companyId, companyId),
         ));
       if (!row) { res.status(404).json({ error: "Agendamento não encontrado" }); return; }
-
+ 
       if (row.estado === "pendente") {
         await db.delete(scheduledMovementsTable).where(eq(scheduledMovementsTable.id, id));
         await logAudit({
@@ -418,5 +509,5 @@ router.delete("/me/scheduled-movements/:id",
       res.status(500).json({ error: "Erro interno" });
     }
   });
-
+ 
 export default router;

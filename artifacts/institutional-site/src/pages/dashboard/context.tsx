@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect, useRef, type ReactNode } from "react";
-
-export type Status = "Ativo" | "Inativo" | "Férias" | "Licença" | "Afastado" | "Desligado";
+ 
+export type Status = "Ativo" | "Home Office" | "Férias" | "Licença" | "Afastado" | "Desligado" | "Admissão";
 
 export type TipoAgendamento = "turno" | "status" | "filial";
 export type EstadoAgendamento = "pendente" | "ativo" | "concluido";
@@ -213,6 +213,7 @@ interface DashboardContextValue {
   colaboradoresDaFilial: Colaborador[];
   isCpfDuplicate: (cpf: string, exceptId?: number) => boolean;
   addColaborador: (c: Omit<Colaborador, "id" | "codigo">) => boolean;
+  addColaboradorLocal: (items: { c: Omit<Colaborador, "id" | "codigo">; id: number }[]) => void;
   updateColaborador: (c: Colaborador) => void;
   deleteColaborador: (id: number) => void;
 
@@ -253,15 +254,41 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [grupos, setGrupos] = useState<Grupo[]>([]);
   const [colaboradores, setColaboradores] = useState<Colaborador[]>([]);
   const [agendamentos, setAgendamentos] = useState<Agendamento[]>([]);
+  const [jwtToken, setJwtToken] = useState<string | null>(() => localStorage.getItem("jwt_token"));
   let colabSeq = 1;
 
   const colaboradoresRef = useRef(colaboradores);
   const agendamentosRef  = useRef(agendamentos);
+
+  // Detecta troca de usuário (novo login) observando mudanças no jwt_token.
+  // Quando o token muda, reseta todo o estado e recarrega os dados da nova empresa.
+  useEffect(() => {
+    function checkToken() {
+      const current = localStorage.getItem("jwt_token");
+      setJwtToken(prev => (prev !== current ? current : prev));
+    }
+    window.addEventListener("storage", checkToken);
+    // Poll a cada segundo para detectar login na mesma aba
+    const interval = window.setInterval(checkToken, 1000);
+    return () => {
+      window.removeEventListener("storage", checkToken);
+      window.clearInterval(interval);
+    };
+  }, []);
   useEffect(() => { colaboradoresRef.current = colaboradores; }, [colaboradores]);
   useEffect(() => { agendamentosRef.current  = agendamentos;  }, [agendamentos]);
 
   useEffect(() => {
-    const token = localStorage.getItem("jwt_token");
+    // Reseta estado quando o token muda (troca de usuário/empresa)
+    setEmpresas([]);
+    setEmpresaAtiva({ id: 0, nome: "", valeValue: "8.50" });
+    setFiliais([]);
+    setFilialAtiva(null);
+    setTurnos([]);
+    setColaboradores([]);
+    setAgendamentos([]);
+
+    const token = jwtToken;
     const role = localStorage.getItem("jwt_role");
     if (!token || role === "platform_admin") return;
 
@@ -369,7 +396,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
 
     void loadData();
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jwtToken]);
 
   const addFilial    = (f: Omit<Filial, "id">) => setFiliais(p => [...p, { ...f, id: Date.now() }]);
   const updateFilial = (f: Filial)              => setFiliais(p => p.map(x => x.id === f.id ? f : x));
@@ -435,7 +463,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   function isCpfDuplicate(cpf: string, exceptId?: number): boolean {
     const norm = normalizeCpf(cpf);
     if (!norm) return false;
-    return colaboradores.some(c => normalizeCpf(c.cpf) === norm && c.id !== exceptId);
+    const companyId = filialAtiva?.id ?? getEntityId();
+    // Verifica se o CPF já existe na empresa/filial atual
+    return colaboradores.some(c => 
+      normalizeCpf(c.cpf) === norm && 
+      c.id !== exceptId && 
+      c.filialId === companyId
+    );
   }
 
   function getToken(): string | null { return localStorage.getItem("jwt_token"); }
@@ -446,12 +480,45 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     return typeof payload?.entityId === "number" ? payload.entityId : null;
   }
 
+  /** Converts dd/mm/yyyy (frontend format) to yyyy-mm-dd (ISO, required by the API/DB).
+   *  Passes through values already in ISO format or returns today as fallback. */
+  /** yyyy-mm-dd (banco) → dd/mm/yyyy (exibição no app). */
+  function isoToDisplay(raw: string | null | undefined): string {
+    if (!raw) return "";
+    const s = String(raw).trim();
+    const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (iso) return `${iso[3]}/${iso[2]}/${iso[1]}`;
+    // Se já estiver no formato dd/mm/yyyy ou dd/mm/yy, retorna como está
+    if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(s)) return s;
+    return s;
+  }
+
+  /** dd/mm/yyyy → yyyy-mm-dd para enviar ao banco. Retorna null se vazio/inválido. */
+  function toIsoDate(raw: string | null | undefined): string | null {
+    if (!raw) return null;
+    const s = String(raw).trim();
+    if (!s) return null;
+    const dmY = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if (dmY) {
+      let d = dmY[1].padStart(2,"0"), m = dmY[2].padStart(2,"0"), y = Number(dmY[3]);
+      if (y < 100) y += (y > 50 ? 1900 : 2000);
+      return `${y}-${m}-${d}`;
+    }
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    return null;
+  }
+
+  /** toIsoDate com fallback para hoje — apenas para campos NOT NULL no banco. */
+  function toIsoDateOrToday(raw: string | null | undefined): string {
+    return toIsoDate(raw) ?? new Date().toISOString().slice(0, 10);
+  }
+
   function colabToApiBody(c: Omit<Colaborador, "id" | "codigo">, codigo: string, companyId: number) {
     return {
       name: c.nome,
       cpf: normalizeCpf(c.cpf),
       matricula: c.matricula || "000000",
-      admissionDate: c.inicioOperacao || new Date().toISOString().slice(0, 10),
+      admissionDate: toIsoDateOrToday(c.inicioOperacao),
       route: c.turno && c.turno !== "—" ? c.turno : null,
       status: c.status,
       email: c.email || null,
@@ -466,7 +533,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       zipCode: c.cep ? c.cep.replace(/\D/g, "") : null,
       shiftStart: c.horarioEntrada || null,
       shiftEnd: c.horarioSaida || null,
-      operationStart: c.inicioOperacao || null,
+      operationStart: c.inicioOperacao ? toIsoDate(c.inicioOperacao) : null,
       valeValue: c.vale && c.vale !== "—" ? c.vale : null,
       codigo,
       grupoId: c.grupoId ? String(c.grupoId) : null,
@@ -499,7 +566,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       cep: formatCep((e.zipCode as string) ?? ""),
       horarioEntrada: (e.shiftStart as string) ?? "",
       horarioSaida: (e.shiftEnd as string) ?? "",
-      inicioOperacao: (e.operationStart as string) ?? "",
+      inicioOperacao: isoToDisplay((e.admissionDate as string) ?? ""),
       vale: (e.valeValue as string) ?? "—",
       grupoId: (e.grupoId as number | null) ?? null,
     };
@@ -510,8 +577,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     const codigo = `COL-${String(colabSeq++).padStart(4, "0")}`;
     const filialId = c.filialId ?? filialAtiva?.id ?? null;
     const local = c.local?.trim() || filialAtiva?.nome || empresaAtiva.nome || "";
-    const newId = Date.now() + Math.floor(Math.random() * 1000);
-    const newColab: Colaborador = { ...c, id: newId, codigo, filialId, local };
+    const tempId = Date.now() + Math.floor(Math.random() * 1000);
+    const newColab: Colaborador = { ...c, id: tempId, codigo, filialId, local };
     setColaboradores(p => [...p, newColab]);
 
     const token = getToken();
@@ -523,18 +590,44 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify(colabToApiBody(c, codigo, companyId)),
       })
-        .then(r => r.ok ? r.json() : null)
-        .then((saved: Record<string, unknown> | null) => {
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+        .then((saved: Record<string, unknown>) => {
           if (saved?.id) {
-            setColaboradores(p => p.map(x => x.id === newId ? { ...x, id: saved.id as number } : x));
+            // Substitui o ID temporário pelo ID real persistido no banco
+            setColaboradores(p => p.map(x => x.id === tempId ? { ...x, id: saved.id as number } : x));
           }
         })
-        .catch(() => {});
+        .catch((err) => {
+          console.error("[dashboard] erro ao salvar colaborador, revertendo estado local:", err);
+          // Remove o registro temporário — ele não foi salvo no banco
+          setColaboradores(p => p.filter(x => x.id !== tempId));
+        });
     }
     return true;
   }
 
+  /** Insere colaboradores no estado local em lote, sem chamar a API.
+   *  Evita o POST duplicado que ocorre quando addColaborador é chamado após batch bem-sucedido. */
+  function addColaboradorLocal(items: { c: Omit<Colaborador, "id" | "codigo">; id: number }[]): void {
+    setColaboradores(prev => {
+      const existingCpfs = new Set(prev.map(x => x.cpf.replace(/\D/g, "")));
+      const novos: Colaborador[] = [];
+      for (const { c, id } of items) {
+        const cpfClean = c.cpf.replace(/\D/g, "");
+        if (existingCpfs.has(cpfClean)) continue;
+        existingCpfs.add(cpfClean);
+        const codigo = `COL-${String(id).padStart(4, "0")}`;
+        const filialId = c.filialId ?? filialAtiva?.id ?? null;
+        const local = c.local?.trim() || filialAtiva?.nome || empresaAtiva.nome || "";
+        novos.push({ ...c, id, codigo, filialId, local });
+      }
+      return novos.length > 0 ? [...prev, ...novos] : prev;
+    });
+  }
+
   const updateColaborador = (c: Colaborador) => {
+    // Guarda o estado anterior para poder reverter em caso de falha da API
+    const previous = colaboradoresRef.current.find(x => x.id === c.id);
     setColaboradores(p => p.map(x => x.id === c.id ? c : x));
     const token = getToken();
     const companyId = c.filialId ?? getEntityId();
@@ -557,7 +650,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         zipCode: c.cep ? c.cep.replace(/\D/g, "") : null,
         shiftStart: c.horarioEntrada || null,
         shiftEnd: c.horarioSaida || null,
-        operationStart: c.inicioOperacao || null,
+        operationStart: c.inicioOperacao ? toIsoDate(c.inicioOperacao) : null,
         valeValue: c.vale && c.vale !== "—" ? c.vale : null,
         codigo: c.codigo,
         grupoId: c.grupoId ? String(c.grupoId) : null,
@@ -566,7 +659,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         method: "PUT",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify(body),
-      }).catch(() => {});
+      })
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); })
+        .catch((err) => {
+          console.error("[dashboard] erro ao atualizar colaborador, revertendo estado local:", err);
+          // Restaura o estado anterior se a API falhou
+          if (previous) setColaboradores(p => p.map(x => x.id === c.id ? previous : x));
+        });
     }
   };
 
@@ -580,7 +679,13 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       fetch(`${API_URL}/api/companies/${companyId}/employees/${id}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
-      }).catch(() => {});
+      })
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); })
+        .catch((err) => {
+          console.error("[dashboard] erro ao excluir colaborador, revertendo estado local:", err);
+          // Restaura o colaborador removido se a API falhou
+          if (c) setColaboradores(p => [...p, c].sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR")));
+        });
     }
   };
 
@@ -709,8 +814,16 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       if (!res.ok) return;
       const data = (await res.json()) as ApiAgendamento[];
       const list = data.map(mapApiAgendamento);
-      setAgendamentos(list);
-      reconcileColaboradoresWithAgendamentos(list);
+      // Auto-purge: remove concluídos com mais de 1 mês
+      const oneMonthAgo = new Date();
+      oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+      const purged = list.filter(ag => {
+        if (ag.estado !== "concluido") return true;
+        const fim = new Date(ag.fim + "T00:00:00");
+        return fim >= oneMonthAgo; // keep if concluded less than 1 month ago
+      });
+      setAgendamentos(purged);
+      reconcileColaboradoresWithAgendamentos(purged);
     } catch (err) {
       console.error("[dashboard] erro ao carregar agendamentos:", err);
     }
@@ -846,7 +959,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       filiais, filialAtiva, setFilialAtiva, addFilial, updateFilial, deleteFilial,
       turnos, addTurno, updateTurno, deleteTurno,
       grupos, addGrupo, updateGrupo, deleteGrupo,
-      colaboradores, colaboradoresDaFilial, isCpfDuplicate, addColaborador, updateColaborador, deleteColaborador,
+      colaboradores, colaboradoresDaFilial, isCpfDuplicate, addColaborador, addColaboradorLocal, updateColaborador, deleteColaborador,
       agendamentos, addAgendamento, cancelAgendamento, updateAgendamento,
       activeCompanyId, nomeEmpresaAtiva,
     }}>

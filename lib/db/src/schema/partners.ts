@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer, pgEnum, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, pgEnum, boolean, doublePrecision } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -14,6 +14,11 @@ export const partnersTable = pgTable("partners", {
   phone: text("phone").notNull(),
   email: text("email").notNull().unique(),
   masterUserId: integer("master_user_id"),
+  /** Endereço textual da garagem (usado no frontend) */
+  garageAddress: text("garage_address"),
+  /** Coordenadas da garagem para cálculo de rotas */
+  garageLat: doublePrecision("garage_lat"),
+  garageLng: doublePrecision("garage_lng"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

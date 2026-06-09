@@ -77,7 +77,7 @@ router.post("/auth/login", async (req, res) => {
       forcePasswordChange: user.forcePasswordChange,
     });
 
-    res.json({ token, role: user.role, forcePasswordChange: user.forcePasswordChange, email: user.email, userId: user.id, name: user.name ?? user.email.split("@")[0] });
+    res.json({ token, role: user.role, forcePasswordChange: user.forcePasswordChange, email: user.email, userId: user.id, name: user.name ?? user.email.split("@")[0], entityId: user.entityId ?? null });
   } catch (err) {
     req.log.error({ err }, "Login error");
     res.status(500).json({ error: "Erro interno do servidor" });

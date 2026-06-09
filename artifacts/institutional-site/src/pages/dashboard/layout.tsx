@@ -96,9 +96,7 @@ export default function DashboardLayout({ children, alertMessage }: LayoutProps)
       {/* Header */}
       <header className="bg-primary text-primary-foreground border-b border-white/10 sticky top-0 z-40 h-14 flex items-center shrink-0">
         <div className="hidden lg:flex items-center gap-2.5 px-5 w-64 shrink-0 border-r border-white/10 h-full">
-          <div className="hidden lg:flex items-center gap-2.5 px-5 w-56 shrink-0 border-r border-white/10 h-full">
-            <img src="/logo.png" alt="Fretai" className="h-8 w-auto mb-4 mt-4" />
-          </div>
+            <img src="/logo.png" alt="Fretai" className="h-8 w-auto" />
         </div>
         <button className="lg:hidden flex items-center justify-center h-14 w-14 hover:bg-white/10 transition-colors" onClick={() => setSidebarOpen(!sidebarOpen)}>
           {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
@@ -157,7 +155,7 @@ export default function DashboardLayout({ children, alertMessage }: LayoutProps)
           fixed lg:sticky top-14 left-0
           h-[calc(100vh-3.5rem)]
           z-30 w-64 shrink-0 bg-primary text-primary-foreground border-r border-white/10
-          flex flex-col transition-transform duration-200 ease-in-out overflow-y-auto
+          flex flex-col transition-transform duration-200 ease-in-out overflow-y-auto [overflow-anchor:none]
           ${sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"}
         `}>
           <div className="p-4 border-b border-white/10">
@@ -210,7 +208,12 @@ export default function DashboardLayout({ children, alertMessage }: LayoutProps)
             </div>
           </div>
 
-          <nav className="flex-1 py-3">
+          <nav className="flex-1 py-3" onClickCapture={e => {
+              // Preserve sidebar scroll position when navigating
+              const nav = (e.currentTarget as HTMLElement);
+              const scrollTop = nav.scrollTop;
+              requestAnimationFrame(() => { nav.scrollTop = scrollTop; });
+            }}>
             {NAV.map((section, si) => (
               <div key={si} className="mb-1">
                 {section.title && <p className="text-[10px] font-bold uppercase tracking-widest text-primary-foreground/30 px-4 py-2 mt-2">{section.title}</p>}

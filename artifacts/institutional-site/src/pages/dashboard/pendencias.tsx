@@ -1,16 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState } from "react";
 import DashboardLayout from "./layout";
 import { useDashboard, formatCepProgressive, type Colaborador } from "./context";
 import { AlertTriangle, Pencil, CheckCircle, XCircle, X, AlertCircle, PhoneOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
-const API_URL = import.meta.env.VITE_API_URL ?? "";
-
-function getAuthHeaders(): HeadersInit {
-  const token = localStorage.getItem("auth_token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
 
 function StatusCell({ ok }: { ok: boolean }) {
   return ok
@@ -19,7 +13,7 @@ function StatusCell({ ok }: { ok: boolean }) {
 }
 
 export default function PendenciasPage() {
-  const { colaboradoresDaFilial: colaboradores, updateColaborador, turnos, empresaAtiva, filialAtiva } = useDashboard();
+  const { colaboradoresDaFilial: colaboradores, updateColaborador, turnos } = useDashboard();
   const [editing, setEditing] = useState<Colaborador | null>(null);
   const [fTelefone, setFTelefone] = useState("");
   const [fEndereco, setFEndereco] = useState("");
@@ -27,60 +21,24 @@ export default function PendenciasPage() {
   const [fTurno, setFTurno] = useState("");
   const [error, setError] = useState("");
   const [savedIds, setSavedIds] = useState<Set<number>>(new Set());
-  const [valesMap, setValesMap] = useState<Map<number, number>>(new Map());
-
-  const fetchVales = useCallback(async (companyId: number) => {
-    try {
-      const res = await fetch(`${API_URL}/api/me/purchase-orders?companyId=${companyId}`, {
-        headers: getAuthHeaders(),
-      });
-      if (!res.ok) return;
-      const data = await res.json() as {
-        employeeId: number | null;
-        vales: number;
-        status: string;
-      }[];
-      const map = new Map<number, number>();
-      for (const o of data) {
-        if (o.employeeId && o.status !== "Cancelado") {
-          const prev = map.get(o.employeeId) ?? 0;
-          map.set(o.employeeId, prev + o.vales);
-        }
-      }
-      setValesMap(map);
-    } catch {
-      // silently ignore
-    }
-  }, []);
-
-  useEffect(() => {
-    const cid = filialAtiva?.id ?? empresaAtiva?.id;
-    if (cid) void fetchVales(cid);
-  }, [filialAtiva?.id, empresaAtiva?.id, fetchVales]);
-
-  const empresaTemVale = !!(empresaAtiva.valeValue && parseFloat(empresaAtiva.valeValue) > 0);
-
-  function valeOk(c: Colaborador) {
-    return empresaTemVale ||
-      (!(!c.vale || c.vale === "—")) ||
-      valesMap.has(c.id);
-  }
 
   function hasPendencias(c: Colaborador) {
-    return !c.telefone?.trim() ||
-      !valeOk(c) ||
+    return !c.cpf?.trim() ||
+      !c.telefone?.trim() ||
       !c.endereco.trim() ||
-      !c.turno || c.turno === "—";
+      !c.turno || c.turno === "—" ||
+      !c.inicioOperacao?.trim();
   }
 
   const lista = colaboradores.filter(c => c.status !== "Desligado" && hasPendencias(c));
 
   function countP(c: Colaborador) {
     return [
+      !!c.cpf?.trim(),
       !!c.telefone?.trim(),
-      valeOk(c),
       !!c.endereco.trim(),
       !(!c.turno || c.turno === "—"),
+      !!c.inicioOperacao?.trim(),
     ].filter(v => !v).length;
   }
 
@@ -121,12 +79,13 @@ export default function PendenciasPage() {
           </p>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-6">
           {[
-            { label: "Sem telefone",         icon: PhoneOff, count: colaboradores.filter(c => c.status !== "Desligado" && !c.telefone?.trim()).length },
-            { label: "Vale não configurado", icon: null,     count: colaboradores.filter(c => c.status !== "Desligado" && !valeOk(c)).length },
-            { label: "Endereço incompleto",  icon: null,     count: colaboradores.filter(c => c.status !== "Desligado" && !c.endereco.trim()).length },
-            { label: "Turno não definido",   icon: null,     count: colaboradores.filter(c => c.status !== "Desligado" && (!c.turno || c.turno === "—")).length },
+            { label: "Sem CPF",              count: colaboradores.filter(c => c.status !== "Desligado" && !c.cpf?.trim()).length },
+            { label: "Sem telefone",         count: colaboradores.filter(c => c.status !== "Desligado" && !c.telefone?.trim()).length },
+            { label: "Endereço incompleto",  count: colaboradores.filter(c => c.status !== "Desligado" && !c.endereco.trim()).length },
+            { label: "Turno não definido",   count: colaboradores.filter(c => c.status !== "Desligado" && (!c.turno || c.turno === "—")).length },
+            { label: "Sem data de início",   count: colaboradores.filter(c => c.status !== "Desligado" && !c.inicioOperacao?.trim()).length },
           ].map(item => (
             <div key={item.label} className="bg-amber-50 border border-amber-200 rounded-xl p-4">
               <p className="text-2xl font-bold text-amber-700">{item.count}</p>
@@ -147,10 +106,11 @@ export default function PendenciasPage() {
                 <thead>
                   <tr className="bg-muted/30 border-b">
                     <th className="text-left px-5 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Colaborador</th>
+                    <th className="text-center px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">CPF</th>
                     <th className="text-center px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Telefone</th>
-                    <th className="text-center px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Vale</th>
                     <th className="text-center px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Endereço</th>
                     <th className="text-center px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Turno</th>
+                    <th className="text-center px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Dt. Início</th>
                     <th className="text-center px-4 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Pendências</th>
                     <th className="px-5 py-3" />
                   </tr>
@@ -162,10 +122,11 @@ export default function PendenciasPage() {
                     return (
                       <tr key={p.id} className={`transition-colors ${resolved ? "bg-green-50/40" : n >= 3 ? "bg-red-50/30 hover:bg-red-50/50" : "hover:bg-muted/20"}`}>
                         <td className="px-5 py-4 font-medium text-foreground">{p.nome}</td>
+                        <td className="px-4 py-4 text-center"><StatusCell ok={!!p.cpf?.trim()} /></td>
                         <td className="px-4 py-4 text-center"><StatusCell ok={!!p.telefone?.trim()} /></td>
-                        <td className="px-4 py-4 text-center"><StatusCell ok={valeOk(p)} /></td>
                         <td className="px-4 py-4 text-center"><StatusCell ok={!!p.endereco.trim()} /></td>
                         <td className="px-4 py-4 text-center"><StatusCell ok={!(!p.turno || p.turno === "—")} /></td>
+                        <td className="px-4 py-4 text-center"><StatusCell ok={!!p.inicioOperacao?.trim()} /></td>
                         <td className="px-4 py-4 text-center">
                           <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${n >= 3 ? "bg-red-100 text-red-700" : "bg-amber-100 text-amber-700"}`}>{n}</span>
                         </td>

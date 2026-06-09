@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
-  PieChart, Pie, Cell, LineChart, Line,
+  PieChart, Pie, Cell,
 } from "recharts";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "";
@@ -23,6 +23,44 @@ interface PedidoApi {
   vales: number;
   total: string;
   status: "Processando" | "Aprovado" | "Cancelado";
+}
+
+interface ScheduledRoute {
+  id: number;
+  shiftTime: string | null;
+  direction: string | null;
+  totalPassengers: number;
+  createdAt: string;
+}
+interface PublishedBudget {
+  budgetId: number;
+  name: string;
+  publishedAt: string;
+  routes: ScheduledRoute[];
+}
+
+function passageirosNoDia(budgets: PublishedBudget[], date: Date): number {
+  const dayOfWeek = date.getDay(); // 0=Dom, 1=Seg, ... 6=Sab
+  // Dias da semana mapeados nos turnos (SEG=1..SEX=5, SAB=6)
+  // Soma passageiros de todas as rotas de IDA (evita contar Volta em dobro)
+  return budgets.flatMap(b => b.routes)
+    .filter(r => r.direction !== "volta") // só IDA para não duplicar
+    .reduce((sum, r) => sum + r.totalPassengers, 0);
+}
+
+function isFutureDate(raw: string | undefined | null): boolean {
+  if (!raw || raw === "—") return false;
+  try {
+    const parts = raw.split("/");
+    if (parts.length !== 3) return false;
+    const d = parseInt(parts[0], 10);
+    const m = parseInt(parts[1], 10) - 1;
+    const y = parseInt(parts[2], 10);
+    const date = new Date(y, m, d);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return date > today;
+  } catch { return false; }
 }
 
 function StatCard({ label, value, sub, trend }: { label: string; value: number | string; sub?: string; trend?: "up" | "down" | "neutral" }) {
@@ -49,6 +87,7 @@ const STATUS_COLORS: Record<string, string> = {
   "Licença":   "#f59e0b",
   "Afastado":  "#f97316",
   "Desligado": "#ef4444",
+  "Admissão":  "#a855f7",
 };
 const MONTH_LABELS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 
@@ -96,6 +135,24 @@ export default function DashboardPage() {
     if (companyId) void fetchPedidos(companyId);
   }, [companyId, fetchPedidos]);
 
+  /* ── rotas agendadas para cards de passageiros ── */
+  const [scheduledBudgets, setScheduledBudgets] = useState<PublishedBudget[]>([]);
+
+  const fetchScheduledRoutes = useCallback(async (cid: number) => {
+    try {
+      const token = localStorage.getItem("jwt_token") ?? "";
+      const res = await fetch(`${API_URL}/api/companies/${cid}/scheduled-routes`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) setScheduledBudgets(await res.json() as PublishedBudget[]);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    const cid = filialAtiva?.id ?? empresaAtiva?.id ?? null;
+    if (cid) void fetchScheduledRoutes(cid);
+  }, [filialAtiva?.id, empresaAtiva?.id, fetchScheduledRoutes]);
+
   /* ── relatórios state ── */
   const [periodo, setPeriodo] = useState<Periodo>("mensal");
   const [filtroUnidade, setFiltroUnidade] = useState<"global" | number>("global");
@@ -111,6 +168,10 @@ export default function DashboardPage() {
   }
 
   const ativos      = colaboradores.filter(c => c.status === "Ativo").length;
+  const passageirosHoje    = passageirosNoDia(scheduledBudgets, today);
+  const passageirosAmanha  = passageirosNoDia(scheduledBudgets, tomorrow);
+  const passageirosFutura  = passageirosNoDia(scheduledBudgets, futureDate);
+  const temRotas = scheduledBudgets.length > 0 && scheduledBudgets.some(b => b.routes.length > 0);
   const afastados   = colaboradores.filter(c => ["Férias", "Licença", "Afastado"].includes(c.status)).length;
   const pendencias  = colaboradores.filter(c => !c.telefone || !c.endereco || !c.cep).length;
   const filiaisAtivas = filiais.filter(f => f.empresaId === empresaAtiva.id).length;
@@ -137,15 +198,19 @@ export default function DashboardPage() {
     return colaboradoresEmpresa.filter(c => c.filialId === filtroUnidade);
   }, [colaboradoresEmpresa, filtroUnidade]);
 
-  const ativosRel   = colaboradoresFiltrados.filter(c => c.status === "Ativo").length;
+  const valeDiario = parseFloat(empresaAtiva.valeValue ?? "8.50");
+  const ativosRel   = colaboradoresFiltrados.filter(c => c.status === "Ativo" && !isFutureDate(c.inicioOperacao)).length;
   const inativosRel = colaboradoresFiltrados.filter(c => STATUS_INATIVOS.includes(c.status as never)).length;
 
+  // Usa o status efetivo: colaboradores com data de início futura aparecem como "Admissão"
   const statusDist = Object.entries(
     colaboradoresFiltrados.reduce<Record<string, number>>((acc, c) => {
-      acc[c.status] = (acc[c.status] ?? 0) + 1;
+      const efetivo = isFutureDate(c.inicioOperacao) ? "Admissão" : c.status;
+      acc[efetivo] = (acc[efetivo] ?? 0) + 1;
       return acc;
     }, {}),
-  ).map(([name, value]) => ({ name, value }));
+  ).map(([name, value]) => ({ name, value }))
+   .sort((a, b) => b.value - a.value);
 
   const economiaMotivos = [
     { motivo: "Férias",    count: colaboradoresFiltrados.filter(c => c.status === "Férias").length,    color: "#3b82f6" },
@@ -155,8 +220,8 @@ export default function DashboardPage() {
     { motivo: "Inativo",   count: colaboradoresFiltrados.filter(c => c.status === "Inativo").length,   color: "#94a3b8" },
   ].filter(e => e.count > 0).map(e => ({
     ...e,
-    economia: e.count * VALE_DIARIO * diasPeriodo,
-    label: fmt(e.count * VALE_DIARIO * diasPeriodo),
+    economia: e.count * (valeDiario * 2) * diasPeriodo,
+    label: fmt(e.count * (valeDiario * 2) * diasPeriodo),
   }));
 
   const totalEconomia = economiaMotivos.reduce((a, e) => a + e.economia, 0);
@@ -168,7 +233,7 @@ export default function DashboardPage() {
       name: f.nome.replace("Filial ", "").replace("Matriz — ", ""),
       usando,
       naoUsa: total - usando,
-      economia: (total - usando) * VALE_DIARIO * diasPeriodo,
+      economia: (total - usando) * (valeDiario * 2) * diasPeriodo,
     };
   });
 
@@ -184,7 +249,7 @@ export default function DashboardPage() {
       mes: MONTH_LABELS[d.getMonth()],
       utilizaram: ativosN,
       naoUtilizaram: inativosN,
-      economia: inativosN * VALE_DIARIO * diasNoMes,
+      economia: inativosN * (valeDiario * 2) * diasNoMes,
     };
   });
 
@@ -193,7 +258,6 @@ export default function DashboardPage() {
     : filiaisEmpresa.find(f => f.id === filtroUnidade)?.nome ?? "";
 
   /* ── métricas dos 5 cards de relatório ── */
-  const valeDiario = parseFloat(empresaAtiva.valeValue ?? "8.50");
 
   const valesUtilizados = useMemo(
     () => pedidos.filter(p => p.status !== "Cancelado").reduce((s, p) => s + p.vales, 0),
@@ -228,7 +292,7 @@ export default function DashboardPage() {
 
   const notaASerGerada = useMemo(() => {
     return colaboradoresFiltrados
-      .filter(c => c.status === "Ativo" && c.turno !== "—")
+      .filter(c => c.status === "Ativo" && c.turno !== "—" && !isFutureDate(c.inicioOperacao))
       .reduce((sum, c) => {
         const t = turnos.find(x => normalizeTurnoKey(x.nome) === normalizeTurnoKey(c.turno));
         let dias = 22;
@@ -266,14 +330,14 @@ export default function DashboardPage() {
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
               <StatCard
                 label={`Passageiros hoje · ${fmtDate(today)}`}
-                value={ativos}
-                sub={`Em ${filiaisAtivas} unidade(s) ativa(s)`}
+                value={temRotas ? passageirosHoje : "—"}
+                sub={temRotas ? `${scheduledBudgets.flatMap(b => b.routes).filter(r => r.direction !== "volta").length} rota(s) ativa(s)` : "Nenhuma rota agendada para hoje"}
                 trend="up"
               />
               <StatCard
                 label={`Passageiros amanhã · ${fmtDate(tomorrow)}`}
-                value={ativos}
-                sub="Previsão baseada em turnos"
+                value={temRotas ? passageirosAmanha : "—"}
+                sub={temRotas ? "Baseado nas rotas publicadas" : "Nenhuma rota agendada para amanhã"}
                 trend="neutral"
               />
               <div className="bg-card border rounded-xl p-5 shadow-sm flex flex-col gap-1">
@@ -288,7 +352,7 @@ export default function DashboardPage() {
                     </button>
                   </div>
                 </div>
-                <p className="text-3xl font-bold text-foreground">{ativos}</p>
+                <p className="text-3xl font-bold text-foreground">{temRotas ? passageirosFutura : "—"}</p>
                 <p className="text-xs text-muted-foreground">{fmtDate(futureDate)}</p>
               </div>
             </div>
@@ -314,19 +378,6 @@ export default function DashboardPage() {
                   </div>
                 </div>
               ))}
-            </div>
-
-            {/* Próximas alterações */}
-            <div className="bg-card border rounded-xl shadow-sm overflow-hidden mb-10">
-              <div className="px-5 py-4 border-b">
-                <h3 className="font-semibold text-foreground text-sm">Próximas alterações (próximos 15 dias)</h3>
-              </div>
-              <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
-                <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center mb-3">
-                  <Info size={18} className="text-muted-foreground/50" />
-                </div>
-                <p className="text-sm text-muted-foreground">Nenhuma alteração registrada.</p>
-              </div>
             </div>
 
             {/* ── Relatórios ── */}
@@ -366,118 +417,97 @@ export default function DashboardPage() {
                     <button
                       key={p}
                       onClick={() => setPeriodo(p)}
-                      className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                        periodo === p ? "bg-accent text-white" : "text-muted-foreground hover:bg-muted"
-                      }`}
+                      className={`px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors ${periodo === p ? "bg-accent text-white" : "hover:bg-muted text-muted-foreground"}`}
                     >
-                      {PERIODO_CONFIG[p].label.replace("Último ", "").replace("Última ", "")}
+                      {p === "mensal" ? "mês" : p === "trimestral" ? "trimestre" : p === "semestral" ? "semestre" : "ano"}
                     </button>
                   ))}
                 </div>
               </div>
             </div>
 
-            {/* KPI Cards — Relatórios */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
-              {[
-                {
-                  icon: CheckCircle2,
-                  label: "Vales utilizados",
-                  value: loadingPedidos ? "…" : valesUtilizados.toLocaleString("pt-BR"),
-                  sub: "Total de vales emitidos (pedidos não cancelados)",
-                  color: "text-green-700", bg: "bg-green-50 border-green-100",
-                },
-                {
-                  icon: XCircle,
-                  label: "Vales não utilizados",
-                  value: `${valesNaoUtilizados.toLocaleString("pt-BR")}`,
-                  sub: `${inativosHoje.length} colaborador(es) inativo(s) × 2 vales/dia × ${diasMesAtual} dias`,
-                  color: "text-orange-600", bg: "bg-orange-50 border-orange-100",
-                },
-                {
-                  icon: DollarSign,
-                  label: "Valor total das compras",
-                  value: loadingPedidos ? "…" : fmt(valorTotalCompras),
-                  sub: "Soma de todos os pedidos não cancelados",
-                  color: "text-blue-700", bg: "bg-blue-50 border-blue-100",
-                },
-                {
-                  icon: TrendingDown,
-                  label: "Economia atual",
-                  value: fmt(economiaMensal),
-                  sub: `Estimativa mensal — colaboradores fora do sistema × R$ ${valeDiario.toFixed(2)}/dia`,
-                  color: "text-emerald-700", bg: "bg-emerald-50 border-emerald-100",
-                },
-                {
-                  icon: FileSpreadsheet,
-                  label: "Nota a ser gerada",
-                  value: fmt(notaASerGerada),
-                  sub: `Previsão para ${nextPeriodoLabel} com base nos colaboradores ativos`,
-                  color: "text-violet-700", bg: "bg-violet-50 border-violet-100",
-                },
-              ].map(item => (
-                <div key={item.label} className={`border rounded-xl p-5 shadow-sm ${item.bg}`}>
-                  <div className={`flex items-center gap-2 mb-2 ${item.color}`}>
-                    <item.icon size={15} />
-                    <p className="text-xs font-semibold uppercase tracking-wide">{item.label}</p>
-                  </div>
-                  <p className={`text-2xl font-bold ${item.color}`}>{item.value}</p>
-                  <p className="text-xs text-muted-foreground mt-1">{item.sub}</p>
+            {/* Report Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+              <div className="bg-green-50/50 border border-green-100 rounded-xl p-5 shadow-sm flex flex-col gap-1">
+                <div className="flex items-center gap-2 text-green-600 mb-1">
+                  <CheckCircle2 size={14} />
+                  <p className="text-[10px] font-bold uppercase tracking-wider">Vales Comprados</p>
                 </div>
-              ))}
+                <p className="text-3xl font-bold text-green-700">{valesUtilizados}</p>
+                <p className="text-[10px] text-muted-foreground">Total de vales emitidos (pedidos não cancelados)</p>
+              </div>
+
+              <div className="bg-orange-50/50 border border-orange-100 rounded-xl p-5 shadow-sm flex flex-col gap-1">
+                <div className="flex items-center gap-2 text-orange-600 mb-1">
+                  <XCircle size={14} />
+                  <p className="text-[10px] font-bold uppercase tracking-wider">Vales não utilizados</p>
+                </div>
+                <p className="text-3xl font-bold text-orange-700">{valesNaoUtilizados}</p>
+                <p className="text-[10px] text-muted-foreground">{inativosHoje.length} colaborador(es) inativo(s) × 2 vales/dia × {diasMesAtual} dias</p>
+              </div>
+
+              <div className="bg-blue-50/50 border border-blue-100 rounded-xl p-5 shadow-sm flex flex-col gap-1">
+                <div className="flex items-center gap-2 text-blue-600 mb-1">
+                  <DollarSign size={14} />
+                  <p className="text-[10px] font-bold uppercase tracking-wider">Valor total das compras</p>
+                </div>
+                <p className="text-3xl font-bold text-blue-700">{fmt(valorTotalCompras)}</p>
+                <p className="text-[10px] text-muted-foreground">Soma de todos os pedidos não cancelados</p>
+              </div>
+
+              <div className="bg-emerald-50/50 border border-emerald-100 rounded-xl p-5 shadow-sm flex flex-col gap-1">
+                <div className="flex items-center gap-2 text-emerald-600 mb-1">
+                  <TrendingDown size={14} />
+                  <p className="text-[10px] font-bold uppercase tracking-wider">Economia atual</p>
+                </div>
+                <p className="text-3xl font-bold text-emerald-700">{fmt(economiaMensal)}</p>
+                <p className="text-[10px] text-muted-foreground">Estimativa mensal — colaboradores fora do sistema × R$ {(valeDiario * 2).toFixed(2)}/dia (Ida e Volta)</p>
+              </div>
+
+              <div className="bg-purple-50/50 border border-purple-100 rounded-xl p-5 shadow-sm flex flex-col gap-1">
+                <div className="flex items-center gap-2 text-purple-600 mb-1">
+                  <FileSpreadsheet size={14} />
+                  <p className="text-[10px] font-bold uppercase tracking-wider">Nota a ser gerada</p>
+                </div>
+                <p className="text-3xl font-bold text-purple-700">{fmt(notaASerGerada)}</p>
+                <p className="text-[10px] text-muted-foreground">Previsão para {nextPeriodoLabel} com base nos colaboradores ativos</p>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-              {/* Utilização por filial / status */}
+              {/* Distribuição por unidade */}
               <div className="bg-card border rounded-xl p-5 shadow-sm">
-                {filtroUnidade === "global" ? (
-                  <>
-                    <h3 className="font-semibold text-foreground mb-1">Economia por unidade</h3>
-                    <p className="text-xs text-muted-foreground mb-4">Vale-transporte economizado por filial no período</p>
-                    <ResponsiveContainer width="100%" height={220}>
-                      <BarChart data={utilizacaoPorFilial} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                        <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-                        <YAxis tick={{ fontSize: 11 }} />
-                        <Tooltip formatter={(v: number, n: string) => [n === "usando" ? v : fmt(v), n === "usando" ? "Utilizaram" : n === "naoUsa" ? "Não utilizaram" : "Economia"]} />
-                        <Legend formatter={(v) => v === "usando" ? "Utilizaram" : v === "naoUsa" ? "Não utilizaram" : "Economia (R$)"} />
-                        <Bar dataKey="usando"  fill="#22c55e" radius={[4,4,0,0]} name="usando" />
-                        <Bar dataKey="naoUsa"  fill="#f97316" radius={[4,4,0,0]} name="naoUsa" />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </>
-                ) : (
-                  <>
-                    <h3 className="font-semibold text-foreground mb-1">Utilização na unidade</h3>
-                    <p className="text-xs text-muted-foreground mb-4">{colaboradoresFiltrados.length} colaboradores nesta unidade</p>
-                    <ResponsiveContainer width="100%" height={220}>
-                      <BarChart
-                        data={[{ name: "Utilização", usando: ativosRel, naoUsa: inativosRel }]}
-                        margin={{ top: 4, right: 4, left: -20, bottom: 0 }}
-                      >
-                        <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                        <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-                        <YAxis tick={{ fontSize: 11 }} />
-                        <Tooltip formatter={(v: number, n: string) => [v, n === "usando" ? "Utilizaram" : "Não utilizaram"]} />
-                        <Legend formatter={(v) => v === "usando" ? "Utilizaram" : "Não utilizaram"} />
-                        <Bar dataKey="usando" fill="#22c55e" radius={[4,4,0,0]} name="usando" />
-                        <Bar dataKey="naoUsa" fill="#f97316" radius={[4,4,0,0]} name="naoUsa" />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </>
-                )}
+                <h3 className="font-semibold text-foreground mb-1">Economia por unidade</h3>
+                <p className="text-xs text-muted-foreground mb-6">Vale-transporte economizado por filial no período</p>
+                <div className="h-64">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={utilizacaoPorFilial} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
+                      <XAxis dataKey="name" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+                      <YAxis tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+                      <Tooltip formatter={(v: number) => fmt(v)} />
+                      <Bar dataKey="economia" fill="#22c55e" radius={[4, 4, 0, 0]} barSize={40} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
               </div>
 
-              {/* Status pie */}
+              {/* Distribuição por status */}
               <div className="bg-card border rounded-xl p-5 shadow-sm">
                 <h3 className="font-semibold text-foreground mb-1">Distribuição por status</h3>
-                <p className="text-xs text-muted-foreground mb-4">{colaboradoresFiltrados.length} colaboradores {filtroUnidade === "global" ? "no grupo" : "nesta unidade"}</p>
-                <div className="flex items-center gap-4">
-                  <ResponsiveContainer width="55%" height={200}>
+                <p className="text-xs text-muted-foreground mb-6">{colaboradoresFiltrados.length} colaboradores no grupo</p>
+                <div className="flex items-center justify-center gap-8 h-64">
+                  <ResponsiveContainer width="50%" height="100%">
                     <PieChart>
-                      <Pie data={statusDist} cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={3} dataKey="value">
-                        {statusDist.map(entry => (
-                          <Cell key={entry.name} fill={STATUS_COLORS[entry.name] ?? "#94a3b8"} />
+                      <Pie
+                        data={statusDist}
+                        innerRadius={60}
+                        outerRadius={80}
+                        paddingAngle={5}
+                        dataKey="value"
+                      >
+                        {statusDist.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={STATUS_COLORS[entry.name] ?? "#94a3b8"} />
                         ))}
                       </Pie>
                       <Tooltip />
@@ -496,68 +526,7 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            {/* Economia por motivo */}
-            <div className="bg-card border rounded-xl p-5 shadow-sm mb-6">
-              <div className="flex items-center gap-2 mb-1">
-                <TrendingDown size={16} className="text-green-600" />
-                <h3 className="font-semibold text-foreground">Economia por motivo de inatividade</h3>
-              </div>
-              <p className="text-xs text-muted-foreground mb-5">
-                Valor economizado = nº colaboradores × R$ {VALE_DIARIO.toFixed(2)}/dia × {diasPeriodo} dias ({PERIODO_CONFIG[periodo].label})
-              </p>
-              {economiaMotivos.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-8">Nenhum colaborador inativo no momento.</p>
-              ) : (
-                <div className="space-y-3">
-                  {economiaMotivos.map(e => (
-                    <div key={e.motivo} className="flex items-center gap-4">
-                      <div className="w-24 shrink-0">
-                        <span className="text-sm font-medium text-foreground">{e.motivo}</span>
-                      </div>
-                      <div className="flex-1 bg-muted/30 rounded-full h-7 overflow-hidden">
-                        <div
-                          className="h-full rounded-full flex items-center justify-end pr-3 transition-all"
-                          style={{ width: `${Math.max(10, (e.economia / totalEconomia) * 100)}%`, background: e.color }}
-                        >
-                          <span className="text-white text-xs font-bold">{e.count}</span>
-                        </div>
-                      </div>
-                      <div className="w-28 shrink-0 text-right">
-                        <span className="text-sm font-bold text-foreground">{e.label}</span>
-                      </div>
-                    </div>
-                  ))}
-                  <div className="border-t pt-3 flex justify-between items-center">
-                    <span className="text-sm font-semibold text-foreground">Total economizado no período</span>
-                    <span className="text-lg font-bold text-green-600">{fmt(totalEconomia)}</span>
-                  </div>
-                </div>
-              )}
-            </div>
 
-            {/* Tendência */}
-            <div className="bg-card border rounded-xl p-5 shadow-sm">
-              <h3 className="font-semibold text-foreground mb-1">Tendência — {PERIODO_CONFIG[periodo].label}</h3>
-              <p className="text-xs text-muted-foreground mb-4">Evolução de utilização e economia no período selecionado</p>
-              <ResponsiveContainer width="100%" height={240}>
-                <LineChart data={dadosMensais} margin={{ top: 4, right: 16, left: -10, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                  <XAxis dataKey="mes" tick={{ fontSize: 11 }} />
-                  <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
-                  <YAxis yAxisId="right" orientation="right" tickFormatter={v => `R$${(v/1000).toFixed(1)}k`} tick={{ fontSize: 11 }} />
-                  <Tooltip
-                    formatter={(v: number, n: string) => [
-                      n === "economia" ? fmt(v) : v,
-                      n === "utilizaram" ? "Utilizaram" : n === "naoUtilizaram" ? "Não utilizaram" : "Economia",
-                    ]}
-                  />
-                  <Legend formatter={(v) => v === "utilizaram" ? "Utilizaram VT" : v === "naoUtilizaram" ? "Não utilizaram" : "Economia (R$)"} />
-                  <Line yAxisId="left"  type="monotone" dataKey="utilizaram"    stroke="#22c55e" strokeWidth={2} dot={{ r: 4 }} name="utilizaram" />
-                  <Line yAxisId="left"  type="monotone" dataKey="naoUtilizaram" stroke="#f97316" strokeWidth={2} dot={{ r: 4 }} name="naoUtilizaram" />
-                  <Line yAxisId="right" type="monotone" dataKey="economia"      stroke="#1E90FF" strokeWidth={2} strokeDasharray="5 5" dot={{ r: 4 }} name="economia" />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
           </>
         )}
       </div>

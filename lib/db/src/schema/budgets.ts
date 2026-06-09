@@ -8,6 +8,7 @@ export const budgetsTable = pgTable("budgets", {
   name: text("name").notNull(),
   algorithm: text("algorithm").notNull().default("maior_ocupacao"),
   companyId: integer("company_id").references(() => companiesTable.id),
+  partnerId: integer("partner_id"),
   status: text("status").notNull().default("rascunho"),
   destinationAddress: text("destination_address"),
   maxWalkingRadiusKm: numeric("max_walking_radius_km", { precision: 5, scale: 1 }).default("2"),

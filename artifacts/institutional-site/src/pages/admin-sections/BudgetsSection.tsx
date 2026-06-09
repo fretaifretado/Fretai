@@ -3,7 +3,7 @@ import * as XLSX from "xlsx";
 import {
   ArrowLeft, Plus, Trash2, Eye, Upload, Users, MapPin,
   Navigation, Bus, CheckCircle2, Download, ChevronDown, ChevronUp,
-  FileText, AlertCircle,
+  FileText, AlertCircle, Send,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -31,8 +31,10 @@ interface BudgetListItem {
 }
 interface BudgetInfo {
   id: number; name: string; status: string;
+  companyId: number | null;
   companyAddress: string; companyName: string | null;
   companyLat: number; companyLng: number;
+  partnerId: number | null;
 }
 interface BudgetWorker {
   id: number; name: string; address: string; shift: string | null;
@@ -56,6 +58,10 @@ interface ExtRoute {
   boardingPoints: Array<{ id: number; name: string; lat: number; lng: number; passengerCount: number; sequenceOrder: number | null }>;
 }
 interface Company { id: number; name: string; address?: string | null }
+interface Partner {
+  id: number; name: string; address: string;
+  garageAddress: string | null; garageLat: number | null; garageLng: number | null;
+}
 
 /* ─── Constants ──────────────────────────────────────────────────────────── */
 const BUILDER_STEPS: { key: BuilderStep; label: string }[] = [
@@ -91,13 +97,18 @@ function BudgetListView({ token, onNew, onSelect }: { token: string | null; onNe
 
   const load = async () => {
     setLoading(true);
-    try { setItems(await fetch("/api/admin/budgets", { headers: hdrs }).then(r => r.json()) as BudgetListItem[]); }
-    finally { setLoading(false); }
+    try {
+      const res = await fetch("/api/admin/budgets", { headers: hdrs });
+      const data: unknown = await res.json();
+      setItems(Array.isArray(data) ? (data as BudgetListItem[]) : []);
+    } catch {
+      setItems([]);
+    } finally { setLoading(false); }
   };
   useEffect(() => { void load(); }, []);
 
   const handleDelete = async (id: number) => {
-    if (!confirm("Excluir este orçamento e todos os dados relacionados?")) return;
+    if (!confirm("Excluir esta roteirização e todos os dados relacionados?")) return;
     setDeleting(id);
     await fetch(`/api/admin/budgets/${id}`, { method: "DELETE", headers: hdrs });
     await load();
@@ -108,10 +119,10 @@ function BudgetListView({ token, onNew, onSelect }: { token: string | null; onNe
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Orçamentos</h1>
+          <h1 className="text-3xl font-bold tracking-tight">Roteirização</h1>
           <p className="text-muted-foreground">Crie e gerencie rotas de transporte de funcionários.</p>
         </div>
-        <Button onClick={onNew}><Plus className="mr-2 h-4 w-4" />Novo Orçamento</Button>
+        <Button onClick={onNew}><Plus className="mr-2 h-4 w-4" />Nova Roteirização</Button>
       </div>
       <Card>
         {loading ? (
@@ -119,9 +130,9 @@ function BudgetListView({ token, onNew, onSelect }: { token: string | null; onNe
         ) : items.length === 0 ? (
           <div className="p-12 flex flex-col items-center text-center text-muted-foreground border border-dashed rounded-lg bg-muted/20">
             <FileText className="h-12 w-12 text-muted-foreground/50 mb-4" />
-            <h3 className="text-lg font-semibold text-foreground">Nenhum orçamento</h3>
-            <p className="max-w-sm mt-1">Crie um orçamento, importe funcionários com geolocalização e monte as rotas manualmente no mapa.</p>
-            <Button className="mt-6" onClick={onNew}>Criar Primeiro Orçamento</Button>
+            <h3 className="text-lg font-semibold text-foreground">Nenhuma roteirização</h3>
+            <p className="max-w-sm mt-1">Crie uma roteirização, importe funcionários com geolocalização e monte as rotas manualmente no mapa.</p>
+            <Button className="mt-6" onClick={onNew}>Criar Primeira Roteirização</Button>
           </div>
         ) : (
           <Table>
@@ -168,13 +179,22 @@ function BudgetListView({ token, onNew, onSelect }: { token: string | null; onNe
 /* ─── New budget form ────────────────────────────────────────────────────── */
 function BudgetNewView({ token, onBack, onCreated }: { token: string | null; onBack: () => void; onCreated: (id: number) => void }) {
   const [companies, setCompanies] = useState<Company[]>([]);
+  const [partners, setPartners] = useState<Partner[]>([]);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const hdrs = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
-  const [form, setForm] = useState({ name: "", companyId: "", companyAddress: "" });
+  const [form, setForm] = useState({ name: "", companyId: "", companyAddress: "", startDate: "", partnerId: "" });
+
+  /** Data mínima permitida: hoje + 2 dias */
+  const minStartDate = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 2);
+    return d.toISOString().split("T")[0]; // yyyy-mm-dd
+  })();
 
   useEffect(() => {
-    void fetch("/api/admin/companies", { headers: hdrs }).then(r => r.json()).then((d: Company[]) => setCompanies(d));
+    void fetch("/api/admin/companies", { headers: hdrs }).then(r => r.json()).then((d: unknown) => setCompanies(Array.isArray(d) ? d as Company[] : []));
+    void fetch("/api/admin/partners", { headers: hdrs }).then(r => r.json()).then((d: unknown) => setPartners(Array.isArray(d) ? d as Partner[] : []));
   }, []);
 
   const handleCompanyChange = (val: string) => {
@@ -182,15 +202,25 @@ function BudgetNewView({ token, onBack, onCreated }: { token: string | null; onB
     setForm(f => ({ ...f, companyId: val, companyAddress: comp?.address && !f.companyAddress ? comp.address : f.companyAddress }));
   };
 
+  const selectedPartner = partners.find(p => String(p.id) === form.partnerId) ?? null;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.name.trim()) { setErr("Nome é obrigatório"); return; }
     if (!form.companyId) { setErr("Selecione uma empresa"); return; }
+    if (!form.startDate) { setErr("Data de início é obrigatória"); return; }
+    if (form.startDate < minStartDate) { setErr("A data de início deve ser no mínimo 2 dias a partir de hoje"); return; }
     setSaving(true); setErr("");
     try {
       const r = await fetch("/api/admin/budgets", {
         method: "POST", headers: hdrs,
-        body: JSON.stringify({ ...form, companyId: parseInt(form.companyId), maxRadiusKm: 1, maxRouteMinutes: 120, strategy: "min_cost" }),
+        body: JSON.stringify({
+          ...form,
+          companyId: parseInt(form.companyId),
+          partnerId: form.partnerId ? parseInt(form.partnerId) : null,
+          startDate: form.startDate,
+          maxRadiusKm: 1, maxRouteMinutes: 120, strategy: "min_cost",
+        }),
       });
       const data = await r.json() as { id?: number; error?: string };
       if (!r.ok || !data.id) { setErr(data.error ?? "Erro ao criar"); return; }
@@ -204,8 +234,8 @@ function BudgetNewView({ token, onBack, onCreated }: { token: string | null; onB
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="icon" onClick={onBack}><ArrowLeft className="h-4 w-4" /></Button>
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Novo Orçamento</h1>
-          <p className="text-muted-foreground">Defina o nome e a empresa de destino.</p>
+          <h1 className="text-3xl font-bold tracking-tight">Nova Roteirização</h1>
+          <p className="text-muted-foreground">Defina o nome, empresa, parceiro e data de início da rota.</p>
         </div>
       </div>
       <Card>
@@ -230,8 +260,58 @@ function BudgetNewView({ token, onBack, onCreated }: { token: string | null; onB
               <Input placeholder="Ex: Rodovia Anhanguera, km 128, Limeira, SP" value={form.companyAddress} onChange={e => setForm(f => ({ ...f, companyAddress: e.target.value }))} />
               <p className="text-xs text-muted-foreground">Usado para centralizar o mapa e calcular distâncias.</p>
             </div>
+
+            {/* ── Parceiro Transportador ── */}
+            <div className="space-y-2">
+              <Label>Parceiro Transportador <span className="text-muted-foreground font-normal text-xs">(opcional)</span></Label>
+              <Select value={form.partnerId} onValueChange={val => setForm(f => ({ ...f, partnerId: val === "_none" ? "" : val }))}>
+                <SelectTrigger>
+                  <SelectValue placeholder={partners.length === 0 ? "Nenhum parceiro cadastrado" : "Selecione o parceiro transportador"} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_none">— Sem parceiro —</SelectItem>
+                  {partners.map(p => (
+                    <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {selectedPartner && (
+                <div className="mt-2 bg-muted/40 border rounded-xl px-4 py-3 space-y-1.5">
+                  <p className="text-xs font-semibold text-foreground">
+                    📍 Garagem: <span className="font-normal text-muted-foreground">{selectedPartner.garageAddress ?? selectedPartner.address}</span>
+                  </p>
+                  {selectedPartner.garageLat != null && selectedPartner.garageLng != null && parseFloat(String(selectedPartner.garageLat)) !== 0 && (
+                    <p className="text-xs text-emerald-600 font-medium">
+                      ✓ Coordenadas confirmadas: {parseFloat(String(selectedPartner.garageLat)).toFixed(5)}, {parseFloat(String(selectedPartner.garageLng)).toFixed(5)}
+                    </p>
+                  )}
+                  {(!selectedPartner.garageLat || parseFloat(String(selectedPartner.garageLat)) === 0) && (
+                    <p className="text-xs text-amber-600 font-medium">⚠ Parceiro sem coordenadas de garagem — edite o parceiro para adicionar.</p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label>Data de Início da Rota</Label>
+              <Input
+                type="date"
+                min={minStartDate}
+                value={form.startDate}
+                onChange={e => {
+                  const val = e.target.value;
+                  if (val < minStartDate) { setErr("A data de início deve ser no mínimo 2 dias a partir de hoje"); }
+                  else { setErr(""); }
+                  setForm(f => ({ ...f, startDate: val }));
+                }}
+              />
+              <p className="text-xs text-muted-foreground">
+                A rota deve ser agendada com no mínimo <strong>2 dias de antecedência</strong>. Data mínima permitida:{" "}
+                <strong>{new Date(minStartDate + "T12:00:00").toLocaleDateString("pt-BR")}</strong>.
+              </p>
+            </div>
             <div className="flex justify-end pt-2">
-              <Button type="submit" size="lg" disabled={saving}>{saving ? "Criando…" : "Criar e Importar Funcionários →"}</Button>
+              <Button type="submit" size="lg" disabled={saving}>{saving ? "Criando…" : "Criar Roteirização →"}</Button>
             </div>
           </form>
         </CardContent>
@@ -248,29 +328,71 @@ function BudgetBuilderView({ id, token, onBack }: { id: number; token: string | 
   const [routes, setRoutes] = useState<ExtRoute[]>([]);
   const [loading, setLoading] = useState(true);
   const [initialized, setInitialized] = useState(false);
+  const [partnerGarage, setPartnerGarage] = useState<{ lat: number; lng: number; address: string | null } | null>(null);
   const hdrs = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await fetch(`/api/admin/budgets/${id}`, { headers: hdrs }).then(r => r.json()) as {
+      const res = await fetch(`/api/admin/budgets/${id}`, { headers: hdrs });
+      if (!res.ok) {
+        console.error("[Budgets] Erro ao carregar orçamento:", res.status);
+        return;
+      }
+      const data = await res.json() as {
         budget: BudgetInfo; employees: BudgetWorker[]; routes: ExtRoute[];
       };
-      setBudget(data.budget);
-      setWorkers(data.employees);
-      setRoutes(data.routes);
-      if (!initialized) {
-        if (data.routes.length > 0) setStep("routes");
-        else if (data.employees.length > 0) setStep("map");
-        setInitialized(true);
+      
+      if (data && data.budget) {
+        setBudget(data.budget);
+        setWorkers(data.employees || []);
+        setRoutes(data.routes || []);
+
+        // Busca coordenadas da garagem do parceiro vinculado
+        if (data.budget.partnerId) {
+          const trySetGarage = (p: { garageLat?: number | string | null; garageLng?: number | string | null; garageAddress?: string | null } | null) => {
+            if (!p) { setPartnerGarage(null); return false; }
+            const lat = p.garageLat != null ? parseFloat(String(p.garageLat)) : NaN;
+            const lng = p.garageLng != null ? parseFloat(String(p.garageLng)) : NaN;
+            if (!isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0) {
+              setPartnerGarage({ lat, lng, address: p.garageAddress ?? null });
+              return true;
+            }
+            setPartnerGarage(null);
+            return false;
+          };
+          // Try GET /admin/partners/:id first; fall back to list if 404
+          void fetch(`/api/admin/partners/${data.budget.partnerId}`, { headers: hdrs })
+            .then(r => r.ok ? r.json() : null)
+            .then(async (p: { garageLat?: number | string | null; garageLng?: number | string | null; garageAddress?: string | null } | null) => {
+              if (trySetGarage(p)) return;
+              // Fallback: busca na lista completa
+              const listRes = await fetch("/api/admin/partners", { headers: hdrs });
+              if (!listRes.ok) return;
+              const list = await listRes.json() as Array<{ id: number; garageLat?: number | string | null; garageLng?: number | string | null; garageAddress?: string | null }>;
+              const found = Array.isArray(list) ? list.find(x => x.id === data.budget.partnerId) ?? null : null;
+              trySetGarage(found);
+            })
+            .catch(() => setPartnerGarage(null));
+        } else {
+          setPartnerGarage(null);
+        }
+
+        if (!initialized) {
+          if (data.routes && data.routes.length > 0) setStep("routes");
+          else if (data.employees && data.employees.length > 0) setStep("map");
+          setInitialized(true);
+        }
       }
+    } catch (err) {
+      console.error("[Budgets] Erro de rede ou parsing:", err);
     } finally { setLoading(false); }
   }, [id, initialized]);
 
   useEffect(() => { void load(); }, [load]);
 
   const mapWorkers: MapWorker[] = useMemo(() =>
-    workers.filter(w => w.lat != null && w.lng != null).map(w => ({
+    (workers || []).filter(w => w.lat != null && w.lng != null).map(w => ({
       id: w.id, name: w.name, lat: w.lat!, lng: w.lng!, shift: w.shift, boardingPointId: w.boardingPointId,
     })), [workers]);
 
@@ -312,6 +434,7 @@ function BudgetBuilderView({ id, token, onBack }: { id: number; token: string | 
       {step === "upload" && (
         <UploadStep
           budgetId={id} token={token} existingWorkers={workers}
+          companyId={budget?.companyId ?? null}
           onComplete={() => { void load(); setStep("map"); }}
           onSkip={() => setStep("map")}
         />
@@ -324,6 +447,9 @@ function BudgetBuilderView({ id, token, onBack }: { id: number; token: string | 
             workers={mapWorkers}
             companyLat={budget.companyLat}
             companyLng={budget.companyLng}
+            garageLat={partnerGarage?.lat ?? null}
+            garageLng={partnerGarage?.lng ?? null}
+            garageAddress={partnerGarage?.address ?? null}
             onFinalize={() => setStep("finalize")}
           />
         </Suspense>
@@ -340,6 +466,7 @@ function BudgetBuilderView({ id, token, onBack }: { id: number; token: string | 
       {step === "routes" && (
         <RoutesStep
           routes={routes} workers={workers}
+          budgetId={id} token={token}
           onBack={() => setStep("map")}
           onReimport={() => setStep("upload")}
         />
@@ -354,8 +481,9 @@ type GeoSource = "coords" | "geocoded" | "failed" | "manual";
 interface ValidatedEmployee { name: string; address: string; shift: string | null; lat?: number; lng?: number; source: GeoSource; editAddress: string; origIdx: number }
 type UploadSub = "idle" | "parsed" | "geocoding" | "review" | "importing";
 
-function UploadStep({ budgetId, token, existingWorkers, onComplete, onSkip }: {
+function UploadStep({ budgetId, token, existingWorkers, companyId, onComplete, onSkip }: {
   budgetId: number; token: string | null; existingWorkers: BudgetWorker[];
+  companyId: number | null;
   onComplete: () => void; onSkip: () => void;
 }) {
   const [sub, setSub] = useState<UploadSub>("idle");
@@ -369,10 +497,46 @@ function UploadStep({ budgetId, token, existingWorkers, onComplete, onSkip }: {
   const fileRef = useRef<HTMLInputElement>(null);
   const cancelRef = useRef(false);
   const hdrs = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+  const [companyEmployees, setCompanyEmployees] = useState<ParsedEmployee[] | null>(null);
+  const [loadingCompanyEmp, setLoadingCompanyEmp] = useState(false);
+  const [companyEmpError, setCompanyEmpError] = useState("");
+  const [companyEmpChecked, setCompanyEmpChecked] = useState(false);
+
+  // Fetch company employees once to check if they exist
+  useEffect(() => {
+    if (!companyId || companyEmpChecked) return;
+    setCompanyEmpChecked(true);
+    fetch(`/api/companies/${companyId}/employees`, { headers: hdrs })
+      .then(r => r.ok ? r.json() as Promise<Record<string, unknown>[]> : Promise.reject())
+      .then(data => {
+        const emps: ParsedEmployee[] = data
+          .filter((e): e is Record<string, unknown> => !!e["name"])
+          .map(e => {
+            const addrParts = [e["address"], e["addressNumber"] ? `, ${String(e["addressNumber"])}` : "", e["addressComplement"] ? ` - ${String(e["addressComplement"])}` : ""].join("").trim();
+            const shift = e["shiftStart"] && e["shiftEnd"] ? `${String(e["shiftStart"])}/${String(e["shiftEnd"])}` : null;
+            return { name: String(e["name"]), address: addrParts, shift };
+          })
+          .filter(e => e.name);
+        setCompanyEmployees(emps.length > 0 ? emps : []);
+      })
+      .catch(() => setCompanyEmployees([]));
+  }, [companyId, companyEmpChecked]);
+
+  const useCompanyEmployees = async () => {
+    if (!companyEmployees?.length) return;
+    setLoadingCompanyEmp(true);
+    setCompanyEmpError("");
+    try {
+      setParsed(companyEmployees);
+      setSub("parsed");
+    } catch { setCompanyEmpError("Erro ao carregar colaboradores."); }
+    finally { setLoadingCompanyEmp(false); }
+  };
 
   const normKey = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
   const LAT_COLS = ["lat", "latitude", "lat.", "latitude (graus decimais)", "coord_lat", "coordenada lat"];
   const LNG_COLS = ["lng", "lon", "longitude", "lng.", "longitude (graus decimais)", "coord_lng", "coordenada lon", "long"];
+  const GEO_COMBINED_COLS = ["geolocalizacao", "geolocalization", "geo", "coordenadas", "coords", "localizacao", "localizacion"];
 
   const parseFile = (file: File) => {
     const reader = new FileReader();
@@ -392,10 +556,22 @@ function UploadStep({ budgetId, token, existingWorkers, onComplete, onSkip }: {
           for (const [k, v] of Object.entries(row)) n[normKey(k)] = String(v ?? "");
           const name = n["nome"] || n["name"] || n["funcionario"] || n["colaborador"] || "";
           const shift = n["turno"] || n["shift"] || n["periodo"] || n["horario"] || null;
-          const latRaw = LAT_COLS.map(c => n[c]).find(v => v && v.trim());
-          const lngRaw = LNG_COLS.map(c => n[c]).find(v => v && v.trim());
-          const lat = latRaw ? parseFloat(latRaw.replace(",", ".")) : NaN;
-          const lng = lngRaw ? parseFloat(lngRaw.replace(",", ".")) : NaN;
+          // Check for combined "geolocalização" column first (e.g. "-23.194519, -46.819963")
+          const combinedRaw = GEO_COMBINED_COLS.map(c => n[c]).find(v => v && v.trim());
+          let lat = NaN, lng = NaN;
+          if (combinedRaw) {
+            const parts = combinedRaw.split(",").map((p: string) => p.trim());
+            if (parts.length >= 2) {
+              lat = parseFloat(parts[0]!);
+              lng = parseFloat(parts[1]!);
+            }
+          }
+          if (isNaN(lat) || isNaN(lng)) {
+            const latRaw = LAT_COLS.map(c => n[c]).find(v => v && v.trim());
+            const lngRaw = LNG_COLS.map(c => n[c]).find(v => v && v.trim());
+            lat = latRaw ? parseFloat(latRaw.replace(",", ".")) : NaN;
+            lng = lngRaw ? parseFloat(lngRaw.replace(",", ".")) : NaN;
+          }
           const hasCoords = !isNaN(lat) && !isNaN(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
           return { name: name.trim(), address: buildAddr(n), shift: shift?.trim() || null, ...(hasCoords ? { lat, lng } : {}) };
         }).filter(e => e.name);
@@ -477,6 +653,9 @@ function UploadStep({ budgetId, token, existingWorkers, onComplete, onSkip }: {
     } catch { setMsg("Erro de comunicação."); setSub("review"); }
   };
 
+  /* ── Boarding-point import helpers ── */
+
+
   const coordsCount = validated.filter(e => e.source === "coords").length;
   const geocodedCount = validated.filter(e => e.source === "geocoded").length;
   const manualCount = validated.filter(e => e.source === "manual").length;
@@ -506,10 +685,9 @@ function UploadStep({ budgetId, token, existingWorkers, onComplete, onSkip }: {
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2"><Upload className="h-5 w-5" />Importar Planilha</CardTitle>
+          <CardTitle className="flex items-center gap-2"><Upload className="h-5 w-5" />Importar Funcionários</CardTitle>
           <CardDescription>
-            Formatos aceitos: Excel (.xlsx, .xls), CSV, LibreOffice (.ods)<br />
-            Colunas: <strong>Nome</strong> · <strong>Turno</strong> · <strong>Latitude</strong> · <strong>Longitude</strong> (ou Endereço como alternativa)
+            Escolha como importar os funcionários para este orçamento.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -519,12 +697,53 @@ function UploadStep({ budgetId, token, existingWorkers, onComplete, onSkip }: {
             </div>
           )}
 
-          {/* ── IDLE: drop zone ── */}
+          {/* ── IDLE: two options ── */}
           {sub === "idle" && (
-            <div className="border-2 border-dashed rounded-xl p-10 text-center cursor-pointer hover:border-primary/50 hover:bg-muted/20 transition-colors" onClick={() => fileRef.current?.click()}>
-              <FileText className="h-10 w-10 mx-auto mb-3 text-muted-foreground/50" />
-              <p className="font-medium">Clique para selecionar ou arraste o arquivo</p>
-              <p className="text-sm text-muted-foreground mt-1">Excel, CSV, ODS</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-start">
+
+              {/* Option 1 — Company employees */}
+              <div className={`border-2 rounded-xl p-6 flex flex-col gap-3 transition-colors ${companyEmployees === null ? "opacity-60" : companyEmployees.length === 0 ? "border-dashed border-muted-foreground/30 bg-muted/10" : "border-dashed hover:border-accent/60 hover:bg-accent/5 cursor-pointer"}`}
+                onClick={() => companyEmployees && companyEmployees.length > 0 && void useCompanyEmployees()}>
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center shrink-0">
+                    <Users className="h-5 w-5 text-accent" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-sm">Usar colaboradores da empresa</p>
+                    {companyEmployees === null && <p className="text-xs text-muted-foreground">Verificando…</p>}
+                    {companyEmployees !== null && companyEmployees.length === 0 && <p className="text-xs text-amber-600 font-medium">Nenhuma planilha submetida pela empresa</p>}
+                    {companyEmployees !== null && companyEmployees.length > 0 && <p className="text-xs text-muted-foreground">{companyEmployees.length} colaboradores disponíveis</p>}
+                  </div>
+                </div>
+                {companyEmployees !== null && companyEmployees.length > 0 && (
+                  <Button size="sm" className="bg-accent hover:bg-accent/90 text-white w-full" disabled={loadingCompanyEmp}
+                    onClick={e => { e.stopPropagation(); void useCompanyEmployees(); }}>
+                    {loadingCompanyEmp ? "Carregando…" : "Usar estes colaboradores →"}
+                  </Button>
+                )}
+                {companyEmpError && <p className="text-xs text-destructive">{companyEmpError}</p>}
+              </div>
+
+              {/* Option 2 — Upload file */}
+              <div className="border-2 border-dashed rounded-xl p-6 flex flex-col gap-3 hover:border-primary/50 hover:bg-muted/20 transition-colors cursor-pointer"
+                onClick={() => fileRef.current?.click()}>
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+                    <FileText className="h-5 w-5 text-primary" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-sm">Importar planilha</p>
+                    <p className="text-xs text-muted-foreground">Excel, CSV, ODS</p>
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Colunas: <strong>Nome</strong> · <strong>Turno</strong> · <strong>Geolocalização</strong> (ou Lat + Lng separadas, ou Endereço)
+                </p>
+                <Button size="sm" variant="outline" className="w-full">
+                  <Upload className="mr-2 h-4 w-4" />Selecionar arquivo
+                </Button>
+              </div>
+
             </div>
           )}
 
@@ -721,6 +940,7 @@ function UploadStep({ budgetId, token, existingWorkers, onComplete, onSkip }: {
           )}
 
           <input type="file" ref={fileRef} className="hidden" accept=".csv,.xlsx,.xls,.ods,.xlsm,.tsv" onChange={handleFileChange} />
+
         </CardContent>
       </Card>
     </div>
@@ -896,10 +1116,27 @@ function FinalizeStep({ budgetId, token, onComplete, onBack }: {
 }
 
 /* ─── Routes step ────────────────────────────────────────────────────────── */
-function RoutesStep({ routes, workers, onBack, onReimport }: {
+function RoutesStep({ routes, workers, budgetId, token, onBack, onReimport }: {
   routes: ExtRoute[]; workers: BudgetWorker[];
+  budgetId: number; token: string | null;
   onBack: () => void; onReimport: () => void;
 }) {
+  const [publishing, setPublishing] = useState(false);
+  const [publishErr, setPublishErr] = useState("");
+  const [published, setPublished] = useState(false);
+  const hdrs = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+
+  const handlePublish = async () => {
+    setPublishing(true); setPublishErr(""); 
+    try {
+      const r = await fetch(`/api/admin/budgets/${budgetId}/publish`, { method: "POST", headers: hdrs });
+      const data = await r.json() as { published?: boolean; error?: string };
+      if (!r.ok) { setPublishErr(data.error ?? "Erro ao publicar"); return; }
+      setPublished(true);
+    } catch { setPublishErr("Erro de rede ao publicar"); }
+    finally { setPublishing(false); }
+  };
+
   const exportPassengers = () => {
     const bpMap = new Map<number, BudgetWorker[]>();
     for (const emp of workers) {
@@ -921,7 +1158,7 @@ function RoutesStep({ routes, workers, onBack, onReimport }: {
     XLSX.writeFile(wb, "passageiros_por_ponto.xlsx");
   };
 
-  if (routes.length === 0) return (
+  if (!routes || routes.length === 0) return (
     <Card><CardContent className="py-12 text-center text-muted-foreground">
       <Navigation className="h-12 w-12 mx-auto mb-3 opacity-30" />
       <p className="font-medium">Nenhuma rota criada ainda</p>
@@ -941,11 +1178,24 @@ function RoutesStep({ routes, workers, onBack, onReimport }: {
             {routes.length} rota{routes.length !== 1 ? "s" : ""} · {routes.reduce((s, r) => s + r.totalPassengers, 0)} passageiros
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap justify-end">
           <Button variant="outline" size="sm" onClick={onBack}>← Ajustar Mapa</Button>
           <Button variant="outline" size="sm" onClick={exportPassengers}><Download className="mr-2 h-4 w-4" />Exportar Excel</Button>
+          {published ? (
+            <Button size="sm" disabled className="bg-emerald-600 text-white opacity-80">
+              <CheckCircle2 className="mr-2 h-4 w-4" />Enviado para o Painel!
+            </Button>
+          ) : (
+            <Button size="sm" onClick={() => void handlePublish()} disabled={publishing}
+              className="bg-blue-600 hover:bg-blue-700 text-white">
+              {publishing ? "Enviando…" : <><Send className="mr-2 h-4 w-4" />Enviar para Painel da Empresa</>}
+            </Button>
+          )}
         </div>
       </div>
+
+      {publishErr && <div className="flex items-center gap-2 text-sm text-destructive bg-destructive/10 rounded-lg px-3 py-2"><AlertCircle size={14} />{publishErr}</div>}
+      {published && <div className="flex items-center gap-2 text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-3"><CheckCircle2 size={16} /><span><strong>Rota enviada com sucesso!</strong> Ela já aparece na aba <em>Rotas Agendadas</em> do painel da empresa.</span></div>}
 
       {/* Summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -983,7 +1233,8 @@ function PassengerListCard({ routes, workers }: { routes: ExtRoute[]; workers: B
 
   const bpEmpMap = useMemo(() => {
     const m = new Map<number, BudgetWorker[]>();
-    for (const emp of workers) {
+    const safeWorkers = workers || [];
+    for (const emp of safeWorkers) {
       if (emp.boardingPointId == null) continue;
       if (!m.has(emp.boardingPointId)) m.set(emp.boardingPointId, []);
       m.get(emp.boardingPointId)!.push(emp);
@@ -991,8 +1242,8 @@ function PassengerListCard({ routes, workers }: { routes: ExtRoute[]; workers: B
     return m;
   }, [workers]);
 
-  const shifts = useMemo(() => [...new Set(routes.map(r => r.shiftTime).filter(Boolean) as string[])].sort(), [routes]);
-  const filtered = routes.filter(r => !filterShift || r.shiftTime === filterShift);
+  const shifts = useMemo(() => [...new Set((routes || []).map(r => r.shiftTime).filter(Boolean) as string[])].sort(), [routes]);
+  const filtered = (routes || []).filter(r => !filterShift || r.shiftTime === filterShift);
   const q = search.toLowerCase().trim();
 
   return (

@@ -3,9 +3,9 @@ import { db } from "@workspace/db";
 import {
   budgetsTable, companiesTable,
   budgetWorkersTable, budgetRoutesTable, budgetBoardingPointsTable,
-  vehicleTypesTable,
+  vehicleTypesTable, partnersTable,
 } from "@workspace/db/schema";
-import { eq, desc, inArray } from "drizzle-orm";
+import { sql, eq, desc, inArray } from "drizzle-orm";
 import { requireAdmin } from "../middlewares/auth";
 
 const router = Router();
@@ -95,28 +95,80 @@ function addressKey(address: string): string {
  * Falls back gracefully (null) if the API call fails so the original insertion
  * order is kept.
  */
+/**
+ * Optimise a one-way trip: garage → BPs → company (ida)  or  company → BPs → garage (volta).
+ * When garageLat/garageLng are provided the garage is added as the fixed source (ida)
+ * or fixed destination (volta). This correctly reflects the real-world scenario where
+ * a vehicle departs from the garage, picks up passengers and ends at the company — and
+ * the return trip goes company → passengers → garage.
+ *
+ * direction: "ida"   = source=garage, destination=company
+ *            "volta" = source=company, destination=garage
+ *            undefined = original behaviour (source=any, destination=company)
+ */
 async function optimizeTSP(
   bpCentroids: Array<{ lat: number; lng: number }>,
   companyLat: number,
-  companyLng: number
+  companyLng: number,
+  opts?: { garageLat?: number; garageLng?: number; direction?: "ida" | "volta" }
 ): Promise<{ order: number[]; distanceKm: number } | null> {
+  const garageLat = opts?.garageLat;
+  const garageLng = opts?.garageLng;
+  const direction = opts?.direction;
+  const hasGarage = garageLat != null && garageLng != null;
+
   if (bpCentroids.length <= 1) {
-    // Single stop — nothing to optimize; compute straight-line distance only
-    const d = bpCentroids.length === 1
-      ? haversineKm(bpCentroids[0]!.lat, bpCentroids[0]!.lng, companyLat, companyLng) * 1.4
-      : 0;
+    // Single stop — haversine fallback
+    let d = 0;
+    if (bpCentroids.length === 1) {
+      const bp = bpCentroids[0]!;
+      if (hasGarage && direction === "ida") {
+        d = (haversineKm(garageLat!, garageLng!, bp.lat, bp.lng) + haversineKm(bp.lat, bp.lng, companyLat, companyLng)) * 1.4;
+      } else if (hasGarage && direction === "volta") {
+        d = (haversineKm(companyLat, companyLng, bp.lat, bp.lng) + haversineKm(bp.lat, bp.lng, garageLat!, garageLng!)) * 1.4;
+      } else {
+        d = haversineKm(bp.lat, bp.lng, companyLat, companyLng) * 1.4;
+      }
+    }
     return { order: bpCentroids.map((_, i) => i), distanceKm: parseFloat(d.toFixed(2)) };
   }
 
-  // Coordinates string: all BPs first, company last (fixed destination)
-  const coords = [
-    ...bpCentroids.map(c => `${c.lng},${c.lat}`),
-    `${companyLng},${companyLat}`,
-  ].join(";");
+  // Build coordinate list based on direction and whether garage is known
+  let coords: string;
+  let sourceParam: string;
+  let destParam: string;
+
+  if (hasGarage && direction === "ida") {
+    // garage (fixed source) → BPs (any order) → company (fixed dest)
+    coords = [
+      `${garageLng!},${garageLat!}`,
+      ...bpCentroids.map(c => `${c.lng},${c.lat}`),
+      `${companyLng},${companyLat}`,
+    ].join(";");
+    sourceParam = "first";
+    destParam   = "last";
+  } else if (hasGarage && direction === "volta") {
+    // company (fixed source) → BPs (any order) → garage (fixed dest)
+    coords = [
+      `${companyLng},${companyLat}`,
+      ...bpCentroids.map(c => `${c.lng},${c.lat}`),
+      `${garageLng!},${garageLat!}`,
+    ].join(";");
+    sourceParam = "first";
+    destParam   = "last";
+  } else {
+    // Original behaviour: BPs (any order) → company (fixed dest)
+    coords = [
+      ...bpCentroids.map(c => `${c.lng},${c.lat}`),
+      `${companyLng},${companyLat}`,
+    ].join(";");
+    sourceParam = "any";
+    destParam   = "last";
+  }
 
   const url =
     `https://router.project-osrm.org/trip/v1/driving/${coords}` +
-    `?roundtrip=false&source=any&destination=last&overview=false&annotations=false`;
+    `?roundtrip=false&source=${sourceParam}&destination=${destParam}&overview=false&annotations=false`;
 
   try {
     const res = await fetch(url, {
@@ -130,10 +182,16 @@ async function optimizeTSP(
     };
     if (data.code !== "Ok" || !data.waypoints || !data.trips?.[0]) return null;
 
-    // waypoints are in visit order (TSP solution); last entry is always the company
-    const order = data.waypoints
-      .slice(0, -1)               // drop the company (last waypoint)
-      .map(w => w.waypoint_index); // original BP index
+    // waypoints are in visit order (TSP solution).
+    // When garage is provided: first=garage, last=company — drop both endpoints.
+    // Without garage: last=company — drop last only.
+    const waypointSlice = (hasGarage && direction) 
+      ? data.waypoints.slice(1, -1)   // drop garage (first) and company (last)
+      : data.waypoints.slice(0, -1);  // drop company (last) only
+    // Adjust waypoint_index offset when garage is prepended (shifts all indices by 1)
+    const offset = (hasGarage && direction === "ida") || (hasGarage && direction === "volta") ? 1 : 0;
+    const order = waypointSlice
+      .map(w => w.waypoint_index - offset); // original BP index
 
     const distanceKm = parseFloat((data.trips[0].distance / 1000).toFixed(2));
     return { order, distanceKm };
@@ -294,6 +352,7 @@ function clusterByRadius(
 
 function budgetToApi(row: {
   id: number; name: string; algorithm: string | null; companyId: number | null;
+  partnerId?: number | null;
   status: string; destinationAddress: string | null; maxWalkingRadiusKm: string | null;
   maxTravelTimeMin: number | null; employeesCount: number; routesCount: number;
   createdAt: Date; updatedAt: Date;
@@ -304,6 +363,7 @@ function budgetToApi(row: {
     status: row.status,
     strategy: row.algorithm ?? "min_cost",
     companyId: row.companyId,
+    partnerId: row.partnerId ?? null,
     companyName: companyName ?? null,
     companyAddress: row.destinationAddress ?? "",
     maxRadiusKm: parseFloat(row.maxWalkingRadiusKm ?? "2"),
@@ -355,15 +415,18 @@ router.get("/admin/budgets", requireAdmin, async (req, res) => {
 
 /* ─── Create budget ──────────────────────────────────────────────────────── */
 router.post("/admin/budgets", requireAdmin, async (req, res) => {
-  const { name, companyId, companyAddress, maxRadiusKm, maxRouteMinutes, strategy } = req.body as {
+  const { name, companyId, companyAddress, maxRadiusKm, maxRouteMinutes, strategy, partnerId, startDate } = req.body as {
     name: string; companyId: number; companyAddress: string;
     maxRadiusKm: number; maxRouteMinutes: number; strategy: string;
+    partnerId?: number; startDate?: string;
   };
   if (!name || !companyId) { res.status(400).json({ error: "name e companyId obrigatórios" }); return; }
   try {
     const [row] = await db.insert(budgetsTable).values({
       name,
       companyId,
+      partnerId: partnerId ?? null,
+      startDate: startDate ?? null,
       destinationAddress: companyAddress,
       maxWalkingRadiusKm: String(maxRadiusKm ?? 2),
       maxTravelTimeMin: maxRouteMinutes ?? 120,
@@ -418,6 +481,10 @@ router.get("/admin/budgets/:id", requireAdmin, async (req, res) => {
 
     if (!row) { res.status(404).json({ error: "Não encontrado" }); return; }
 
+    // partnerId via raw SQL (column exists in DB but not in Drizzle schema)
+    const partnerRaw = await db.execute(sql`SELECT partner_id FROM budgets WHERE id = ${id}`);
+    const partnerId = (partnerRaw.rows[0] as { partner_id?: number } | undefined)?.partner_id ?? null;
+
     const workers = await db.select().from(budgetWorkersTable).where(eq(budgetWorkersTable.budgetId, id));
     const routes = await db.select().from(budgetRoutesTable).where(eq(budgetRoutesTable.budgetId, id));
     const bps = await db.select().from(budgetBoardingPointsTable).where(eq(budgetBoardingPointsTable.budgetId, id));
@@ -439,6 +506,7 @@ router.get("/admin/budgets/:id", requireAdmin, async (req, res) => {
         ...budgetToApi(row, row.companyName),
         companyLat: companyGeo.lat,
         companyLng: companyGeo.lng,
+        partnerId,
       },
       employees: workers.map(w => ({
         id: w.id,
@@ -656,6 +724,21 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
       : null;
     const companyGeo = companyGeoReal ?? fakeGeocode(budget.destinationAddress ?? "São Paulo");
 
+    // Load partner garage coordinates for KM calculation
+    // IDA:   garagem → passageiros → empresa
+    // VOLTA: empresa → passageiros → garagem
+    let garageLat: number | null = null;
+    let garageLng: number | null = null;
+    if (budget.partnerId) {
+      const [partner] = await db
+        .select({ garageLat: partnersTable.garageLat, garageLng: partnersTable.garageLng })
+        .from(partnersTable)
+        .where(eq(partnersTable.id, budget.partnerId))
+        .limit(1);
+      garageLat = partner?.garageLat ?? null;
+      garageLng = partner?.garageLng ?? null;
+    }
+
     // Assign coordinates: use existing fakeGeocode coords set at import time.
     // Workers without coordinates yet get a fresh fakeGeocode scatter near the company.
     for (const w of workers) {
@@ -773,7 +856,10 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
         // Returns both the optimal visit ORDER and the real road distance in km.
         // Falls back to Haversine estimate if the API call fails.
         const bpCentroids = boardingClusters.map(c => c.centroid);
-        const tspResult = await optimizeTSP(bpCentroids, companyGeo.lat, companyGeo.lng);
+        const garageOpts = garageLat != null && garageLng != null
+          ? { garageLat, garageLng, direction: "ida" as "ida" | "volta" }
+          : undefined;
+        const tspResult = await optimizeTSP(bpCentroids, companyGeo.lat, companyGeo.lng, garageOpts);
 
         // Reorder clusters according to TSP-optimal sequence
         const orderedClusters = tspResult
@@ -1005,8 +1091,8 @@ router.post("/admin/budgets/:id/boarding-points", requireAdmin, async (req, res)
 router.put("/admin/budgets/:id/boarding-points/:bpId", requireAdmin, async (req, res) => {
   const bpId = parseInt(String(req.params.bpId), 10);
   if (isNaN(bpId)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const { lat, lng, radiusKm, workerIds } = req.body as {
-    lat: number; lng: number; radiusKm?: number; workerIds?: number[];
+  const { lat, lng, radiusKm, workerIds, name } = req.body as {
+    lat: number; lng: number; radiusKm?: number; workerIds?: number[]; name?: string;
   };
   try {
     await db.update(budgetWorkersTable).set({ boardingPointId: null }).where(eq(budgetWorkersTable.boardingPointId, bpId));
@@ -1016,6 +1102,7 @@ router.put("/admin/budgets/:id/boarding-points/:bpId", requireAdmin, async (req,
     await db.update(budgetBoardingPointsTable).set({
       lat: String(lat), lng: String(lng),
       ...(radiusKm != null ? { radiusKm: String(radiusKm) } : {}),
+      ...(name ? { name } : {}),
       passengerCount: workerIds?.length ?? 0,
     }).where(eq(budgetBoardingPointsTable.id, bpId));
     res.json({ ok: true });
@@ -1074,6 +1161,16 @@ router.post("/admin/budgets/:id/finalize-manual", requireAdmin, async (req, res)
     const companyGeoReal = budget.destinationAddress ? await geocodeNominatim(budget.destinationAddress) : null;
     const companyGeo = companyGeoReal ?? fakeGeocode(budget.destinationAddress ?? "São Paulo");
 
+    // Load partner garage coordinates (if a partner is linked to this budget)
+    let garageLat: number | null = null;
+    let garageLng: number | null = null;
+    if (budget.partnerId) {
+      const [partner] = await db.select({ garageLat: partnersTable.garageLat, garageLng: partnersTable.garageLng })
+        .from(partnersTable).where(eq(partnersTable.id, budget.partnerId)).limit(1);
+      garageLat = partner?.garageLat ?? null;
+      garageLng = partner?.garageLng ?? null;
+    }
+
     // Clear existing routes (keep BPs)
     await db.delete(budgetRoutesTable).where(eq(budgetRoutesTable.budgetId, id));
     await db.update(budgetBoardingPointsTable).set({ routeId: null }).where(eq(budgetBoardingPointsTable.budgetId, id));
@@ -1093,7 +1190,10 @@ router.post("/admin/budgets/:id/finalize-manual", requireAdmin, async (req, res)
 
       // Optimize route with TSP
       const bpCentroids = shiftBPs.map(bp => ({ lat: parseFloat(String(bp.lat)), lng: parseFloat(String(bp.lng)) }));
-      const tspResult = await optimizeTSP(bpCentroids, companyGeo.lat, companyGeo.lng);
+      const manualGarageOpts = garageLat != null && garageLng != null
+        ? { garageLat, garageLng, direction: (srDir ?? "ida") as "ida" | "volta" }
+        : undefined;
+      const tspResult = await optimizeTSP(bpCentroids, companyGeo.lat, companyGeo.lng, manualGarageOpts);
 
       let distKm: number;
       const orderedBPs: typeof shiftBPs = tspResult
@@ -1156,7 +1256,168 @@ router.post("/admin/budgets/:id/finalize-manual", requireAdmin, async (req, res)
   }
 });
 
-/* ─── List companies (for budget form) ──────────────────────────────────── */
-// Already handled by companies router, but keep alias if needed
+/* ─── Publish budget → sends routes to company dashboard ────────────────── */
+router.post("/admin/budgets/:id/publish", requireAdmin, async (req, res) => {
+  const id = parseInt(String(req.params.id), 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+
+  try {
+    const [budget] = await db.select().from(budgetsTable).where(eq(budgetsTable.id, id)).limit(1);
+    if (!budget) { res.status(404).json({ error: "Orçamento não encontrado" }); return; }
+
+    const routes = await db.select().from(budgetRoutesTable).where(eq(budgetRoutesTable.budgetId, id));
+    if (routes.length === 0) { res.status(400).json({ error: "Nenhuma rota criada neste orçamento" }); return; }
+
+    await db.update(budgetsTable)
+      .set({ status: "publicado", updatedAt: new Date() })
+      .where(eq(budgetsTable.id, id));
+
+    res.json({ published: true, routes: routes.length });
+  } catch (err) {
+    req.log.error({ err }, "Error publishing budget");
+    res.status(500).json({ error: "Erro ao publicar orçamento" });
+  }
+});
+
+/* ─── List published scheduled routes for a company ─────────────────────── */
+router.get("/companies/:companyId/scheduled-routes", async (req, res) => {
+  const companyId = parseInt(String(req.params.companyId), 10);
+  if (isNaN(companyId)) { res.status(400).json({ error: "ID inválido" }); return; }
+
+  try {
+    // Use raw SQL to avoid referencing columns not in Drizzle schema (startDate)
+    const budgetsRaw = await db.execute(
+      sql`SELECT id, name, status,
+          start_date AS "startDate",
+          destination_address AS "destinationAddress",
+          employees_count AS "employeesCount",
+          routes_count AS "routesCount",
+          updated_at AS "publishedAt"
+          FROM budgets WHERE company_id = ${companyId} ORDER BY updated_at DESC`
+    );
+    const budgets = budgetsRaw.rows as {
+      id: number; name: string; status: string; startDate: string | null;
+      destinationAddress: string | null; employeesCount: number;
+      routesCount: number; publishedAt: string;
+    }[];
+
+    const published = budgets.filter(b => b.status === "publicado");
+    const budgetIds = published.map(b => b.id);
+
+    let routes: (typeof budgetRoutesTable.$inferSelect)[] = [];
+    let workers: (typeof budgetWorkersTable.$inferSelect)[] = [];
+    if (budgetIds.length > 0) {
+      routes = await db.select().from(budgetRoutesTable)
+        .where(inArray(budgetRoutesTable.budgetId, budgetIds))
+        .orderBy(budgetRoutesTable.budgetId, budgetRoutesTable.shiftTime);
+      workers = await db.select().from(budgetWorkersTable)
+        .where(inArray(budgetWorkersTable.budgetId, budgetIds))
+        .orderBy(budgetWorkersTable.name);
+    }
+
+    // Fetch ALL boarding points for these budgets (routeId may be null in some flows)
+    const allBps = budgetIds.length > 0
+      ? await db.select().from(budgetBoardingPointsTable)
+          .where(inArray(budgetBoardingPointsTable.budgetId, budgetIds))
+          .orderBy(budgetBoardingPointsTable.budgetId, budgetBoardingPointsTable.sequenceOrder)
+      : [];
+
+    // Index BPs by routeId (when set) and also by budgetId+shift+direction for fallback
+    const bpsByRoute = new Map<number, (typeof budgetBoardingPointsTable.$inferSelect)[]>();
+    const bpsByBudget = new Map<number, (typeof budgetBoardingPointsTable.$inferSelect)[]>();
+    for (const bp of allBps) {
+      if (bp.routeId) {
+        if (!bpsByRoute.has(bp.routeId)) bpsByRoute.set(bp.routeId, []);
+        bpsByRoute.get(bp.routeId)!.push(bp);
+      }
+      if (!bpsByBudget.has(bp.budgetId)) bpsByBudget.set(bp.budgetId, []);
+      bpsByBudget.get(bp.budgetId)!.push(bp);
+    }
+
+    // Index BP ids for fast worker lookup
+    const bpIdSet = new Set(allBps.map(bp => bp.id));
+
+    const routesByBudget = new Map<number, typeof routes>();
+    for (const r of routes) {
+      if (!routesByBudget.has(r.budgetId)) routesByBudget.set(r.budgetId, []);
+      routesByBudget.get(r.budgetId)!.push(r);
+    }
+
+    // Index workers: first by boardingPointId, then by budgetId as fallback
+    const workersByBP = new Map<number, { name: string; shift: string | null; address: string }[]>();
+    const workersByBudget = new Map<number, { name: string; shift: string | null; address: string; boardingPointId: number | null }[]>();
+    for (const w of workers) {
+      if (w.boardingPointId) {
+        if (!workersByBP.has(w.boardingPointId)) workersByBP.set(w.boardingPointId, []);
+        workersByBP.get(w.boardingPointId)!.push({ name: w.name, shift: w.shift, address: w.address });
+      }
+      if (!workersByBudget.has(w.budgetId)) workersByBudget.set(w.budgetId, []);
+      workersByBudget.get(w.budgetId)!.push({ name: w.name, shift: w.shift, address: w.address, boardingPointId: w.boardingPointId ?? null });
+    }
+
+    const result = published.map(b => ({
+      budgetId: b.id,
+      name: b.name,
+      startDate: b.startDate ?? null,
+      destinationAddress: b.destinationAddress,
+      employeesCount: b.employeesCount,
+      publishedAt: b.publishedAt,
+      routes: (routesByBudget.get(b.id) ?? []).map(r => {
+        const bps = bpsByRoute.get(r.id) ?? [];
+        const colaboradores: { name: string; shift: string | null; boardingPoint: string; address: string }[] = [];
+
+        // Step 1: get BPs for this route — prefer routeId match, fallback to budget+shift+direction
+        let routeBps = bpsByRoute.get(r.id) ?? [];
+        if (routeBps.length === 0) {
+          const budgetBps = bpsByBudget.get(b.id) ?? [];
+          routeBps = budgetBps.filter(bp =>
+            (!bp.shiftTime || bp.shiftTime === r.shiftTime) &&
+            (!bp.direction || bp.direction === r.direction)
+          );
+        }
+
+        // Step 2: workers linked to those BPs via boardingPointId
+        const routeBpIds = new Set(routeBps.map(bp => bp.id));
+        const bpById = new Map(routeBps.map(bp => [bp.id, bp]));
+
+        const allW = workersByBudget.get(b.id) ?? [];
+        for (const w of allW) {
+          if (w.boardingPointId && routeBpIds.has(w.boardingPointId)) {
+            const bp = bpById.get(w.boardingPointId);
+            colaboradores.push({ name: w.name, shift: w.shift, boardingPoint: bp?.name ?? "", address: w.address });
+          }
+        }
+
+        // Step 3: if still empty and workers have no boardingPointId, show workers with no BP assigned
+        if (colaboradores.length === 0) {
+          for (const w of allW) {
+            if (!w.boardingPointId || !bpIdSet.has(w.boardingPointId)) {
+              colaboradores.push({ name: w.name, shift: w.shift, boardingPoint: "", address: w.address });
+            }
+          }
+        }
+
+        return {
+          id: r.id,
+          name: r.name,
+          shiftTime: r.shiftTime,
+          direction: r.direction,
+          totalPassengers: r.totalPassengers,
+          totalDistanceKm: r.totalDistanceKm,
+          estimatedMinutes: r.estimatedMinutes,
+          occupancyPct: r.occupancyPct,
+          vehicleAssignments: r.vehicleAssignments,
+          createdAt: r.createdAt,
+          colaboradores,
+        };
+      }),
+    }));
+
+    res.json(result);
+  } catch (err) {
+    req.log.error({ err }, "Error listing scheduled routes");
+    res.status(500).json({ error: "Erro ao buscar rotas agendadas" });
+  }
+});
 
 export default router;

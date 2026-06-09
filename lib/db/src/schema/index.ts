@@ -14,3 +14,4 @@ export * from "./budget_route_vehicles";
 export * from "./budget_workers";
 export * from "./budget_routes";
 export * from "./budget_boarding_points";
+export * from "./company_holidays";

@@ -1,8 +1,8 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
 import { db } from "@workspace/db";
-import { companiesTable, usersTable, employeesTable, employeeMovementsTable, companyShiftsTable } from "@workspace/db/schema";
-import { eq, desc, or, inArray, isNull } from "drizzle-orm";
+import { companiesTable, usersTable, employeesTable, employeeMovementsTable, companyShiftsTable, companyHolidaysTable } from "@workspace/db/schema";
+import { eq, desc, or, inArray, isNull, and } from "drizzle-orm";
 import { requireAdmin, requireAuth, getAuth } from "../middlewares/auth";
 import { logAudit } from "../services/audit";
 
@@ -84,8 +84,11 @@ router.post("/admin/companies", requireAdmin, async (req, res) => {
       masterUser: { id: masterUser.id, email: masterUser.email, initialPassword },
     });
   } catch (err: unknown) {
-    const pgErr = err as { code?: string };
-    if (pgErr.code === "23505") { res.status(400).json({ error: "CNPJ ou e-mail já cadastrado" }); return; }
+    // Drizzle wraps pg errors — check message string for unique violation
+    const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+    if (msg.includes("23505") || msg.includes("unique") || msg.includes("duplicate")) {
+      res.status(400).json({ error: "CNPJ ou e-mail já cadastrado no sistema" }); return;
+    }
     req.log.error({ err }, "Error creating company");
     res.status(500).json({ error: "Erro interno" });
   }
@@ -248,6 +251,88 @@ function serializeEmployee(e: typeof employeesTable.$inferSelect) {
     updatedAt: e.updatedAt?.toISOString?.() ?? e.updatedAt,
   };
 }
+
+/* ── Funcionários: importar em lote ── */
+router.post("/companies/:id/employees/batch", requireAuth("platform_admin", "cliente_master", "cliente_subadmin"), async (req, res) => {
+  const companyId = parseInt(req.params.id as string, 10);
+  if (isNaN(companyId)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const body = req.body as { employees: Record<string, string | undefined>[] };
+  if (!Array.isArray(body.employees) || body.employees.length === 0) {
+    res.status(400).json({ error: "Lista de funcionários obrigatória" }); return;
+  }
+  const auth = getAuth(req);
+  const inserted: number[] = [];
+  const skipped: string[] = [];
+
+  try {
+    // Processa em batches de 100 para não estourar a query
+    const BATCH = 100;
+    for (let i = 0; i < body.employees.length; i += BATCH) {
+      const chunk = body.employees.slice(i, i + BATCH);
+      const values = chunk
+        .filter(e => e.name && e.cpf)
+        .map(e => {
+          const cleanedCpf = cleanCpf(e.cpf!);
+          return {
+            companyId,
+            name: e.name!.trim(),
+            cpf: cleanedCpf,
+            matricula: (e.matricula ?? "000000").trim(),
+            admissionDate: e.admissionDate || new Date().toISOString().slice(0, 10),
+            route: e.route?.trim() ?? null,
+            status: e.status?.trim() ?? "Ativo",
+            email: e.email?.trim() ?? null,
+            phone: e.phone?.trim() ?? null,
+            birthDate: e.birthDate ?? null,
+            address: e.address?.trim() ?? null,
+            addressNumber: e.addressNumber?.trim() ?? null,
+            addressComplement: e.addressComplement?.trim() ?? null,
+            neighborhood: e.neighborhood?.trim() ?? null,
+            city: e.city?.trim() ?? null,
+            state: e.state?.trim() ?? null,
+            zipCode: e.zipCode?.trim() ?? null,
+            shiftStart: e.shiftStart?.trim() ?? null,
+            shiftEnd: e.shiftEnd?.trim() ?? null,
+            operationStart: e.operationStart ?? null,
+            valeValue: e.valeValue?.trim() ?? null,
+            codigo: e.codigo?.trim() ?? null,
+            grupoId: e.grupoId ? parseInt(e.grupoId, 10) : null,
+          };
+        });
+
+      if (values.length === 0) continue;
+
+      try {
+        const rows = await db.insert(employeesTable)
+          .values(values)
+          .onConflictDoNothing() // ignora CPF duplicado
+          .returning({ id: employeesTable.id });
+        inserted.push(...rows.map(r => r.id));
+      } catch (chunkErr) {
+        // Se o batch falhar, tenta um a um para salvar o máximo possível
+        for (const v of values) {
+          try {
+            const [row] = await db.insert(employeesTable).values(v).returning({ id: employeesTable.id });
+            if (row) inserted.push(row.id);
+          } catch {
+            skipped.push(v.name);
+          }
+        }
+      }
+    }
+
+    await logAudit({
+      userId: auth.sub as number, userEmail: auth.email, companyId,
+      action: "batch_import_employees", entityType: "employee", entityId: companyId,
+      newValue: { inserted: inserted.length, skipped: skipped.length },
+    });
+
+    res.status(201).json({ inserted: inserted.length, skipped, ids: inserted });
+  } catch (err) {
+    req.log.error({ err }, "Error batch importing employees");
+    res.status(500).json({ error: "Erro interno ao importar funcionários" });
+  }
+});
 
 /* ── Funcionários: criar ── */
 router.post("/companies/:id/employees", requireAuth("platform_admin", "cliente_master", "cliente_subadmin"), async (req, res) => {
@@ -582,6 +667,138 @@ router.delete("/me/shifts/:id", requireAuth("cliente_master", "cliente_subadmin"
     res.json({ ok: true });
   } catch (err) {
     req.log.error({ err }, "Error deleting shift");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ── Usuários master: listar ── */
+router.get("/companies/:id/users", requireAuth("platform_admin"), async (req, res) => {
+  const companyId = parseInt(req.params.id as string, 10);
+  if (isNaN(companyId)) { res.status(400).json({ error: "ID inválido" }); return; }
+  try {
+    const users = await db
+      .select({ id: usersTable.id, name: usersTable.name, email: usersTable.email, role: usersTable.role, createdAt: usersTable.createdAt })
+      .from(usersTable)
+      .where(and(eq(usersTable.entityId, companyId), inArray(usersTable.role, ["cliente_master", "cliente_subadmin"])))
+      .orderBy(usersTable.createdAt);
+    res.json(users);
+  } catch (err) {
+    req.log.error({ err }, "Error listing company users");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ── Usuários master: criar ── */
+router.post("/companies/:id/users", requireAuth("platform_admin"), async (req, res) => {
+  const companyId = parseInt(req.params.id as string, 10);
+  if (isNaN(companyId)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const { name, email, role = "cliente_master" } = req.body as { name: string; email: string; role?: string };
+  if (!name || !email) { res.status(400).json({ error: "Nome e e-mail são obrigatórios" }); return; }
+  if (!["cliente_master", "cliente_subadmin"].includes(role)) { res.status(400).json({ error: "Role inválido" }); return; }
+  const auth = getAuth(req);
+  try {
+    const emailLower = email.trim().toLowerCase();
+    const existing = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.email, emailLower)).limit(1);
+    if (existing.length > 0) { res.status(409).json({ error: "E-mail já cadastrado no sistema" }); return; }
+
+    const initialPassword = Math.random().toString(36).slice(-8);
+    const passwordHash = await bcrypt.hash(initialPassword, 10);
+
+    const [user] = await db.insert(usersTable).values({
+      name: name.trim(),
+      email: emailLower,
+      passwordHash,
+      role: role as "cliente_master" | "cliente_subadmin",
+      entityId: companyId,
+    }).returning();
+
+    await logAudit({
+      userId: auth.sub as number, userEmail: auth.email, companyId,
+      action: "create_company_user", entityType: "user", entityId: user!.id,
+      newValue: { name, email: emailLower, role },
+    });
+
+    res.status(201).json({ id: user!.id, name: user!.name, email: user!.email, role: user!.role, initialPassword });
+  } catch (err) {
+    req.log.error({ err }, "Error creating company user");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ── Usuários master: remover ── */
+router.delete("/companies/:id/users/:userId", requireAuth("platform_admin"), async (req, res) => {
+  const companyId = parseInt(req.params.id as string, 10);
+  const userId    = parseInt(req.params.userId as string, 10);
+  if (isNaN(companyId) || isNaN(userId)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const auth = getAuth(req);
+  try {
+    const [user] = await db.select().from(usersTable).where(and(eq(usersTable.id, userId), eq(usersTable.entityId, companyId))).limit(1);
+    if (!user) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
+    await db.delete(usersTable).where(eq(usersTable.id, userId));
+    await logAudit({
+      userId: auth.sub as number, userEmail: auth.email, companyId,
+      action: "delete_company_user", entityType: "user", entityId: userId,
+      newValue: { email: user.email },
+    });
+    res.status(204).end();
+  } catch (err) {
+    req.log.error({ err }, "Error deleting company user");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ── Feriados personalizados: listar ── */
+router.get("/me/holidays", requireAuth("cliente_master", "cliente_subadmin"), async (req, res) => {
+  const auth = getAuth(req);
+  const companyId = auth.entityId;
+  if (!companyId) { res.status(400).json({ error: "Empresa não identificada" }); return; }
+  try {
+    const holidays = await db
+      .select()
+      .from(companyHolidaysTable)
+      .where(eq(companyHolidaysTable.companyId, companyId))
+      .orderBy(companyHolidaysTable.date);
+    res.json(holidays.map(h => ({ id: h.id, date: h.date, label: h.label })));
+  } catch (err) {
+    req.log.error({ err }, "Error listing holidays");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ── Feriados personalizados: adicionar ── */
+router.post("/me/holidays", requireAuth("cliente_master", "cliente_subadmin"), async (req, res) => {
+  const auth = getAuth(req);
+  const companyId = auth.entityId;
+  if (!companyId) { res.status(400).json({ error: "Empresa não identificada" }); return; }
+  const { date, label } = req.body as { date?: string; label?: string };
+  if (!date || !label?.trim()) { res.status(400).json({ error: "Data e nome são obrigatórios" }); return; }
+  try {
+    const [holiday] = await db
+      .insert(companyHolidaysTable)
+      .values({ companyId, date, label: label.trim() })
+      .onConflictDoUpdate({ target: [companyHolidaysTable.companyId, companyHolidaysTable.date], set: { label: label.trim() } })
+      .returning();
+    res.status(201).json({ id: holiday!.id, date: holiday!.date, label: holiday!.label });
+  } catch (err) {
+    req.log.error({ err }, "Error adding holiday");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ── Feriados personalizados: remover ── */
+router.delete("/me/holidays/:id", requireAuth("cliente_master", "cliente_subadmin"), async (req, res) => {
+  const auth = getAuth(req);
+  const companyId = auth.entityId;
+  if (!companyId) { res.status(400).json({ error: "Empresa não identificada" }); return; }
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  try {
+    await db
+      .delete(companyHolidaysTable)
+      .where(eq(companyHolidaysTable.id, id));
+    res.json({ deleted: true });
+  } catch (err) {
+    req.log.error({ err }, "Error deleting holiday");
     res.status(500).json({ error: "Erro interno" });
   }
 });
