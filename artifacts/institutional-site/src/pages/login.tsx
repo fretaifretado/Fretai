@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 
+const API_BASE = import.meta.env.VITE_API_URL ?? "";
+
 const loginSchema = z.object({
   email: z.string().min(1, "Usuário ou e-mail é obrigatório"),
   password: z.string().min(1, "Senha é obrigatória"),
@@ -70,7 +72,7 @@ export default function Login() {
       const isAdminLogin = !emailTrimmed.includes("@");
 
       if (isAdminLogin) {
-        const res = await fetch("/api/auth/admin/login", {
+        const res = await fetch(`${API_BASE}/api/auth/admin/login`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username: emailTrimmed, password: passwordTrimmed }),
@@ -83,7 +85,7 @@ export default function Login() {
         localStorage.setItem("admin_role", data.role ?? "platform_admin");
         setLocation("/admin");
       } else {
-        const res = await fetch("/api/auth/login", {
+        const res = await fetch(`${API_BASE}/api/auth/login`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email: emailTrimmed, password: passwordTrimmed }),
@@ -139,7 +141,7 @@ export default function Login() {
   async function onForgot(values: ForgotForm) {
     setForgotLoading(true);
     try {
-      await fetch("/api/auth/forgot-password", {
+      await fetch(`${API_BASE}/api/auth/forgot-password`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: values.email.trim().toLowerCase() }),
@@ -157,7 +159,7 @@ export default function Login() {
     setChangeLoading(true);
     setError("");
     try {
-      const res = await fetch("/api/auth/change-password", {
+      const res = await fetch(`${API_BASE}/api/auth/change-password`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
