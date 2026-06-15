@@ -5,6 +5,7 @@ import { companiesTable, usersTable, employeesTable, employeeMovementsTable, com
 import { eq, desc, or, inArray, isNull, and } from "drizzle-orm";
 import { requireAdmin, requireAuth, getAuth } from "../middlewares/auth";
 import { logAudit } from "../services/audit";
+import { createUnusedValeDiscountForEmployee } from "../services/financial-summary";
 
 const router = Router();
 
@@ -444,6 +445,20 @@ router.put("/companies/:companyId/employees/:id", requireAuth("platform_admin", 
       entityId: id,
       newValue: { name: employee.name, status: employee.status, ...Object.fromEntries(Object.entries(body).filter(([k]) => k !== "cpf")) },
     });
+    if (body.status !== undefined && body.status.trim().toLowerCase() !== "ativo") {
+      const discount = await createUnusedValeDiscountForEmployee({ companyId: employee.companyId, employeeId: employee.id });
+      if (discount.created) {
+        await logAudit({
+          userId: authUpd.sub as number,
+          userEmail: authUpd.email,
+          companyId: employee.companyId,
+          action: "create_unused_vale_credit",
+          entityType: "purchase_order",
+          entityId: employee.id,
+          newValue: { employeeId: employee.id, vales: discount.vales, total: discount.total, status: employee.status },
+        });
+      }
+    }
     res.json(serializeEmployee(employee));
   } catch (err) {
     req.log.error({ err }, "Error updating employee");

@@ -3,6 +3,7 @@ import { db } from "@workspace/db";
 import { purchaseOrdersTable, companiesTable } from "@workspace/db/schema";
 import { eq, desc } from "drizzle-orm";
 import { requireAuth, getAuth } from "../middlewares/auth";
+import { getFinancialSummary, parsePeriodParam } from "../services/financial-summary";
 
 const router = Router();
 
@@ -55,6 +56,44 @@ async function getAllowedCompanyIds(entityId: number): Promise<Set<number>> {
   for (const b of branches) ids.add(b.id);
   return ids;
 }
+
+/* ── Resumo financeiro real da competência ── */
+router.get(
+  "/me/financial-summary",
+  requireAuth("cliente_master", "cliente_subadmin"),
+  async (req, res) => {
+    const companyId = parseInt((req.query.companyId as string) ?? "", 10);
+    if (isNaN(companyId)) {
+      res.status(400).json({ error: "companyId inválido" });
+      return;
+    }
+
+    const auth = getAuth(req);
+    const entityId = auth.entityId as number | undefined;
+    if (!entityId) {
+      res.status(403).json({ error: "Acesso negado" });
+      return;
+    }
+
+    try {
+      const allowed = await getAllowedCompanyIds(entityId);
+      if (!allowed.has(companyId)) {
+        res.status(403).json({ error: "Acesso negado a esta empresa" });
+        return;
+      }
+
+      const period = parsePeriodParam(req.query.period as string | undefined);
+      res.json(await getFinancialSummary(companyId, period));
+    } catch (err) {
+      if (err instanceof Error && err.message === "period inválido") {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      req.log.error({ err }, "Error building financial summary");
+      res.status(500).json(internalErrorPayload(err));
+    }
+  },
+);
 
 /* ── Listar pedidos de compra da filial ── */
 router.get(

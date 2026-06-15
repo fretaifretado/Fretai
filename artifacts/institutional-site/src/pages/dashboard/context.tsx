@@ -663,7 +663,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify(body),
       })
-        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); })
+        .then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          if (previous?.status !== c.status) window.dispatchEvent(new CustomEvent("purchase-orders:updated"));
+        })
         .catch((err) => {
           console.error("[dashboard] erro ao atualizar colaborador, revertendo estado local:", err);
           // Restaura o estado anterior se a API falhou

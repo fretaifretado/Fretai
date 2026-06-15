@@ -9,6 +9,7 @@ import {
 import { and, eq, lt, lte, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import { requireAuth, getAuth } from "../middlewares/auth";
 import { logAudit } from "../services/audit";
+import { periodLabelFromDate } from "../services/financial-summary";
  
 const router = Router();
  
@@ -160,7 +161,7 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
                 employeeId: t.colaboradorId,
                 nome: employeeRow[0]?.name ?? "Colaborador transferido",
                 turno: "—",
-                periodo: "Transferência de filial",
+                periodo: periodLabelFromDate(),
                 dataInicio: today,
                 dataFim: today,
                 dias: 0,

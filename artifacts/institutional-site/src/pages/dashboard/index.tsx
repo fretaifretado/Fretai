@@ -17,14 +17,6 @@ function getAuthHeaders(): HeadersInit {
   return { Authorization: `Bearer ${token}` };
 }
 
-interface PedidoApi {
-  id: number;
-  employeeId: number | null;
-  vales: number;
-  total: string;
-  status: "Processando" | "Aprovado" | "Cancelado";
-}
-
 interface ScheduledRoute {
   id: number;
   shiftTime: string | null;
@@ -38,6 +30,32 @@ interface PublishedBudget {
   publishedAt: string;
   routes: ScheduledRoute[];
 }
+
+interface FinancialSummary {
+  companyId: number;
+  period: string;
+  periodLabel: string;
+  valesComprados: number;
+  compraDoMes: number;
+  valesNaoUtilizados: number;
+  creditoGerado: number;
+  creditoAplicado: number;
+  saldoCredito: number;
+  valorNotaFiscal: number;
+}
+
+const EMPTY_FINANCIAL_SUMMARY: FinancialSummary = {
+  companyId: 0,
+  period: "",
+  periodLabel: "",
+  valesComprados: 0,
+  compraDoMes: 0,
+  valesNaoUtilizados: 0,
+  creditoGerado: 0,
+  creditoAplicado: 0,
+  saldoCredito: 0,
+  valorNotaFiscal: 0,
+};
 
 function passageirosNoDia(budgets: PublishedBudget[], date: Date): number {
   const dayOfWeek = date.getDay(); // 0=Dom, 1=Seg, ... 6=Sab
@@ -105,12 +123,12 @@ function fmt(v: number) {
 
 const MESES_CURTO = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
 
-function normalizeTurnoKey(name: string) {
-  return (name || "").toLowerCase().replace(/\s+/g, "");
+function monthParam(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
 export default function DashboardPage() {
-  const { colaboradoresDaFilial: colaboradores, colaboradores: todosColaboradores, filiais, empresaAtiva, turnos, filialAtiva } = useDashboard();
+  const { colaboradoresDaFilial: colaboradores, colaboradores: todosColaboradores, filiais, empresaAtiva, filialAtiva } = useDashboard();
 
   const today    = new Date();
   const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1);
@@ -118,22 +136,36 @@ export default function DashboardPage() {
     const d = new Date(); d.setDate(d.getDate() + 7); return d;
   });
 
-  /* ── purchase orders para os cards de relatório ── */
-  const [pedidos, setPedidos] = useState<PedidoApi[]>([]);
-  const [loadingPedidos, setLoadingPedidos] = useState(false);
-  const companyId = filialAtiva?.id ?? null;
+  /* ── Resumo financeiro real para os cards ── */
+  const companyId = filialAtiva?.id ?? empresaAtiva.id ?? null;
+  const financialPeriod = monthParam(today);
+  const [financialSummary, setFinancialSummary] = useState<FinancialSummary>(EMPTY_FINANCIAL_SUMMARY);
+  const [loadingFinancialSummary, setLoadingFinancialSummary] = useState(false);
 
-  const fetchPedidos = useCallback(async (cid: number) => {
-    setLoadingPedidos(true);
+  const fetchFinancialSummary = useCallback(async (cid: number, period: string) => {
+    setLoadingFinancialSummary(true);
     try {
-      const res = await fetch(`${API_URL}/api/me/purchase-orders?companyId=${cid}`, { headers: getAuthHeaders() });
-      if (res.ok) setPedidos(await res.json() as PedidoApi[]);
-    } catch { /* ignore */ } finally { setLoadingPedidos(false); }
+      const res = await fetch(`${API_URL}/api/me/financial-summary?companyId=${cid}&period=${period}`, { headers: getAuthHeaders() });
+      if (res.ok) setFinancialSummary(await res.json() as FinancialSummary);
+      else setFinancialSummary(EMPTY_FINANCIAL_SUMMARY);
+    } catch {
+      setFinancialSummary(EMPTY_FINANCIAL_SUMMARY);
+    } finally {
+      setLoadingFinancialSummary(false);
+    }
   }, []);
 
   useEffect(() => {
-    if (companyId) void fetchPedidos(companyId);
-  }, [companyId, fetchPedidos]);
+    if (companyId) void fetchFinancialSummary(companyId, financialPeriod);
+    else setFinancialSummary(EMPTY_FINANCIAL_SUMMARY);
+  }, [companyId, fetchFinancialSummary, financialPeriod]);
+
+  useEffect(() => {
+    if (!companyId) return;
+    const onUpdated = () => { void fetchFinancialSummary(companyId, financialPeriod); };
+    window.addEventListener("purchase-orders:updated", onUpdated);
+    return () => window.removeEventListener("purchase-orders:updated", onUpdated);
+  }, [companyId, fetchFinancialSummary, financialPeriod]);
 
   /* ── rotas agendadas para cards de passageiros ── */
   const [scheduledBudgets, setScheduledBudgets] = useState<PublishedBudget[]>([]);
@@ -256,114 +288,9 @@ export default function DashboardPage() {
     ? `${empresaAtiva.nome} — Visão Global`
     : filiaisEmpresa.find(f => f.id === filtroUnidade)?.nome ?? "";
 
-  /* ── métricas dos 5 cards de relatório ── */
-
-  // Vales comprados = apenas pedidos positivos (compras reais, não descontos)
-  const valesUtilizados = useMemo(
-    () => pedidos.filter(p => p.status !== "Cancelado" && p.vales > 0).reduce((s, p) => s + p.vales, 0),
-    [pedidos],
-  );
-
-  // Valor total = apenas compras positivas
-  const valorTotalCompras = useMemo(
-    () => pedidos.filter(p => p.status !== "Cancelado" && p.vales > 0).reduce((s, p) => s + parseFloat(p.total), 0),
-    [pedidos],
-  );
-
-  const inativosHoje = useMemo(
-    () => colaboradoresFiltrados.filter(c => ["Férias","Licença","Afastado","Desligado","Inativo"].includes(c.status)),
-    [colaboradoresFiltrados],
-  );
-
-  const diasMesAtual = useMemo(() => {
-    const h = new Date();
-    return new Date(h.getFullYear(), h.getMonth() + 1, 0).getDate() - h.getDate() + 1;
-  }, []);
-
-  // Vales não utilizados = soma dos pedidos de desconto (vales negativos) gerados
-  // quando colaboradores ficam afastados/férias/licença/desligados.
-  // Esses pedidos negativos são inseridos automaticamente pelo backend ao ativar agendamentos.
-  const valesNaoUtilizados = useMemo(
-    () => pedidos
-      .filter(p => p.status !== "Cancelado" && p.vales < 0)
-      .reduce((s, p) => s + Math.abs(p.vales), 0),
-    [pedidos],
-  );
-
-  // Economia real = valor monetário dos pedidos de desconto
-  const economiaMensal = useMemo(
-    () => pedidos
-      .filter(p => p.status !== "Cancelado" && p.vales < 0)
-      .reduce((s, p) => s + Math.abs(parseFloat(p.total)), 0),
-    [pedidos],
-  );
-
-  // Descrição dos vales não utilizados para o card
-  const descricaoValesNaoUtilizados = useMemo(() => {
-    const descontos = pedidos.filter(p => p.status !== "Cancelado" && p.vales < 0);
-    if (descontos.length === 0) return "Nenhum desconto registrado no período";
-    const colaboradores = new Set(descontos.map(p => p.employeeId)).size;
-    return `${colaboradores} colaborador(es) com ausência registrada no período`;
-  }, [pedidos]);
-
-  const nextPeriodoLabel = useMemo(() => {
-    const h = new Date();
-    const ano = h.getDate() >= 28 ? (h.getMonth() === 11 ? h.getFullYear() + 1 : h.getFullYear()) : h.getFullYear();
-    const mes = h.getDate() >= 28 ? (h.getMonth() === 11 ? 1 : h.getMonth() + 2) : h.getMonth() + 1;
-    return `${MESES_CURTO[mes - 1]}/${ano}`;
-  }, []);
-
-  const notaASerGerada = useMemo(() => {
-    return colaboradoresFiltrados
-      .filter(c => c.status === "Ativo" && c.turno !== "—" && !isFutureDate(c.inicioOperacao))
-      .reduce((sum, c) => {
-        const t = turnos.find(x => normalizeTurnoKey(x.nome) === normalizeTurnoKey(c.turno));
-        let dias = 22;
-        switch (t?.tipoEscala) {
-          case "5x2": dias = 22; break; case "6x1": dias = 26; break;
-          case "12x36": dias = 15; break; case "24x48": dias = 10; break;
-        }
-        return sum + dias * 2 * valeDiario;
-      }, 0);
-  }, [colaboradoresFiltrados, turnos, valeDiario]);
-
-  // ── Novos cálculos para os 6 cards ── 
-  // Card 1: Vales Comprados = total de vales comprados (pedidos positivos)
-  const valesComprados = useMemo(
-    () => pedidos.filter(p => p.status !== "Cancelado" && p.vales > 0).reduce((s, p) => s + p.vales, 0),
-    [pedidos],
-  );
-
-  // Card 2: Vales Não Utilizados = soma dos vales economizados (pedidos negativos em valor absoluto)
-  const valesNaoUtilizadosCard = useMemo(
-    () => pedidos
-      .filter(p => p.status !== "Cancelado" && p.vales < 0)
-      .reduce((s, p) => s + Math.abs(p.vales), 0),
-    [pedidos],
-  );
-
-  // Card 3: Crédito Gerado = vales não utilizados × valor unitário
-  const creditoGerado = useMemo(
-    () => valesNaoUtilizadosCard * valeDiario,
-    [valesNaoUtilizadosCard, valeDiario],
-  );
-
-  // Card 4: Compra do Mês = valor total de todas as compras (pedidos positivos)
-  const compraDoMes = useMemo(
-    () => pedidos.filter(p => p.status !== "Cancelado" && p.vales > 0).reduce((s, p) => s + parseFloat(p.total), 0),
-    [pedidos],
-  );
-
-  // Card 5: Crédito Aplicado = zero no mês inicial, abatido apenas no mês subsequente
-  // Portanto, no primeiro mês, creditoAplicado = 0
-  const creditoAplicado = 0;
-
-  // Card 6: Valor da Nota Fiscal = Compra do Mês - Crédito Aplicado
-  // No mês inicial, como creditoAplicado = 0, a nota fiscal = compra do mês
-  const valorNotaFiscal = useMemo(
-    () => Math.max(0, compraDoMes - creditoAplicado),
-    [compraDoMes],
-  );
+  const descricaoValesNaoUtilizados = financialSummary.valesNaoUtilizados > 0
+    ? `${financialSummary.valesNaoUtilizados.toLocaleString("pt-BR")} vale(s) não utilizado(s) no mês`
+    : "Nenhum desconto registrado no período";
 
   return (
     <DashboardLayout alertMessage={alertMessage}>
@@ -495,8 +422,8 @@ export default function DashboardPage() {
                   <CheckCircle2 size={14} />
                   <p className="text-[10px] font-bold uppercase tracking-wider">Vales Comprados</p>
                 </div>
-                <p className="text-3xl font-bold text-green-700">{valesComprados}</p>
-                <p className="text-[10px] text-muted-foreground">Total de vales comprados no mês</p>
+                <p className="text-3xl font-bold text-green-700">{financialSummary.valesComprados.toLocaleString("pt-BR")}</p>
+                <p className="text-[10px] text-muted-foreground">{loadingFinancialSummary ? "Atualizando..." : `Competência ${financialSummary.periodLabel || financialPeriod}`}</p>
               </div>
 
               {/* Card 2: Vales Não Utilizados */}
@@ -505,7 +432,7 @@ export default function DashboardPage() {
                   <XCircle size={14} />
                   <p className="text-[10px] font-bold uppercase tracking-wider">Vales Não Utilizados</p>
                 </div>
-                <p className="text-3xl font-bold text-orange-700">{valesNaoUtilizadosCard}</p>
+                <p className="text-3xl font-bold text-orange-700">{financialSummary.valesNaoUtilizados.toLocaleString("pt-BR")}</p>
                 <p className="text-[10px] text-muted-foreground">{descricaoValesNaoUtilizados}</p>
               </div>
 
@@ -515,8 +442,8 @@ export default function DashboardPage() {
                   <DollarSign size={14} />
                   <p className="text-[10px] font-bold uppercase tracking-wider">Crédito Gerado</p>
                 </div>
-                <p className="text-3xl font-bold text-blue-700">{fmt(creditoGerado)}</p>
-                <p className="text-[10px] text-muted-foreground">Vales não utilizados × valor unitário</p>
+                <p className="text-3xl font-bold text-blue-700">{fmt(financialSummary.creditoGerado)}</p>
+                <p className="text-[10px] text-muted-foreground">Descontos reais gerados neste mês</p>
               </div>
 
               {/* Card 4: Compra do Mês */}
@@ -525,8 +452,8 @@ export default function DashboardPage() {
                   <TrendingUp size={14} />
                   <p className="text-[10px] font-bold uppercase tracking-wider">Compra do Mês</p>
                 </div>
-                <p className="text-3xl font-bold text-indigo-700">{fmt(compraDoMes)}</p>
-                <p className="text-[10px] text-muted-foreground">Valor total de compras (dias trabalhados)</p>
+                <p className="text-3xl font-bold text-indigo-700">{fmt(financialSummary.compraDoMes)}</p>
+                <p className="text-[10px] text-muted-foreground">Valor real das compras da competência</p>
               </div>
 
               {/* Card 5: Crédito Aplicado */}
@@ -535,8 +462,8 @@ export default function DashboardPage() {
                   <FileSpreadsheet size={14} />
                   <p className="text-[10px] font-bold uppercase tracking-wider">Crédito Aplicado</p>
                 </div>
-                <p className="text-3xl font-bold text-purple-700">{fmt(creditoAplicado)}</p>
-                <p className="text-[10px] text-muted-foreground">Abatido no mês subsequente</p>
+                <p className="text-3xl font-bold text-purple-700">{fmt(financialSummary.creditoAplicado)}</p>
+                <p className="text-[10px] text-muted-foreground">Crédito de meses anteriores aplicado agora</p>
               </div>
 
               {/* Card 6: Valor da Nota Fiscal */}
@@ -545,7 +472,7 @@ export default function DashboardPage() {
                   <TrendingDown size={14} />
                   <p className="text-[10px] font-bold uppercase tracking-wider">Valor da Nota Fiscal</p>
                 </div>
-                <p className="text-3xl font-bold text-rose-700">{fmt(valorNotaFiscal)}</p>
+                <p className="text-3xl font-bold text-rose-700">{fmt(financialSummary.valorNotaFiscal)}</p>
                 <p className="text-[10px] text-muted-foreground">Compra do mês - Crédito aplicado</p>
               </div>
             </div>
