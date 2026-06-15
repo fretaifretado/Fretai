@@ -42,6 +42,22 @@ function normalizeTurnoKey(name: string): string {
   return (name || "").toLowerCase().replace(/\s+/g, "");
 }
 
+function inferTipoEscala(turnoNome: string, turno?: { tipoEscala: string; escala: string; entrada: string; saida: string } | null): string {
+  const explicit = turno?.tipoEscala?.trim();
+  if (explicit) return explicit;
+
+  const escala = turno?.escala?.trim().toUpperCase() ?? "";
+  if (escala === "SEG/SEX") return "5x2";
+  if (escala === "SEG/SAB" || escala === "DOM/SEX") return "6x1";
+  if (escala === "12X36") return "12x36";
+  if (escala === "24X48") return "24x48";
+
+  const key = normalizeTurnoKey(`${turnoNome} ${turno?.entrada ?? ""} ${turno?.saida ?? ""}`);
+  if (key.includes("adm") || key.includes("administrativo") || key.includes("08:00") || key.includes("17:30")) return "5x2";
+  if (key.includes("primeiro") || key.includes("segundo") || key.includes("terceiro")) return "6x1";
+  return "6x1";
+}
+
 function toIsoDate(date: Date): string {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
@@ -111,10 +127,6 @@ function money(value: unknown): number {
 
 function roundMoney(value: number): number {
   return Math.round(value * 100) / 100;
-}
-
-function countCalendarDays(from: Date, to: Date): number {
-  return Math.max(0, Math.floor((to.getTime() - from.getTime()) / 86400000) + 1);
 }
 
 function countWorkDays(from: Date, to: Date, tipoEscala: string, anchor?: Date | null): number {
@@ -257,13 +269,10 @@ export async function createUnusedValeDiscountForEmployee(params: {
 
       const from = inicio && effectiveDate < inicio ? inicio : effectiveDate;
       const turno = shifts.find(s => normalizeTurnoKey(s.nome) === normalizeTurnoKey(order.turno));
+      const tipoEscala = inferTipoEscala(order.turno, turno);
       let remainingDays = 0;
-      if (fim && inicio && turno?.tipoEscala) {
-        remainingDays = countWorkDays(from, fim, turno.tipoEscala, anchor);
-      } else if (fim && inicio) {
-        const totalCalendar = countCalendarDays(inicio, fim);
-        const remainingCalendar = countCalendarDays(from, fim);
-        remainingDays = Math.ceil((order.dias || 0) * (remainingCalendar / Math.max(1, totalCalendar)));
+      if (fim && inicio) {
+        remainingDays = countWorkDays(from, fim, tipoEscala, anchor);
       }
 
       const unusedVales = Math.min(order.vales, Math.max(0, remainingDays * 2));

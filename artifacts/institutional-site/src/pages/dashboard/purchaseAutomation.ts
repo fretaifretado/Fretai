@@ -80,6 +80,22 @@ export function normalizeTurnoKey(name: string): string {
   return (name || "").toLowerCase().replace(/\s+/g, "");
 }
 
+export function inferTipoEscala(turnoNome: string, turno?: Pick<Turno, "tipoEscala" | "escala" | "entrada" | "saida">): string {
+  const explicit = turno?.tipoEscala?.trim();
+  if (explicit) return explicit;
+
+  const escala = turno?.escala?.trim().toUpperCase() ?? "";
+  if (escala === "SEG/SEX") return "5x2";
+  if (escala === "SEG/SAB" || escala === "DOM/SEX") return "6x1";
+  if (escala === "12X36") return "12x36";
+  if (escala === "24X48") return "24x48";
+
+  const key = normalizeTurnoKey(`${turnoNome} ${turno?.entrada ?? ""} ${turno?.saida ?? ""}`);
+  if (key.includes("adm") || key.includes("administrativo") || key.includes("08:00") || key.includes("17:30")) return "5x2";
+  if (key.includes("primeiro") || key.includes("segundo") || key.includes("terceiro")) return "6x1";
+  return "6x1";
+}
+
 export function parseInicioOp(raw: string | null | undefined): Date | null {
   if (!raw) return null;
   const s = String(raw).trim();
@@ -370,7 +386,7 @@ export function buildPurchasePreview(params: {
   return getEligibleEmployees(colaboradores)
     .map(c => {
       const t = turnos.find(x => normalizeTurnoKey(x.nome) === normalizeTurnoKey(c.turno));
-      const escala = t?.tipoEscala ?? "";
+      const escala = inferTipoEscala(c.turno, t);
       const { dias, proRata, fromDay } = calcularDiasNoMes(escala, c.inicioOperacao, periodoAno, periodoMes, feriados);
       const vales = dias * 2;
       const total = vales * valeDiario;

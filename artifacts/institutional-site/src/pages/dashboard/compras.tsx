@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import DashboardLayout from "./layout";
 import { CreditCard, CalendarClock, AlertTriangle } from "lucide-react";
 import { useDashboard, type Colaborador } from "./context";
-import { processCompanyPurchaseOrders } from "./purchaseAutomation";
+import { inferTipoEscala, processCompanyPurchaseOrders } from "./purchaseAutomation";
 
 type StatusPedido = "Processando" | "Aprovado" | "Cancelado";
 
@@ -462,7 +462,7 @@ export default function ComprasPage() {
     return colaboradoresElegiveis
       .map(c => {
         const t = turnos.find(x => normalizeTurnoKey(x.nome) === normalizeTurnoKey(c.turno));
-        const escala = t?.tipoEscala ?? "";
+        const escala = inferTipoEscala(c.turno, t);
         const { dias, proRata, fromDay } = calcularDiasNoMes(escala, c.inicioOperacao, periodoAno, periodoMes, todosFeriados);
         const vales = dias * 2;
         const total = vales * valeDiario;
@@ -505,9 +505,11 @@ export default function ComprasPage() {
         setAutoError("");
         if (saved.length > 0) {
           setPedidos(prev => {
+            const savedById = new Map(saved.map(p => [p.id, p]));
             const existingIds = new Set(prev.map(p => p.id));
+            const atualizados = prev.map(p => savedById.get(p.id) ?? p);
             const novos = saved.filter(p => !existingIds.has(p.id));
-            return novos.length > 0 ? [...novos, ...prev] : prev;
+            return novos.length > 0 || saved.some(p => existingIds.has(p.id)) ? [...novos, ...atualizados] : prev;
           });
         }
     })
