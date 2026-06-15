@@ -1,7 +1,7 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
 import { db } from "@workspace/db";
-import { companiesTable, usersTable, employeesTable, employeeMovementsTable, companyShiftsTable, companyHolidaysTable } from "@workspace/db/schema";
+import { companiesTable, usersTable, employeesTable, employeeMovementsTable, companyShiftsTable, companyHolidaysTable, passwordResetTokensTable } from "@workspace/db/schema";
 import { eq, desc, or, inArray, isNull, and } from "drizzle-orm";
 import { requireAdmin, requireAuth, getAuth } from "../middlewares/auth";
 import { logAudit } from "../services/audit";
@@ -10,6 +10,19 @@ const router = Router();
 
 function cleanCnpj(v: string) { return v.replace(/\D/g, ""); }
 function cleanCpf(v: string) { return v.replace(/\D/g, ""); }
+function publicCompanyUser(user: { id: number; name: string | null; email: string; role: string; createdAt?: Date | string | null }) {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    createdAt: user.createdAt instanceof Date ? user.createdAt.toISOString() : user.createdAt,
+  };
+}
+
+function generateInitialPassword(): string {
+  return Math.random().toString(36).slice(2, 10);
+}
 
 /* ── Administrador: listar empresas (apenas raiz — sem parentCompanyId) ── */
 router.get("/admin/companies", requireAdmin, async (req, res) => {
@@ -710,6 +723,7 @@ router.post("/companies/:id/users", requireAuth("platform_admin"), async (req, r
       passwordHash,
       role: role as "cliente_master" | "cliente_subadmin",
       entityId: companyId,
+      entityType: "company",
     }).returning();
 
     await logAudit({
@@ -743,6 +757,178 @@ router.delete("/companies/:id/users/:userId", requireAuth("platform_admin"), asy
     res.status(204).end();
   } catch (err) {
     req.log.error({ err }, "Error deleting company user");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ── Minha conta: perfil ── */
+router.get("/me/profile", requireAuth("cliente_master", "cliente_subadmin"), async (req, res) => {
+  const auth = getAuth(req);
+  if (typeof auth.sub !== "number") { res.status(400).json({ error: "Usuário inválido" }); return; }
+  try {
+    const [user] = await db
+      .select({ id: usersTable.id, name: usersTable.name, email: usersTable.email, role: usersTable.role, entityId: usersTable.entityId, createdAt: usersTable.createdAt })
+      .from(usersTable)
+      .where(eq(usersTable.id, auth.sub))
+      .limit(1);
+    if (!user) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
+    res.json(publicCompanyUser(user));
+  } catch (err) {
+    req.log.error({ err }, "Error fetching my profile");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+router.put("/me/profile", requireAuth("cliente_master", "cliente_subadmin"), async (req, res) => {
+  const auth = getAuth(req);
+  if (typeof auth.sub !== "number") { res.status(400).json({ error: "Usuário inválido" }); return; }
+  const { name, currentPassword, newPassword } = req.body as { name?: string; currentPassword?: string; newPassword?: string };
+  const trimmedName = name?.trim();
+  const trimmedNewPassword = newPassword?.trim();
+  const updates: Record<string, unknown> = { updatedAt: new Date() };
+
+  if (trimmedName !== undefined) {
+    if (trimmedName.length < 2) { res.status(400).json({ error: "Nome deve ter ao menos 2 caracteres" }); return; }
+    updates.name = trimmedName;
+  }
+  if (trimmedNewPassword) {
+    if (trimmedNewPassword.length < 6) { res.status(400).json({ error: "A nova senha deve ter ao menos 6 caracteres" }); return; }
+    if (!currentPassword?.trim()) { res.status(400).json({ error: "Senha atual é obrigatória" }); return; }
+  }
+
+  try {
+    const [user] = await db.select().from(usersTable).where(eq(usersTable.id, auth.sub)).limit(1);
+    if (!user) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
+    if (trimmedNewPassword) {
+      const valid = await bcrypt.compare(currentPassword!.trim(), user.passwordHash);
+      if (!valid) { res.status(401).json({ error: "Senha atual incorreta" }); return; }
+      updates.passwordHash = await bcrypt.hash(trimmedNewPassword, 12);
+      updates.forcePasswordChange = false;
+    }
+
+    const [updated] = await db.update(usersTable).set(updates).where(eq(usersTable.id, auth.sub)).returning();
+    if (!updated) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
+
+    const action = trimmedNewPassword && trimmedName !== undefined ? "update_profile_and_password" : trimmedNewPassword ? "change_password" : "update_profile";
+    await logAudit({
+      userId: auth.sub,
+      userEmail: auth.email,
+      companyId: auth.entityId,
+      action,
+      entityType: "user",
+      entityId: auth.sub,
+      newValue: { name: updated.name, passwordChanged: Boolean(trimmedNewPassword) },
+    });
+
+    res.json(publicCompanyUser(updated));
+  } catch (err) {
+    req.log.error({ err }, "Error updating my profile");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+/* ── Minha empresa: usuários de acesso ── */
+router.get("/me/users", requireAuth("cliente_master"), async (req, res) => {
+  const auth = getAuth(req);
+  const companyId = auth.entityId;
+  if (typeof companyId !== "number") { res.status(400).json({ error: "Empresa não identificada" }); return; }
+  try {
+    const users = await db
+      .select({ id: usersTable.id, name: usersTable.name, email: usersTable.email, role: usersTable.role, createdAt: usersTable.createdAt })
+      .from(usersTable)
+      .where(and(eq(usersTable.entityId, companyId), inArray(usersTable.role, ["cliente_master", "cliente_subadmin"])))
+      .orderBy(usersTable.createdAt);
+    res.json(users.map(publicCompanyUser));
+  } catch (err) {
+    req.log.error({ err }, "Error listing my company users");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+router.post("/me/users", requireAuth("cliente_master"), async (req, res) => {
+  const auth = getAuth(req);
+  const companyId = auth.entityId;
+  if (typeof companyId !== "number") { res.status(400).json({ error: "Empresa não identificada" }); return; }
+  const { name, email, role = "cliente_master" } = req.body as { name?: string; email?: string; role?: string };
+  if (!name?.trim() || !email?.trim()) { res.status(400).json({ error: "Nome e e-mail são obrigatórios" }); return; }
+  if (!["cliente_master", "cliente_subadmin"].includes(role)) { res.status(400).json({ error: "Perfil inválido" }); return; }
+
+  try {
+    const emailLower = email.trim().toLowerCase();
+    const existing = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.email, emailLower)).limit(1);
+    if (existing.length > 0) { res.status(409).json({ error: "E-mail já cadastrado no sistema" }); return; }
+
+    const initialPassword = generateInitialPassword();
+    const passwordHash = await bcrypt.hash(initialPassword, 12);
+    const [user] = await db.insert(usersTable).values({
+      name: name.trim(),
+      email: emailLower,
+      passwordHash,
+      role: role as "cliente_master" | "cliente_subadmin",
+      entityId: companyId,
+      entityType: "company",
+      forcePasswordChange: true,
+      isActive: true,
+    }).returning();
+
+    if (!user) throw new Error("Erro ao criar usuário");
+    await logAudit({
+      userId: auth.sub as number,
+      userEmail: auth.email,
+      companyId,
+      action: "create_company_user",
+      entityType: "user",
+      entityId: user.id,
+      newValue: { name: user.name, email: user.email, role: user.role },
+    });
+
+    res.status(201).json({ ...publicCompanyUser(user), initialPassword });
+  } catch (err) {
+    req.log.error({ err }, "Error creating my company user");
+    res.status(500).json({ error: "Erro interno" });
+  }
+});
+
+router.delete("/me/users/:userId", requireAuth("cliente_master"), async (req, res) => {
+  const auth = getAuth(req);
+  const companyId = auth.entityId;
+  const userId = parseInt(req.params.userId as string, 10);
+  if (typeof companyId !== "number") { res.status(400).json({ error: "Empresa não identificada" }); return; }
+  if (isNaN(userId)) { res.status(400).json({ error: "ID inválido" }); return; }
+  if (typeof auth.sub === "number" && auth.sub === userId) { res.status(400).json({ error: "Você não pode excluir a própria conta" }); return; }
+
+  try {
+    const [user] = await db.select().from(usersTable)
+      .where(and(eq(usersTable.id, userId), eq(usersTable.entityId, companyId), inArray(usersTable.role, ["cliente_master", "cliente_subadmin"])))
+      .limit(1);
+    if (!user) { res.status(404).json({ error: "Usuário não encontrado" }); return; }
+
+    const masters = await db.select({ id: usersTable.id }).from(usersTable)
+      .where(and(eq(usersTable.entityId, companyId), eq(usersTable.role, "cliente_master")));
+    if (user.role === "cliente_master" && masters.length <= 1) {
+      res.status(400).json({ error: "Não é possível excluir o último master da empresa" }); return;
+    }
+
+    const [company] = await db.select({ masterUserId: companiesTable.masterUserId }).from(companiesTable).where(eq(companiesTable.id, companyId)).limit(1);
+    if (company?.masterUserId === userId) {
+      const replacement = masters.find(master => master.id !== userId);
+      await db.update(companiesTable).set({ masterUserId: replacement?.id ?? null, updatedAt: new Date() }).where(eq(companiesTable.id, companyId));
+    }
+
+    await db.delete(passwordResetTokensTable).where(eq(passwordResetTokensTable.userId, userId));
+    await db.delete(usersTable).where(eq(usersTable.id, userId));
+    await logAudit({
+      userId: auth.sub as number,
+      userEmail: auth.email,
+      companyId,
+      action: "delete_company_user",
+      entityType: "user",
+      entityId: userId,
+      newValue: { email: user.email, role: user.role },
+    });
+    res.status(204).end();
+  } catch (err) {
+    req.log.error({ err }, "Error deleting my company user");
     res.status(500).json({ error: "Erro interno" });
   }
 });

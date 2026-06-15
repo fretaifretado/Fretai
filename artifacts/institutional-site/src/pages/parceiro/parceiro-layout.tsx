@@ -26,6 +26,7 @@ export default function ParceiroLayout({ children }: LayoutProps) {
     localStorage.removeItem("jwt_username");
     localStorage.removeItem("jwt_displayname");
     localStorage.removeItem("jwt_role");
+    localStorage.removeItem("jwt_user_id");
     window.location.href = "/login";
   }
 

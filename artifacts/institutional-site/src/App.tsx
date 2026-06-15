@@ -32,6 +32,7 @@ const ComprasPage          = lazy(() => import("@/pages/dashboard/compras"));
 const NotasFiscaisPage     = lazy(() => import("@/pages/dashboard/notas-fiscais"));
 const FeriadosPage         = lazy(() => import("@/pages/dashboard/feriados"));
 const TurnosPage           = lazy(() => import("@/pages/dashboard/turnos"));
+const UsuariosPage         = lazy(() => import("@/pages/dashboard/usuarios"));
 const GruposPage           = lazy(() => import("@/pages/dashboard/grupos"));
 const FiliaisPage          = lazy(() => import("@/pages/dashboard/filiais"));
 const DemoGateway          = lazy(() => import("@/pages/dashboard/demo"));
@@ -86,6 +87,7 @@ function Router() {
               <Route path="/painel/notas-fiscais"      component={NotasFiscaisPage} />
               <Route path="/painel/feriados"           component={FeriadosPage} />
               <Route path="/painel/turnos"             component={TurnosPage} />
+              <Route path="/painel/usuarios"           component={UsuariosPage} />
               <Route path="/painel/grupos"             component={GruposPage} />
               <Route path="/painel/filiais"            component={FiliaisPage} />
             </Switch>

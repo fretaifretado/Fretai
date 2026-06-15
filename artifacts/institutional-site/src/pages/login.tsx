@@ -116,6 +116,7 @@ export default function Login() {
         localStorage.setItem("jwt_username", data.email!);
         localStorage.setItem("jwt_displayname", data.name ?? data.email!);
         localStorage.setItem("jwt_role", data.role ?? "");
+        if (data.userId) localStorage.setItem("jwt_user_id", String(data.userId));
         if (data.entityId) localStorage.setItem("jwt_entity_id", String(data.entityId));
 
         const redirect = sessionStorage.getItem("redirect_after_login");
@@ -174,6 +175,7 @@ export default function Login() {
       localStorage.setItem("jwt_username", pendingEmail!);
       localStorage.setItem("jwt_displayname", pendingName ?? pendingEmail!);
       localStorage.setItem("jwt_role", pendingRole ?? "");
+      if (pendingUserId) localStorage.setItem("jwt_user_id", String(pendingUserId));
       if (pendingEntityId) localStorage.setItem("jwt_entity_id", String(pendingEntityId));
 
       const redirect = sessionStorage.getItem("redirect_after_login");

@@ -4,11 +4,12 @@ import {
   LayoutDashboard, Users, Shuffle, AlertTriangle,
   CalendarClock, Radio, Calendar, CreditCard, FileText, CalendarDays,
   Clock, ChevronDown, LogOut, Settings, Bell, Menu, X, Building2,
-  Pencil, Check,
+  Pencil, Check, UserCog,
 } from "lucide-react";
 import { useDashboard } from "./context";
+import { ProfileSettingsModal } from "./ProfileSettingsModal";
 
-interface NavItem { icon: React.ElementType; label: string; path: string }
+interface NavItem { icon: React.ElementType; label: string; path: string; roles?: string[] }
 interface NavSection { title?: string; items: NavItem[] }
 
 const NAV: NavSection[] = [
@@ -43,6 +44,7 @@ const NAV: NavSection[] = [
     items: [
       { icon: CalendarDays, label: "Feriados",  path: "/painel/feriados" },
       { icon: Clock,        label: "Turnos",    path: "/painel/turnos" },
+      { icon: UserCog,      label: "Usuários",  path: "/painel/usuarios", roles: ["cliente_master"] },
     ],
   },
 ];
@@ -54,15 +56,16 @@ export default function DashboardLayout({ children, alertMessage }: LayoutProps)
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [companyMenuOpen, setCompanyMenuOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const [authed, setAuthed] = useState(false);
   const { empresaAtiva, nomeEmpresaAtiva, filiais, filialAtiva, setFilialAtiva, colaboradoresDaFilial: colaboradores } = useDashboard();
 
   // Nome do usuário vem do localStorage — agora salva o name real
-  const userName = localStorage.getItem("jwt_displayname")
-    ?? localStorage.getItem("jwt_username")
-    ?? "Usuário";
+  const [profileName, setProfileName] = useState(() => localStorage.getItem("jwt_displayname") ?? localStorage.getItem("jwt_username") ?? "Usuário");
+  const userName = profileName || localStorage.getItem("jwt_username") || "Usuário";
   const displayName = userName.includes("@") ? userName.split("@")[0] : userName;
   const initial = displayName.charAt(0).toUpperCase();
+  const currentRole = localStorage.getItem("jwt_role") ?? "";
 
   const pendencias = colaboradores.filter(c =>
     c.status !== "Desligado" && (
@@ -83,7 +86,14 @@ export default function DashboardLayout({ children, alertMessage }: LayoutProps)
     localStorage.removeItem("jwt_username");
     localStorage.removeItem("jwt_displayname");
     localStorage.removeItem("jwt_role");
+    localStorage.removeItem("jwt_user_id");
+    localStorage.removeItem("jwt_entity_id");
     setLocation("/login");
+  }
+
+  function openProfile() {
+    setUserMenuOpen(false);
+    setProfileOpen(true);
   }
 
   const isActive = (path: string) =>
@@ -109,7 +119,7 @@ export default function DashboardLayout({ children, alertMessage }: LayoutProps)
               <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-400" />
             </button>
           )}
-          <button className="flex items-center justify-center h-9 w-9 rounded-lg hover:bg-white/10 transition-colors">
+          <button onClick={openProfile} className="flex items-center justify-center h-9 w-9 rounded-lg hover:bg-white/10 transition-colors" title="Editar perfil">
             <Settings size={17} />
           </button>
           <div className="relative ml-2">
@@ -126,7 +136,7 @@ export default function DashboardLayout({ children, alertMessage }: LayoutProps)
                     <p className="font-semibold text-sm text-foreground capitalize">{displayName}</p>
                     <p className="text-xs text-muted-foreground">{nomeEmpresaAtiva}</p>
                   </div>
-                  <button className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-foreground hover:bg-muted/60 transition-colors">
+                  <button onClick={openProfile} className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-foreground hover:bg-muted/60 transition-colors">
                     <Pencil size={14} className="text-muted-foreground" />Editar perfil
                   </button>
                   <button onClick={logout} className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-destructive hover:bg-destructive/5 transition-colors">
@@ -203,7 +213,7 @@ export default function DashboardLayout({ children, alertMessage }: LayoutProps)
             )}
 
             <div className="flex gap-2 mt-2">
-              <button className="flex-1 text-xs text-primary-foreground/50 hover:text-white transition-colors flex items-center gap-1"><Pencil size={10} />Editar perfil</button>
+              <button onClick={openProfile} className="flex-1 text-xs text-primary-foreground/50 hover:text-white transition-colors flex items-center gap-1"><Pencil size={10} />Editar perfil</button>
               <button onClick={logout} className="flex-1 text-xs text-primary-foreground/50 hover:text-red-400 transition-colors flex items-center gap-1 justify-end"><LogOut size={10} />Sair</button>
             </div>
           </div>
@@ -217,7 +227,7 @@ export default function DashboardLayout({ children, alertMessage }: LayoutProps)
             {NAV.map((section, si) => (
               <div key={si} className="mb-1">
                 {section.title && <p className="text-[10px] font-bold uppercase tracking-widest text-primary-foreground/30 px-4 py-2 mt-2">{section.title}</p>}
-                {section.items.map(item => (
+                {section.items.filter(item => !item.roles || item.roles.includes(currentRole)).map(item => (
                   <Link key={item.path} href={item.path}>
                     <button onClick={() => setSidebarOpen(false)} className={`
                       w-full flex items-center gap-2.5 px-4 py-2.5 text-sm transition-colors text-left
@@ -242,6 +252,12 @@ export default function DashboardLayout({ children, alertMessage }: LayoutProps)
 
         <main className="flex-1 overflow-y-auto h-[calc(100vh-3.5rem)]">{children}</main>
       </div>
+      <ProfileSettingsModal
+        open={profileOpen}
+        currentName={profileName}
+        onClose={() => setProfileOpen(false)}
+        onSaved={setProfileName}
+      />
     </div>
   );
 }

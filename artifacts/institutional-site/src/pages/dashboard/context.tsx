@@ -302,6 +302,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       localStorage.removeItem("jwt_username");
       localStorage.removeItem("jwt_displayname");
       localStorage.removeItem("jwt_role");
+      localStorage.removeItem("jwt_user_id");
       window.location.href = "/login";
       return;
     }
@@ -314,6 +315,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       localStorage.removeItem("jwt_username");
       localStorage.removeItem("jwt_displayname");
       localStorage.removeItem("jwt_role");
+      localStorage.removeItem("jwt_user_id");
       window.location.href = "/login";
     }
 
