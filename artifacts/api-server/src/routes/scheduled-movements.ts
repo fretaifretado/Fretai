@@ -137,7 +137,7 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
           if (activeOrders.length > 0) {
             // 2) Cancel all active orders
             await tx.update(purchaseOrdersTable)
-              .set({ status: "Cancelado", updatedAt: new Date() })
+              .set({ status: "Cancelado" })
               .where(and(
                 eq(purchaseOrdersTable.companyId, oldCompanyId),
                 eq(purchaseOrdersTable.employeeId, t.colaboradorId),

@@ -19,6 +19,7 @@ import AuditSection from "./admin-sections/AuditSection";
 import VehicleTypesSection from "./admin-sections/VehicleTypesSection";
 import BudgetsSection from "./admin-sections/BudgetsSection";
 import { ScheduledMovementsSection } from "./admin-sections/ScheduledMovementsSection";
+import { apiUrl } from "@/lib/api";
 
 interface Client {
   id: number;
@@ -169,7 +170,7 @@ export default function Admin() {
   const fetchClients = useCallback(async () => {
     setLoading(true); setError("");
     try {
-      const res = await fetch("/api/admin/clients", { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(apiUrl("/api/admin/clients"), { headers: { Authorization: `Bearer ${token}` } });
       if (res.status === 401) { localStorage.removeItem("admin_token"); setLocation("/login"); return; }
       if (!res.ok) { setError("Erro ao carregar usuários."); setClients([]); return; }
       const data = await res.json();
@@ -183,10 +184,10 @@ export default function Admin() {
     try {
       const headers = { Authorization: `Bearer ${token}` };
       const [companiesRes, partnersRes, auditRes, pendingMovementsRes] = await Promise.all([
-        fetch("/api/admin/companies", { headers }),
-        fetch("/api/admin/partners", { headers }),
-        fetch("/api/admin/audit-logs?limit=8", { headers }),
-        fetch("/api/admin/pending-scheduled-movements", { headers }),
+        fetch(apiUrl("/api/admin/companies"), { headers }),
+        fetch(apiUrl("/api/admin/partners"), { headers }),
+        fetch(apiUrl("/api/admin/audit-logs?limit=8"), { headers }),
+        fetch(apiUrl("/api/admin/pending-scheduled-movements"), { headers }),
       ]);
       if (companiesRes.ok) setDashCompanies(await companiesRes.json() as DashCompany[]);
       if (partnersRes.ok) setDashPartners(await partnersRes.json() as DashPartner[]);
@@ -223,7 +224,7 @@ export default function Admin() {
   async function onSubmit(values: ClientForm) {
     setFormLoading(true); setFormError("");
     try {
-      const url = editingClient ? `/api/admin/clients/${editingClient.id}` : "/api/admin/clients";
+      const url = apiUrl(editingClient ? `/api/admin/clients/${editingClient.id}` : "/api/admin/clients");
       const res = await fetch(url, {
         method: editingClient ? "PUT" : "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -238,7 +239,7 @@ export default function Admin() {
 
   async function handleDelete(id: number) {
     try {
-      await fetch(`/api/admin/clients/${id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      await fetch(apiUrl(`/api/admin/clients/${id}`), { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
       setDeleteId(null); await fetchClients();
     } catch { setError("Erro ao excluir."); }
   }

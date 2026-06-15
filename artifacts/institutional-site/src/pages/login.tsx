@@ -7,8 +7,7 @@ import { Lock, Mail, Eye, EyeOff, AlertCircle, CheckCircle } from "lucide-react"
 import { Button } from "@/components/ui/button";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-
-const API_BASE = import.meta.env.VITE_API_URL ?? "";
+import { apiUrl } from "@/lib/api";
 
 const loginSchema = z.object({
   email: z.string().min(1, "Usuário ou e-mail é obrigatório"),
@@ -72,7 +71,7 @@ export default function Login() {
       const isAdminLogin = !emailTrimmed.includes("@");
 
       if (isAdminLogin) {
-        const res = await fetch(`${API_BASE}/api/auth/admin/login`, {
+        const res = await fetch(apiUrl("/api/auth/admin/login"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ username: emailTrimmed, password: passwordTrimmed }),
@@ -85,7 +84,7 @@ export default function Login() {
         localStorage.setItem("admin_role", data.role ?? "platform_admin");
         setLocation("/admin");
       } else {
-        const res = await fetch(`${API_BASE}/api/auth/login`, {
+        const res = await fetch(apiUrl("/api/auth/login"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email: emailTrimmed, password: passwordTrimmed }),
@@ -141,7 +140,7 @@ export default function Login() {
   async function onForgot(values: ForgotForm) {
     setForgotLoading(true);
     try {
-      await fetch(`${API_BASE}/api/auth/forgot-password`, {
+      await fetch(apiUrl("/api/auth/forgot-password"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: values.email.trim().toLowerCase() }),
@@ -159,7 +158,7 @@ export default function Login() {
     setChangeLoading(true);
     setError("");
     try {
-      const res = await fetch(`${API_BASE}/api/auth/change-password`, {
+      const res = await fetch(apiUrl("/api/auth/change-password"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

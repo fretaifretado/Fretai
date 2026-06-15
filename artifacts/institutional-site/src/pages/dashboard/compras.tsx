@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import DashboardLayout from "./layout";
 import { CreditCard, CalendarClock, AlertTriangle } from "lucide-react";
 import { useDashboard, type Colaborador } from "./context";
+import { processCompanyPurchaseOrders } from "./purchaseAutomation";
 
 type StatusPedido = "Processando" | "Aprovado" | "Cancelado";
 
@@ -262,10 +263,26 @@ function calcularDiasNoMes(
 }
 
 const API_URL = import.meta.env.VITE_API_URL ?? "";
+const REQUEST_TIMEOUT_MS = 15000;
 
 function getAuthHeaders(): HeadersInit {
   const token = localStorage.getItem("jwt_token") ?? "";
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error("Tempo esgotado ao comunicar com a API de compras");
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timeout);
+  }
 }
 
 export default function ComprasPage() {
@@ -283,6 +300,7 @@ export default function ComprasPage() {
   const [pedidos, setPedidos] = useState<PedidoCompra[]>([]);
   const [loadingPedidos, setLoadingPedidos] = useState(true);
   const [savingPedidos, setSavingPedidos] = useState(false);
+  const [autoError, setAutoError] = useState("");
   const [periodoAno] = useState(defaultAno);
   const [periodoMes] = useState(defaultMes);
 
@@ -340,9 +358,8 @@ export default function ComprasPage() {
 
   const fetchPedidos = useCallback(async (cid: number) => {
     setLoadingPedidos(true);
-    fetchedCompanyRef.current = null; // mark as fetching
     try {
-      const res = await fetch(`${API_URL}/api/me/purchase-orders?companyId=${cid}`, {
+      const res = await fetchWithTimeout(`${API_URL}/api/me/purchase-orders?companyId=${cid}`, {
         headers: getAuthHeaders(),
       });
       if (!res.ok) {
@@ -384,7 +401,6 @@ export default function ComprasPage() {
     } catch (err) {
       console.error("[compras] erro ao carregar pedidos:", err);
     } finally {
-      fetchedCompanyRef.current = cid; // mark fetch complete for this company
       setLoadingPedidos(false);
     }
   }, []);
@@ -395,6 +411,13 @@ export default function ComprasPage() {
     } else {
       setLoadingPedidos(false);
     }
+  }, [companyId, fetchPedidos]);
+
+  useEffect(() => {
+    if (!companyId) return;
+    const onUpdated = () => void fetchPedidos(companyId);
+    window.addEventListener("purchase-orders:updated", onUpdated);
+    return () => window.removeEventListener("purchase-orders:updated", onUpdated);
   }, [companyId, fetchPedidos]);
 
   // Usa todosColaboradores para saber se o contexto já carregou
@@ -451,109 +474,64 @@ export default function ComprasPage() {
       .filter(item => item.dias > 0);
   }, [colaboradoresElegiveis, turnos, periodoAno, periodoMes, valeDiario, todosFeriados, feriadosLoaded]);
 
-  const autoGeradoParaRef = useRef<string>("");
-  const fetchedCompanyRef  = useRef<number | null>(null);
-
-  async function salvarItens(items: PreviewItem[], cid: number): Promise<void> {
-    const res = await fetch(`${API_URL}/api/me/purchase-orders`, {
-      method: "POST",
-      headers: getAuthHeaders(),
-      body: JSON.stringify({
-        companyId: cid,
-        items: items.map(item => ({
-          employeeId: item.colaborador.id,
-          nome: item.colaborador.nome,
-          turno: item.turnoNome,
-          periodo: item.periodo,
-          dataInicio: item.dataInicio,
-          dataFim: item.dataFim,
-          dias: item.dias,
-          vales: item.vales,
-          valorUnit: item.valorUnit,
-          total: item.total,
-          proRata: item.proRata,
-        })),
-      }),
-    });
-
-    if (res.ok) {
-      const saved = await res.json() as {
-        id: number;
-        employeeId: number | null;
-        nome: string;
-        turno: string;
-        periodo: string;
-        dataInicio: string;
-        dataFim: string;
-        dias: number;
-        vales: number;
-        valorUnit: string;
-        total: string;
-        status: StatusPedido;
-        proRata: boolean;
-      }[];
-      const novos: PedidoCompra[] = saved.map(o => ({
-        id: o.id,
-        colaboradorId: o.employeeId ?? 0,
-        nome: o.nome,
-        turno: o.turno,
-        periodo: o.periodo,
-        dataInicio: o.dataInicio,
-        dataFim: o.dataFim,
-        dias: o.dias,
-        vales: o.vales,
-        valorUnit: parseFloat(o.valorUnit),
-        total: parseFloat(o.total),
-        status: o.status,
-        proRata: o.proRata,
-      }));
-      setPedidos(prev => [...novos, ...prev]);
-    } else {
-      console.error("[compras] erro ao salvar pedidos:", await res.text());
-    }
-  }
-
   /**
    * Current period label used to detect which orders already exist for this period.
    * e.g. "Mai/2026"
    */
   const periodoLabel = `${MESES_CURTO[periodoMes - 1]}/${periodoAno}`;
-
-  /**
-   * Key representing all eligible collaborator IDs + current period.
-   * Changes whenever collaborators are added/removed or the period changes.
-   */
-  const colaboradoresKey = `${periodoLabel}:${colaboradoresElegiveis.map(c => c.id).sort().join(",")}`;
+  const autoGeradoParaRef = useRef("");
 
   useEffect(() => {
-    if (loadingPedidos || savingPedidos || companyId === null) return;
-    if (!contextCarregado) return; // aguarda contexto carregar colaboradores
-    if (fetchedCompanyRef.current !== companyId) return; // aguarda fetch terminar para este companyId
-    if (previewItems.length === 0) return;
-    if (autoGeradoParaRef.current === colaboradoresKey) return;
+    if (!companyId || loadingPedidos || savingPedidos) return;
+    if (!contextCarregado || !feriadosLoaded || previewItems.length === 0) return;
 
-    // IDs dos colaboradores que já têm pedido no período atual
-    const jaGeradosIds = new Set(
-      pedidos
-        .filter(p => p.periodo === periodoLabel && p.colaboradorId > 0)
-        .map(p => p.colaboradorId),
-    );
+    const colaboradoresKey = previewItems.map(item => item.colaborador.id).sort((a, b) => a - b).join(",");
+    const runKey = `${companyId}:${periodoLabel}:${colaboradoresKey}`;
+    if (autoGeradoParaRef.current === runKey) return;
 
-    // Itens sem pedido ainda
-    const faltando = previewItems.filter(item => !jaGeradosIds.has(item.colaborador.id));
-
-    if (faltando.length === 0) {
-      autoGeradoParaRef.current = colaboradoresKey;
-      return;
-    }
-
-    autoGeradoParaRef.current = colaboradoresKey;
+    autoGeradoParaRef.current = runKey;
     setSavingPedidos(true);
-    salvarItens(faltando, companyId)
-      .catch(err => console.error("[compras] auto-geração falhou:", err))
+
+    processCompanyPurchaseOrders({
+      companyId,
+      colaboradores,
+      turnos,
+      periodoAno,
+      periodoMes,
+      valeDiario,
+      feriados: todosFeriados,
+    })
+      .then(saved => {
+        setAutoError("");
+        if (saved.length > 0) {
+          setPedidos(prev => {
+            const existingIds = new Set(prev.map(p => p.id));
+            const novos = saved.filter(p => !existingIds.has(p.id));
+            return novos.length > 0 ? [...novos, ...prev] : prev;
+          });
+        }
+    })
+      .catch(err => {
+        console.error("[compras] geração ao abrir a aba falhou:", err);
+        setAutoError(err instanceof Error ? err.message : "Erro ao gerar compras automaticamente.");
+      })
       .finally(() => setSavingPedidos(false));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadingPedidos, savingPedidos, pedidos, previewItems, companyId, colaboradoresKey, periodoLabel]);
+  }, [
+    colaboradores,
+    companyId,
+    contextCarregado,
+    feriadosLoaded,
+    fetchPedidos,
+    loadingPedidos,
+    periodoAno,
+    periodoLabel,
+    periodoMes,
+    previewItems,
+    savingPedidos,
+    todosFeriados,
+    turnos,
+    valeDiario,
+  ]);
 
   const totalGasto          = pedidos.reduce((a, p) => a + p.total, 0);
   const totalValesHistorico = pedidos.reduce((a, p) => a + p.vales, 0);
@@ -629,10 +607,20 @@ export default function ComprasPage() {
           </div>
         )}
 
+        {autoError && (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-5 flex items-start gap-3">
+            <AlertTriangle size={16} className="text-red-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-semibold text-red-800">Não foi possível gerar as compras automaticamente.</p>
+              <p className="text-xs text-red-700 mt-0.5">{autoError}</p>
+            </div>
+          </div>
+        )}
+
         <div className="bg-card border rounded-xl shadow-sm overflow-hidden mb-5">
           {loadingPedidos || (savingPedidos && pedidos.length === 0) ? (
             <div className="py-16 text-center text-sm text-muted-foreground">
-              {savingPedidos && pedidos.length === 0 ? "Gerando compras automaticamente…" : "Carregando histórico…"}
+              {savingPedidos && pedidos.length === 0 ? "Gerando compras automaticamente..." : "Carregando histórico..."}
             </div>
           ) : pedidos.length === 0 ? (
             <div className="py-16 text-center text-sm text-muted-foreground">
@@ -654,11 +642,7 @@ export default function ComprasPage() {
                       <td className="px-5 py-3.5">
                         <p className="font-medium text-foreground">{p.nome}</p>
                         <p className="text-xs text-muted-foreground font-mono">{p.dataInicio} – {p.dataFim}</p>
-                        {p.proRata && (
-                          <span className="inline-flex items-center mt-0.5 px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-medium border border-amber-200">
-                            Pro-rata · a partir de {p.dataInicio}
-                          </span>
-                        )}
+                        
                       </td>
                       <td className="px-5 py-3.5 text-muted-foreground text-xs">{p.turno}</td>
                       <td className="px-5 py-3.5 text-muted-foreground">{p.periodo}</td>

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Car, Plus, Trash2, X, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { apiUrl } from "@/lib/api";
 
 interface VehicleType {
   id: number;
@@ -29,7 +30,7 @@ export default function VehicleTypesSection({ token }: Props) {
   const fetchItems = useCallback(async () => {
     setLoading(true); setError("");
     try {
-      const res = await fetch("/api/admin/vehicle-types", { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(apiUrl("/api/admin/vehicle-types"), { headers: { Authorization: `Bearer ${token}` } });
       if (!res.ok) throw new Error("Erro");
       setItems(await res.json() as VehicleType[]);
     } catch { setError("Erro ao carregar veículos."); }
@@ -45,7 +46,7 @@ export default function VehicleTypesSection({ token }: Props) {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault(); setFormError(""); setFormLoading(true);
     try {
-      const res = await fetch("/api/admin/vehicle-types", {
+      const res = await fetch(apiUrl("/api/admin/vehicle-types"), {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify(form),
@@ -59,7 +60,7 @@ export default function VehicleTypesSection({ token }: Props) {
 
   async function handleDelete(id: number) {
     try {
-      await fetch(`/api/admin/vehicle-types/${id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      await fetch(apiUrl(`/api/admin/vehicle-types/${id}`), { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
       setDeleteId(null); await fetchItems();
     } catch { setError("Erro ao excluir."); }
   }

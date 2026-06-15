@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertCircle, Calendar, ChevronDown, ChevronUp, Filter, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { apiUrl } from "@/lib/api";
 
 interface PendingScheduledMovement {
   id: number;
@@ -55,7 +56,7 @@ export function ScheduledMovementsSection({ token }: { token: string }) {
     setLoading(true);
     setError("");
     try {
-      const res = await fetch("/api/admin/pending-scheduled-movements", {
+      const res = await fetch(apiUrl("/api/admin/pending-scheduled-movements"), {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error("Erro ao carregar agendamentos");
@@ -75,7 +76,7 @@ export function ScheduledMovementsSection({ token }: { token: string }) {
   const handleDelete = async (id: number) => {
     setDeleteLoading(true);
     try {
-      const res = await fetch(`/api/admin/pending-scheduled-movements/${id}`, {
+      const res = await fetch(apiUrl(`/api/admin/pending-scheduled-movements/${id}`), {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
       });

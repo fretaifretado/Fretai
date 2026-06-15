@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Truck, Plus, Trash2, X, Check, AlertCircle, Search, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { apiUrl } from "@/lib/api";
 
 interface Partner {
   id: number;
@@ -69,7 +70,7 @@ export default function PartnersSection({ token }: Props) {
   const fetchPartners = useCallback(async () => {
     setLoading(true); setError("");
     try {
-      const res = await fetch("/api/admin/partners", { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(apiUrl("/api/admin/partners"), { headers: { Authorization: `Bearer ${token}` } });
       if (!res.ok) throw new Error("Erro");
       setPartners(await res.json() as Partner[]);
     } catch { setError("Erro ao carregar parceiros."); }
@@ -81,7 +82,7 @@ export default function PartnersSection({ token }: Props) {
   async function submitPartner(e: React.FormEvent) {
     e.preventDefault(); setFormError(""); setFormLoading(true);
     try {
-      const res = await fetch("/api/admin/partners", {
+      const res = await fetch(apiUrl("/api/admin/partners"), {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ ...partnerForm, lat: geocodedCoords?.lat ?? null, lng: geocodedCoords?.lng ?? null }),
@@ -96,7 +97,7 @@ export default function PartnersSection({ token }: Props) {
 
   async function handleDelete(id: number) {
     try {
-      await fetch(`/api/admin/partners/${id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      await fetch(apiUrl(`/api/admin/partners/${id}`), { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
       setDeleteId(null); await fetchPartners();
     } catch { setError("Erro ao excluir."); }
   }

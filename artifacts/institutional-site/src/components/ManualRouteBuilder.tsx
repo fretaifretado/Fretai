@@ -1,7 +1,10 @@
 import { useState, useEffect, useMemo, useCallback, Fragment, useRef } from "react";
+import { Upload } from "lucide-react";
+import type * as XlsxModule from "xlsx";
 import L from "leaflet";
 import { MapContainer, TileLayer, Marker, Popup, Circle, useMapEvents, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
+import { apiUrl } from "@/lib/api";
 
 delete (L.Icon.Default.prototype as unknown as Record<string, unknown>)._getIconUrl;
 L.Icon.Default.mergeOptions({
@@ -28,6 +31,74 @@ interface Props {
   /** Coords da garagem do parceiro transportador — mostrada no mapa e usada no cálculo de KM */
   garageLat?: number | null; garageLng?: number | null; garageAddress?: string | null;
   onFinalize: () => void;
+}
+
+interface BoardingPointImportRow {
+  name: string;
+  address: string | null;
+  lat: number | null;
+  lng: number | null;
+  radiusKm: number;
+  shiftTime: string | null;
+  direction: "ida" | "volta";
+}
+
+let xlsxModulePromise: Promise<typeof XlsxModule> | null = null;
+
+function loadXlsxModule(): Promise<typeof XlsxModule> {
+  xlsxModulePromise ??= import("xlsx");
+  return xlsxModulePromise;
+}
+
+function normalizeHeader(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function pickColumn(row: Record<string, unknown>, aliases: string[]): unknown {
+  const normalizedAliases = new Set(aliases.map(normalizeHeader));
+  for (const [key, value] of Object.entries(row)) {
+    if (normalizedAliases.has(normalizeHeader(key))) return value;
+  }
+  return undefined;
+}
+
+function asText(value: unknown): string {
+  return String(value ?? "").trim();
+}
+
+function parsePtNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const raw = asText(value);
+  if (!raw) return null;
+  const normalized = raw.replace(/\s/g, "").replace(",", ".");
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseCoordinate(value: unknown, type: "lat" | "lng"): number | null {
+  const parsed = parsePtNumber(value);
+  if (parsed == null) return null;
+  const max = type === "lat" ? 90 : 180;
+  return parsed >= -max && parsed <= max ? parsed : null;
+}
+
+function normalizeDirection(value: unknown): "ida" | "volta" {
+  const raw = normalizeHeader(asText(value));
+  if (raw.includes("volta") || raw.includes("retorno") || raw.includes("saida") || raw.includes("casa")) return "volta";
+  return "ida";
+}
+
+function parseExcelTime(value: number): string | null {
+  if (!Number.isFinite(value) || value < 0 || value >= 1) return null;
+  const totalMinutes = Math.round(value * 24 * 60);
+  const hours = Math.floor(totalMinutes / 60) % 24;
+  const minutes = totalMinutes % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 }
 
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -82,6 +153,61 @@ function parseShiftTimes(shift: string | null): { entry: string | null; exit: st
   if (s.startsWith("tar")) return { entry: "14:20", exit: "22:30" };
   if (s.startsWith("noi")) return { entry: "22:30", exit: "06:00" };
   return { entry: shift.trim().substring(0, 5) || null, exit: null };
+}
+
+function parseImportedShiftTime(value: unknown, direction: "ida" | "volta"): string | null {
+  if (typeof value === "number") return parseExcelTime(value);
+  const raw = asText(value);
+  if (!raw) return null;
+  const normalized = raw.replace(/\bh\b/i, ":");
+  const { entry, exit } = parseShiftTimes(normalized);
+  return direction === "volta" ? exit ?? entry : entry ?? exit;
+}
+
+async function parseBoardingPointFile(file: File, defaultRadiusKm: number): Promise<{ rows: BoardingPointImportRow[]; totalRows: number; invalidRows: number }> {
+  const XLSX = await loadXlsxModule();
+  const workbook = file.name.toLowerCase().endsWith(".csv")
+    ? XLSX.read(await file.text(), { type: "string" })
+    : XLSX.read(await file.arrayBuffer(), { type: "array" });
+  const firstSheetName = workbook.SheetNames[0];
+  if (!firstSheetName) throw new Error("A planilha não possui abas para importar.");
+  const sheet = workbook.Sheets[firstSheetName];
+  if (!sheet) throw new Error("Não foi possível ler a primeira aba da planilha.");
+
+  const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
+  let invalidRows = 0;
+  const rows: BoardingPointImportRow[] = [];
+
+  for (const raw of rawRows) {
+    const direction = normalizeDirection(pickColumn(raw, ["sentido", "direção", "direcao", "tipo"]));
+    const name = asText(pickColumn(raw, ["nome", "ponto", "ponto de embarque", "embarque", "local"]));
+    const address = asText(pickColumn(raw, ["endereço", "endereco", "logradouro", "rua", "localização", "localizacao"]));
+    const lat = parseCoordinate(pickColumn(raw, ["latitude", "lat"]), "lat");
+    const lng = parseCoordinate(pickColumn(raw, ["longitude", "lng", "lon", "long"]), "lng");
+    const radius = parsePtNumber(pickColumn(raw, ["raio", "raio km", "raio em km", "radius", "radius km"]));
+    const shiftTime = parseImportedShiftTime(pickColumn(raw, ["turno", "horário", "horario", "hora", "shift"]), direction);
+
+    if ((lat == null || lng == null) && !address) {
+      invalidRows += 1;
+      continue;
+    }
+
+    rows.push({
+      name: name || address || `Ponto ${rows.length + 1}`,
+      address: address || null,
+      lat,
+      lng,
+      radiusKm: radius && radius > 0 ? radius : defaultRadiusKm,
+      shiftTime,
+      direction,
+    });
+  }
+
+  return { rows, totalRows: rawRows.length, invalidRows };
+}
+
+function pointKey(name: string, lat: number, lng: number): string {
+  return `${normalizeHeader(name)}|${lat.toFixed(6)}|${lng.toFixed(6)}`;
 }
 
 /* Backward compat: extract just the start time */
@@ -184,8 +310,12 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
   const [tempBPKey, setTempBPKey] = useState<ShiftKey>("");
   const [selectedBpId, setSelectedBpId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
+  const [importingPoints, setImportingPoints] = useState(false);
+  const [importMessage, setImportMessage] = useState("");
+  const [importError, setImportError] = useState("");
   const [realMetrics, setRealMetrics] = useState<Map<number, { km: number; min: number }>>(new Map());
   const [tempMetrics, setTempMetrics] = useState<{ km: number; min: number } | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const hdrs = useMemo(() => ({ "Content-Type": "application/json", Authorization: `Bearer ${token}` }), [token]);
 
@@ -217,7 +347,7 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
   }, [shiftOptions, tempBPKey]);
 
   const loadBPs = useCallback(async () => {
-    const r = await fetch(`/api/admin/budgets/${budgetId}/boarding-points`, { headers: hdrs });
+    const r = await fetch(apiUrl(`/api/admin/budgets/${budgetId}/boarding-points`), { headers: hdrs });
     setBps(await r.json() as ManualBP[]);
   }, [budgetId, hdrs]);
 
@@ -361,13 +491,127 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
     }
   }
 
+  async function geocodeAddress(address: string): Promise<{ lat: number; lng: number } | null> {
+    try {
+      const query = new URLSearchParams({
+        q: address,
+        format: "json",
+        limit: "1",
+        addressdetails: "1",
+      });
+      const r = await fetch(`https://nominatim.openstreetmap.org/search?${query.toString()}`, {
+        headers: { "Accept-Language": "pt-BR" },
+      });
+      const data = await r.json() as Array<{ lat?: string; lon?: string }>;
+      const first = data[0];
+      if (!first?.lat || !first.lon) return null;
+      const lat = parseCoordinate(first.lat, "lat");
+      const lng = parseCoordinate(first.lon, "lng");
+      return lat == null || lng == null ? null : { lat, lng };
+    } catch {
+      return null;
+    }
+  }
+
+  async function createBoardingPoint(row: BoardingPointImportRow, lat: number, lng: number, workerIds: number[]): Promise<void> {
+    const response = await fetch(apiUrl(`/api/admin/budgets/${budgetId}/boarding-points`), {
+      method: "POST",
+      headers: hdrs,
+      body: JSON.stringify({
+        lat,
+        lng,
+        radiusKm: row.radiusKm,
+        shiftTime: row.shiftTime,
+        direction: row.direction,
+        workerIds,
+        name: row.name,
+      }),
+    });
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null) as { error?: string } | null;
+      throw new Error(payload?.error ?? "Erro ao criar ponto de embarque.");
+    }
+  }
+
+  async function handleImportBoardingPoints(file: File): Promise<void> {
+    setImportingPoints(true);
+    setImportMessage("");
+    setImportError("");
+
+    try {
+      const { rows, totalRows, invalidRows } = await parseBoardingPointFile(file, radiusKm);
+      if (rows.length === 0) {
+        throw new Error("Nenhum ponto válido encontrado. Use endereço ou latitude/longitude na planilha.");
+      }
+
+      const existingKeys = new Set(bps.map(bp => pointKey(bp.name, bp.lat, bp.lng)));
+      const assignedDuringImport = new Set(assignedIds);
+      let created = 0;
+      let skipped = invalidRows;
+
+      for (const row of rows) {
+        let lat = row.lat;
+        let lng = row.lng;
+        if ((lat == null || lng == null) && row.address) {
+          const geocoded = await geocodeAddress(row.address);
+          lat = geocoded?.lat ?? null;
+          lng = geocoded?.lng ?? null;
+        }
+
+        if (lat == null || lng == null) {
+          skipped += 1;
+          continue;
+        }
+
+        const key = pointKey(row.name, lat, lng);
+        if (existingKeys.has(key)) {
+          skipped += 1;
+          continue;
+        }
+
+        const pointLat = lat;
+        const pointLng = lng;
+        const workerIds = workers
+          .filter(w => {
+            if (assignedDuringImport.has(w.id)) return false;
+            if (!row.shiftTime) return true;
+            const { entry, exit } = parseShiftTimes(w.shift);
+            return row.direction === "volta" ? exit === row.shiftTime : entry === row.shiftTime;
+          })
+          .filter(w => haversineKm(w.lat, w.lng, pointLat, pointLng) <= row.radiusKm)
+          .map(w => w.id);
+
+        await createBoardingPoint(row, pointLat, pointLng, workerIds);
+        workerIds.forEach(id => assignedDuringImport.add(id));
+        existingKeys.add(key);
+        created += 1;
+      }
+
+      await loadBPs();
+      if (created === 0 && totalRows > 0) {
+        setImportMessage("");
+        setImportError("Nenhum ponto novo foi criado. A planilha pode conter apenas pontos já cadastrados ou linhas sem localização válida.");
+      } else {
+        setImportMessage(
+          `${created} ${created === 1 ? "ponto importado" : "pontos importados"} automaticamente${skipped > 0 ? ` · ${skipped} ${skipped === 1 ? "linha ignorada" : "linhas ignoradas"}` : ""}.`
+        );
+      }
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : "Não foi possível importar os pontos.");
+    } finally {
+      setImportingPoints(false);
+      if (importInputRef.current) importInputRef.current.value = "";
+    }
+  }
+
   const doSaveBP = async () => {
     if (!tempBP) return;
     setSaving(true);
     const { time, direction } = parseShiftKey(tempBPKey);
     try {
       const bpName = await reverseGeocode(tempBP.lat, tempBP.lng);
-      await fetch(`/api/admin/budgets/${budgetId}/boarding-points`, {
+      await fetch(apiUrl(`/api/admin/budgets/${budgetId}/boarding-points`), {
         method: "POST", headers: hdrs,
         body: JSON.stringify({
           lat: tempBP.lat, lng: tempBP.lng, radiusKm,
@@ -393,7 +637,7 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
     });
     const newWorkerIds = eligible.filter(w => haversineKm(w.lat, w.lng, newLat, newLng) <= bp.radiusKm).map(w => w.id);
     const newName = await reverseGeocode(newLat, newLng);
-    await fetch(`/api/admin/budgets/${budgetId}/boarding-points/${bpId}`, {
+    await fetch(apiUrl(`/api/admin/budgets/${budgetId}/boarding-points/${bpId}`), {
       method: "PUT", headers: hdrs,
       body: JSON.stringify({ lat: newLat, lng: newLng, radiusKm: bp.radiusKm, workerIds: newWorkerIds, name: newName }),
     });
@@ -404,7 +648,7 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
 
   const doDeleteBP = async (bpId: number) => {
     if (!confirm("Excluir este ponto de embarque?")) return;
-    await fetch(`/api/admin/budgets/${budgetId}/boarding-points/${bpId}`, { method: "DELETE", headers: hdrs });
+    await fetch(apiUrl(`/api/admin/budgets/${budgetId}/boarding-points/${bpId}`), { method: "DELETE", headers: hdrs });
     await loadBPs();
     setSelectedBpId(null);
   };
@@ -474,11 +718,47 @@ export function ManualRouteBuilder({ budgetId, token, workers, companyLat, compa
             <div className="space-y-2">
               <div className="flex items-center justify-between mb-3">
                 <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Pontos Criados ({bps.length})</p>
-                <button onClick={() => { setMode("draw"); setTempBP(null); setSelectedBpId(null); }}
-                  className="bg-primary/10 text-primary hover:bg-primary/20 p-1.5 rounded-lg transition-colors" title="Novo Ponto">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => importInputRef.current?.click()}
+                    disabled={importingPoints}
+                    className="bg-muted text-muted-foreground hover:bg-muted/80 hover:text-foreground disabled:opacity-50 p-1.5 rounded-lg transition-colors"
+                    title="Importar pontos por planilha"
+                  >
+                    <Upload size={15} />
+                  </button>
+                  <button onClick={() => { setMode("draw"); setTempBP(null); setSelectedBpId(null); }}
+                    className="bg-primary/10 text-primary hover:bg-primary/20 p-1.5 rounded-lg transition-colors" title="Novo Ponto">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+                  </button>
+                  <input
+                    ref={importInputRef}
+                    type="file"
+                    accept=".xlsx,.xls,.csv"
+                    className="hidden"
+                    onChange={event => {
+                      const file = event.currentTarget.files?.[0];
+                      if (file) void handleImportBoardingPoints(file);
+                    }}
+                  />
+                </div>
               </div>
+
+              {importingPoints && (
+                <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-[11px] font-medium text-blue-700">
+                  Importando pontos...
+                </div>
+              )}
+              {importMessage && !importingPoints && (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] font-medium text-emerald-700">
+                  {importMessage}
+                </div>
+              )}
+              {importError && !importingPoints && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] font-medium text-red-700">
+                  {importError}
+                </div>
+              )}
 
               {bps.length === 0 && (
                 <div className="py-12 text-center">

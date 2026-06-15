@@ -217,7 +217,6 @@ export default function DashboardPage() {
     { motivo: "Licença",   count: colaboradoresFiltrados.filter(c => c.status === "Licença").length,   color: "#f59e0b" },
     { motivo: "Afastado",  count: colaboradoresFiltrados.filter(c => c.status === "Afastado").length,  color: "#f97316" },
     { motivo: "Desligado", count: colaboradoresFiltrados.filter(c => c.status === "Desligado").length, color: "#ef4444" },
-    { motivo: "Inativo",   count: colaboradoresFiltrados.filter(c => c.status === "Inativo").length,   color: "#94a3b8" },
   ].filter(e => e.count > 0).map(e => ({
     ...e,
     economia: e.count * (valeDiario * 2) * diasPeriodo,
@@ -259,13 +258,15 @@ export default function DashboardPage() {
 
   /* ── métricas dos 5 cards de relatório ── */
 
+  // Vales comprados = apenas pedidos positivos (compras reais, não descontos)
   const valesUtilizados = useMemo(
-    () => pedidos.filter(p => p.status !== "Cancelado").reduce((s, p) => s + p.vales, 0),
+    () => pedidos.filter(p => p.status !== "Cancelado" && p.vales > 0).reduce((s, p) => s + p.vales, 0),
     [pedidos],
   );
 
+  // Valor total = apenas compras positivas
   const valorTotalCompras = useMemo(
-    () => pedidos.filter(p => p.status !== "Cancelado").reduce((s, p) => s + parseFloat(p.total), 0),
+    () => pedidos.filter(p => p.status !== "Cancelado" && p.vales > 0).reduce((s, p) => s + parseFloat(p.total), 0),
     [pedidos],
   );
 
@@ -276,12 +277,34 @@ export default function DashboardPage() {
 
   const diasMesAtual = useMemo(() => {
     const h = new Date();
-    return new Date(h.getFullYear(), h.getMonth() + 1, 0).getDate();
+    return new Date(h.getFullYear(), h.getMonth() + 1, 0).getDate() - h.getDate() + 1;
   }, []);
 
-  const valesNaoUtilizados = inativosHoje.length * 2 * diasMesAtual;
+  // Vales não utilizados = soma dos pedidos de desconto (vales negativos) gerados
+  // quando colaboradores ficam afastados/férias/licença/desligados.
+  // Esses pedidos negativos são inseridos automaticamente pelo backend ao ativar agendamentos.
+  const valesNaoUtilizados = useMemo(
+    () => pedidos
+      .filter(p => p.status !== "Cancelado" && p.vales < 0)
+      .reduce((s, p) => s + Math.abs(p.vales), 0),
+    [pedidos],
+  );
 
-  const economiaMensal = inativosHoje.length * valeDiario * 2 * diasMesAtual;
+  // Economia real = valor monetário dos pedidos de desconto
+  const economiaMensal = useMemo(
+    () => pedidos
+      .filter(p => p.status !== "Cancelado" && p.vales < 0)
+      .reduce((s, p) => s + Math.abs(parseFloat(p.total)), 0),
+    [pedidos],
+  );
+
+  // Descrição dos vales não utilizados para o card
+  const descricaoValesNaoUtilizados = useMemo(() => {
+    const descontos = pedidos.filter(p => p.status !== "Cancelado" && p.vales < 0);
+    if (descontos.length === 0) return "Nenhum desconto registrado no período";
+    const colaboradores = new Set(descontos.map(p => p.employeeId)).size;
+    return `${colaboradores} colaborador(es) com ausência registrada no período`;
+  }, [pedidos]);
 
   const nextPeriodoLabel = useMemo(() => {
     const h = new Date();
@@ -303,6 +326,44 @@ export default function DashboardPage() {
         return sum + dias * 2 * valeDiario;
       }, 0);
   }, [colaboradoresFiltrados, turnos, valeDiario]);
+
+  // ── Novos cálculos para os 6 cards ── 
+  // Card 1: Vales Comprados = total de vales comprados (pedidos positivos)
+  const valesComprados = useMemo(
+    () => pedidos.filter(p => p.status !== "Cancelado" && p.vales > 0).reduce((s, p) => s + p.vales, 0),
+    [pedidos],
+  );
+
+  // Card 2: Vales Não Utilizados = soma dos vales economizados (pedidos negativos em valor absoluto)
+  const valesNaoUtilizadosCard = useMemo(
+    () => pedidos
+      .filter(p => p.status !== "Cancelado" && p.vales < 0)
+      .reduce((s, p) => s + Math.abs(p.vales), 0),
+    [pedidos],
+  );
+
+  // Card 3: Crédito Gerado = vales não utilizados × valor unitário
+  const creditoGerado = useMemo(
+    () => valesNaoUtilizadosCard * valeDiario,
+    [valesNaoUtilizadosCard, valeDiario],
+  );
+
+  // Card 4: Compra do Mês = valor total de todas as compras (pedidos positivos)
+  const compraDoMes = useMemo(
+    () => pedidos.filter(p => p.status !== "Cancelado" && p.vales > 0).reduce((s, p) => s + parseFloat(p.total), 0),
+    [pedidos],
+  );
+
+  // Card 5: Crédito Aplicado = zero no mês inicial, abatido apenas no mês subsequente
+  // Portanto, no primeiro mês, creditoAplicado = 0
+  const creditoAplicado = 0;
+
+  // Card 6: Valor da Nota Fiscal = Compra do Mês - Crédito Aplicado
+  // No mês inicial, como creditoAplicado = 0, a nota fiscal = compra do mês
+  const valorNotaFiscal = useMemo(
+    () => Math.max(0, compraDoMes - creditoAplicado),
+    [compraDoMes],
+  );
 
   return (
     <DashboardLayout alertMessage={alertMessage}>
@@ -426,51 +487,66 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            {/* Report Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+            {/* Report Cards — 6 Cards conforme especificação */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
+              {/* Card 1: Vales Comprados */}
               <div className="bg-green-50/50 border border-green-100 rounded-xl p-5 shadow-sm flex flex-col gap-1">
                 <div className="flex items-center gap-2 text-green-600 mb-1">
                   <CheckCircle2 size={14} />
                   <p className="text-[10px] font-bold uppercase tracking-wider">Vales Comprados</p>
                 </div>
-                <p className="text-3xl font-bold text-green-700">{valesUtilizados}</p>
-                <p className="text-[10px] text-muted-foreground">Total de vales emitidos (pedidos não cancelados)</p>
+                <p className="text-3xl font-bold text-green-700">{valesComprados}</p>
+                <p className="text-[10px] text-muted-foreground">Total de vales comprados no mês</p>
               </div>
 
+              {/* Card 2: Vales Não Utilizados */}
               <div className="bg-orange-50/50 border border-orange-100 rounded-xl p-5 shadow-sm flex flex-col gap-1">
                 <div className="flex items-center gap-2 text-orange-600 mb-1">
                   <XCircle size={14} />
-                  <p className="text-[10px] font-bold uppercase tracking-wider">Vales não utilizados</p>
+                  <p className="text-[10px] font-bold uppercase tracking-wider">Vales Não Utilizados</p>
                 </div>
-                <p className="text-3xl font-bold text-orange-700">{valesNaoUtilizados}</p>
-                <p className="text-[10px] text-muted-foreground">{inativosHoje.length} colaborador(es) inativo(s) × 2 vales/dia × {diasMesAtual} dias</p>
+                <p className="text-3xl font-bold text-orange-700">{valesNaoUtilizadosCard}</p>
+                <p className="text-[10px] text-muted-foreground">{descricaoValesNaoUtilizados}</p>
               </div>
 
+              {/* Card 3: Crédito Gerado */}
               <div className="bg-blue-50/50 border border-blue-100 rounded-xl p-5 shadow-sm flex flex-col gap-1">
                 <div className="flex items-center gap-2 text-blue-600 mb-1">
                   <DollarSign size={14} />
-                  <p className="text-[10px] font-bold uppercase tracking-wider">Valor total das compras</p>
+                  <p className="text-[10px] font-bold uppercase tracking-wider">Crédito Gerado</p>
                 </div>
-                <p className="text-3xl font-bold text-blue-700">{fmt(valorTotalCompras)}</p>
-                <p className="text-[10px] text-muted-foreground">Soma de todos os pedidos não cancelados</p>
+                <p className="text-3xl font-bold text-blue-700">{fmt(creditoGerado)}</p>
+                <p className="text-[10px] text-muted-foreground">Vales não utilizados × valor unitário</p>
               </div>
 
-              <div className="bg-emerald-50/50 border border-emerald-100 rounded-xl p-5 shadow-sm flex flex-col gap-1">
-                <div className="flex items-center gap-2 text-emerald-600 mb-1">
-                  <TrendingDown size={14} />
-                  <p className="text-[10px] font-bold uppercase tracking-wider">Economia atual</p>
+              {/* Card 4: Compra do Mês */}
+              <div className="bg-indigo-50/50 border border-indigo-100 rounded-xl p-5 shadow-sm flex flex-col gap-1">
+                <div className="flex items-center gap-2 text-indigo-600 mb-1">
+                  <TrendingUp size={14} />
+                  <p className="text-[10px] font-bold uppercase tracking-wider">Compra do Mês</p>
                 </div>
-                <p className="text-3xl font-bold text-emerald-700">{fmt(economiaMensal)}</p>
-                <p className="text-[10px] text-muted-foreground">Estimativa mensal — colaboradores fora do sistema × R$ {(valeDiario * 2).toFixed(2)}/dia (Ida e Volta)</p>
+                <p className="text-3xl font-bold text-indigo-700">{fmt(compraDoMes)}</p>
+                <p className="text-[10px] text-muted-foreground">Valor total de compras (dias trabalhados)</p>
               </div>
 
+              {/* Card 5: Crédito Aplicado */}
               <div className="bg-purple-50/50 border border-purple-100 rounded-xl p-5 shadow-sm flex flex-col gap-1">
                 <div className="flex items-center gap-2 text-purple-600 mb-1">
                   <FileSpreadsheet size={14} />
-                  <p className="text-[10px] font-bold uppercase tracking-wider">Nota a ser gerada</p>
+                  <p className="text-[10px] font-bold uppercase tracking-wider">Crédito Aplicado</p>
                 </div>
-                <p className="text-3xl font-bold text-purple-700">{fmt(notaASerGerada)}</p>
-                <p className="text-[10px] text-muted-foreground">Previsão para {nextPeriodoLabel} com base nos colaboradores ativos</p>
+                <p className="text-3xl font-bold text-purple-700">{fmt(creditoAplicado)}</p>
+                <p className="text-[10px] text-muted-foreground">Abatido no mês subsequente</p>
+              </div>
+
+              {/* Card 6: Valor da Nota Fiscal */}
+              <div className="bg-rose-50/50 border border-rose-100 rounded-xl p-5 shadow-sm flex flex-col gap-1">
+                <div className="flex items-center gap-2 text-rose-600 mb-1">
+                  <TrendingDown size={14} />
+                  <p className="text-[10px] font-bold uppercase tracking-wider">Valor da Nota Fiscal</p>
+                </div>
+                <p className="text-3xl font-bold text-rose-700">{fmt(valorNotaFiscal)}</p>
+                <p className="text-[10px] text-muted-foreground">Compra do mês - Crédito aplicado</p>
               </div>
             </div>
 

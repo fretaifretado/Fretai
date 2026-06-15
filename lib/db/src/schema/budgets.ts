@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer, numeric } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, numeric, date } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { companiesTable } from "./companies";
@@ -9,6 +9,7 @@ export const budgetsTable = pgTable("budgets", {
   algorithm: text("algorithm").notNull().default("maior_ocupacao"),
   companyId: integer("company_id").references(() => companiesTable.id),
   partnerId: integer("partner_id"),
+  startDate: date("start_date"),
   status: text("status").notNull().default("rascunho"),
   destinationAddress: text("destination_address"),
   maxWalkingRadiusKm: numeric("max_walking_radius_km", { precision: 5, scale: 1 }).default("2"),

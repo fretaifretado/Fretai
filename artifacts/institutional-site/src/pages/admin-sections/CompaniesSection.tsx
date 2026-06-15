@@ -3,6 +3,7 @@ import { Building2, Plus, Trash2, X, Check, AlertCircle, Search, User, GitBranch
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import CompanyDetailPanel from "./CompanyDetailPanel";
+import { apiUrl } from "@/lib/api";
 
 interface Company {
   id: number;
@@ -50,6 +51,13 @@ function formatPhone(v: string) {
   return d.replace(/(\d{2})(\d)/, "($1) $2").replace(/(\d{5})(\d{1,4})$/, "$1-$2");
 }
 
+function companyForDetail(company: Company) {
+  return {
+    ...company,
+    valeValue: company.valeValue === null ? "8.50" : String(company.valeValue),
+  };
+}
+
 const EMPTY_FORM = { name: "", cnpj: "", address: "", phone: "", email: "", masterName: "", masterCpf: "", masterEmail: "", valeValue: "8.50"  };
 const EMPTY_BRANCH_FORM = { name: "", cnpj: "", city: "", state: "", address: "", phone: "", email: "" };
 
@@ -84,7 +92,7 @@ export default function CompaniesSection({ token }: Props) {
   const fetchBranches = useCallback(async (companyId: number) => {
     setBranchesLoading(p => ({ ...p, [companyId]: true }));
     try {
-      const res = await fetch(`/api/admin/companies/${companyId}/branches`, {
+      const res = await fetch(apiUrl(`/api/admin/companies/${companyId}/branches`), {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error("Erro");
@@ -129,7 +137,7 @@ export default function CompaniesSection({ token }: Props) {
     setBranchError("");
     setBranchLoading(true);
     try {
-      const res = await fetch(`/api/admin/companies/${branchParent.id}/branches`, {
+      const res = await fetch(apiUrl(`/api/admin/companies/${branchParent.id}/branches`), {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify(branchForm),
@@ -149,7 +157,7 @@ export default function CompaniesSection({ token }: Props) {
   const fetchCompanies = useCallback(async () => {
     setLoading(true); setError("");
     try {
-      const res = await fetch("/api/admin/companies", { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(apiUrl("/api/admin/companies"), { headers: { Authorization: `Bearer ${token}` } });
       if (!res.ok) throw new Error("Erro");
       setCompanies(await res.json() as Company[]);
     } catch { setError("Erro ao carregar empresas."); }
@@ -166,7 +174,7 @@ export default function CompaniesSection({ token }: Props) {
     e.preventDefault();
     setFormError(""); setFormLoading(true);
     try {
-      const res = await fetch("/api/admin/companies", {
+      const res = await fetch(apiUrl("/api/admin/companies"), {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify(form),
@@ -177,7 +185,7 @@ export default function CompaniesSection({ token }: Props) {
       const extrasCreated: { email: string; password: string; role: string }[] = [];
       for (const u of extraUsers.filter(x => x.email && x.name)) {
         try {
-          const r = await fetch(`/api/companies/${data.id}/users`, {
+          const r = await fetch(apiUrl(`/api/companies/${data.id}/users`), {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
             body: JSON.stringify(u),
@@ -199,7 +207,7 @@ export default function CompaniesSection({ token }: Props) {
 
   async function handleDelete(id: number) {
     try {
-      await fetch(`/api/admin/companies/${id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+      await fetch(apiUrl(`/api/admin/companies/${id}`), { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
       setDeleteId(null); await fetchCompanies();
     } catch { setError("Erro ao excluir."); }
   }
@@ -673,7 +681,7 @@ export default function CompaniesSection({ token }: Props) {
       {/* Company Detail Panel */}
       {detailCompany && (
         <CompanyDetailPanel
-          company={detailCompany}
+          company={companyForDetail(detailCompany)}
           token={token}
           onClose={() => setDetailCompany(null)}
         />

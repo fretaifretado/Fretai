@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { ScrollText, RefreshCw, LogIn, Activity, Filter, Search, Building2, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { apiUrl } from "@/lib/api";
 
 interface AuditLog {
   id: number;
@@ -66,6 +67,11 @@ function entityLabel(type: string) {
   return map[type] ?? type;
 }
 
+function formatAuditValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  return JSON.stringify(value, null, 2) ?? "";
+}
+
 export default function AuditSection({ token }: Props) {
   const [tab, setTab] = useState<"audit" | "login">("audit");
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -79,7 +85,7 @@ export default function AuditSection({ token }: Props) {
 
   const fetchCompanies = useCallback(async () => {
     try {
-      const res = await fetch("/api/admin/companies", { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(apiUrl("/api/admin/companies"), { headers: { Authorization: `Bearer ${token}` } });
       if (res.ok) setCompanies(await res.json() as Company[]);
     } catch { /* silent */ }
   }, [token]);
@@ -89,8 +95,8 @@ export default function AuditSection({ token }: Props) {
     try {
       const companyParam = companyId ? `&companyId=${companyId}` : "";
       const [auditRes, loginRes] = await Promise.all([
-        fetch(`/api/admin/audit-logs?limit=200${companyParam}`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch("/api/admin/login-logs?limit=100", { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl(`/api/admin/audit-logs?limit=200${companyParam}`), { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl("/api/admin/login-logs?limit=100"), { headers: { Authorization: `Bearer ${token}` } }),
       ]);
       if (auditRes.ok) setAuditLogs(await auditRes.json() as AuditLog[]);
       if (loginRes.ok) setLoginLogs(await loginRes.json() as LoginLog[]);
@@ -169,7 +175,9 @@ export default function AuditSection({ token }: Props) {
             {logs.map(log => {
               const meta = actionMeta(log.action);
               const isExpanded = expandedLog === log.id;
-              const hasDetails = log.newValue || log.oldValue;
+              const hasNewValue = log.newValue !== null && log.newValue !== undefined;
+              const hasOldValue = log.oldValue !== null && log.oldValue !== undefined;
+              const hasDetails = hasNewValue || hasOldValue;
               return (
                 <>
                   <tr
@@ -198,19 +206,19 @@ export default function AuditSection({ token }: Props) {
                     <tr key={`${log.id}-detail`} className="bg-muted/10">
                       <td colSpan={6} className="px-6 py-3">
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                          {log.newValue && (
+                          {hasNewValue && (
                             <div>
                               <p className="font-semibold text-foreground mb-1">Novos valores</p>
                               <pre className="bg-muted/40 rounded p-2 text-muted-foreground overflow-auto max-h-32 text-[11px]">
-                                {JSON.stringify(log.newValue, null, 2)}
+                                {formatAuditValue(log.newValue)}
                               </pre>
                             </div>
                           )}
-                          {log.oldValue && (
+                          {hasOldValue && (
                             <div>
                               <p className="font-semibold text-foreground mb-1">Valores anteriores</p>
                               <pre className="bg-muted/40 rounded p-2 text-muted-foreground overflow-auto max-h-32 text-[11px]">
-                                {JSON.stringify(log.oldValue, null, 2)}
+                                {formatAuditValue(log.oldValue)}
                               </pre>
                             </div>
                           )}

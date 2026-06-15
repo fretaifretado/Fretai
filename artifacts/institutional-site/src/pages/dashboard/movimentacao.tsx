@@ -140,14 +140,12 @@ export default function MovimentacaoPage() {
   const fileSheetRef = useRef<HTMLInputElement | null>(null);
   const fileTxtRef   = useRef<HTMLInputElement | null>(null);
 
-  // "Afastado" pode ser agendado a partir de 24h (amanhã).
-  // Todos os outros status exigem mínimo 48h (depois de amanhã).
+  // Todos os status exigem mínimo 48h (2 dias de antecedência).
   const minDate = useMemo(() => {
     const d = new Date();
-    const isAfastado = operacao === "status" && valorNovo === "Afastado";
-    d.setDate(d.getDate() + (isAfastado ? 1 : 2));
+    d.setDate(d.getDate() + 2);
     return d.toISOString().split("T")[0];
-  }, [operacao, valorNovo]);
+  }, []);
 
   const [inicio, setInicio] = useState("");
   const [fim, setFim]       = useState("");
@@ -229,7 +227,14 @@ export default function MovimentacaoPage() {
     operacao === "filial" ? filialNova !== null
     : operacao === "turno" || operacao === "status" ? !!valorNovo
     : false;
-  const datasOk = !!inicio && inicio >= minDate && (isDesligado || (!!fim && fim >= inicio));
+  const minFimDate = useMemo(() => {
+    if (!inicio) return "";
+    const d = new Date(inicio + "T00:00:00");
+    d.setDate(d.getDate() + 2);
+    return d.toISOString().split("T")[0];
+  }, [inicio]);
+
+  const datasOk = !!inicio && inicio >= minDate && (isDesligado || (!!fim && fim >= minFimDate));
   const podeAgendar = operacao && valorOk && selecionados.length > 0 && datasOk;
 
   async function agendar() {
@@ -550,20 +555,21 @@ export default function MovimentacaoPage() {
                 {!isDesligado && (
                   <div>
                     <label className="text-xs font-medium text-muted-foreground mb-1 block">Fim</label>
-                    <Input type="date" value={fim} onChange={e => setFim(e.target.value)} min={inicio || undefined} className="text-sm" />
+                    <Input type="date" value={fim} onChange={e => setFim(e.target.value)} min={minFimDate || undefined} className="text-sm" />
                   </div>
                 )}
               </div>
               {inicio && inicio < minDate && (
                 <p className="text-xs text-red-600 mb-3 flex items-center gap-1.5">
                   <AlertCircle size={12} />
-                  {operacao === "status" && valorNovo === "Afastado"
-                    ? "Afastamento precisa ser agendado com pelo menos 1 dia de antecedência."
-                    : "O agendamento precisa ser feito com pelo menos 2 dias de antecedência."}
+                  O agendamento precisa ser feito com pelo menos 2 dias de antecedência.
                 </p>
               )}
-              {!isDesligado && inicio && fim && fim < inicio && (
-                <p className="text-xs text-red-600 mb-3 flex items-center gap-1.5"><AlertCircle size={12} />A data de fim precisa ser igual ou posterior ao início.</p>
+              {!isDesligado && inicio && fim && fim < minFimDate && (
+                <p className="text-xs text-red-600 mb-3 flex items-center gap-1.5">
+                  <AlertCircle size={12} />
+                  A data de fim precisa ser no mínimo 2 dias após a data de início.
+                </p>
               )}
               <p className="text-xs text-muted-foreground mb-4">
                 {isDesligado

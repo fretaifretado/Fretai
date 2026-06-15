@@ -65,7 +65,7 @@ router.get("/admin/pending-scheduled-movements", requireAdmin, async (req, res) 
  * Permite ao admin cancelar um agendamento pendente.
  */
 router.delete("/admin/pending-scheduled-movements/:id", requireAdmin, async (req, res) => {
-  const idStr = req.params.id;
+  const idStr = String(req.params.id);
   const id = parseInt(idStr, 10);
   
   if (isNaN(id)) {

@@ -14,6 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Label } from "@/components/ui/label";
 import type { MapWorker } from "@/components/ManualRouteBuilder";
+import { apiUrl } from "@/lib/api";
 
 const ManualRouteBuilderLazy = lazy(() =>
   import("@/components/ManualRouteBuilder").then(m => ({ default: m.ManualRouteBuilder }))
@@ -98,7 +99,7 @@ function BudgetListView({ token, onNew, onSelect }: { token: string | null; onNe
   const load = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/admin/budgets", { headers: hdrs });
+      const res = await fetch(apiUrl("/api/admin/budgets"), { headers: hdrs });
       const data: unknown = await res.json();
       setItems(Array.isArray(data) ? (data as BudgetListItem[]) : []);
     } catch {
@@ -110,7 +111,7 @@ function BudgetListView({ token, onNew, onSelect }: { token: string | null; onNe
   const handleDelete = async (id: number) => {
     if (!confirm("Excluir esta roteirização e todos os dados relacionados?")) return;
     setDeleting(id);
-    await fetch(`/api/admin/budgets/${id}`, { method: "DELETE", headers: hdrs });
+    await fetch(apiUrl(`/api/admin/budgets/${id}`), { method: "DELETE", headers: hdrs });
     await load();
     setDeleting(null);
   };
@@ -193,8 +194,8 @@ function BudgetNewView({ token, onBack, onCreated }: { token: string | null; onB
   })();
 
   useEffect(() => {
-    void fetch("/api/admin/companies", { headers: hdrs }).then(r => r.json()).then((d: unknown) => setCompanies(Array.isArray(d) ? d as Company[] : []));
-    void fetch("/api/admin/partners", { headers: hdrs }).then(r => r.json()).then((d: unknown) => setPartners(Array.isArray(d) ? d as Partner[] : []));
+    void fetch(apiUrl("/api/admin/companies"), { headers: hdrs }).then(r => r.json()).then((d: unknown) => setCompanies(Array.isArray(d) ? d as Company[] : []));
+    void fetch(apiUrl("/api/admin/partners"), { headers: hdrs }).then(r => r.json()).then((d: unknown) => setPartners(Array.isArray(d) ? d as Partner[] : []));
   }, []);
 
   const handleCompanyChange = (val: string) => {
@@ -212,7 +213,7 @@ function BudgetNewView({ token, onBack, onCreated }: { token: string | null; onB
     if (form.startDate < minStartDate) { setErr("A data de início deve ser no mínimo 2 dias a partir de hoje"); return; }
     setSaving(true); setErr("");
     try {
-      const r = await fetch("/api/admin/budgets", {
+      const r = await fetch(apiUrl("/api/admin/budgets"), {
         method: "POST", headers: hdrs,
         body: JSON.stringify({
           ...form,
@@ -334,7 +335,7 @@ function BudgetBuilderView({ id, token, onBack }: { id: number; token: string | 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/budgets/${id}`, { headers: hdrs });
+      const res = await fetch(apiUrl(`/api/admin/budgets/${id}`), { headers: hdrs });
       if (!res.ok) {
         console.error("[Budgets] Erro ao carregar orçamento:", res.status);
         return;
@@ -362,12 +363,12 @@ function BudgetBuilderView({ id, token, onBack }: { id: number; token: string | 
             return false;
           };
           // Try GET /admin/partners/:id first; fall back to list if 404
-          void fetch(`/api/admin/partners/${data.budget.partnerId}`, { headers: hdrs })
+          void fetch(apiUrl(`/api/admin/partners/${data.budget.partnerId}`), { headers: hdrs })
             .then(r => r.ok ? r.json() : null)
             .then(async (p: { garageLat?: number | string | null; garageLng?: number | string | null; garageAddress?: string | null } | null) => {
               if (trySetGarage(p)) return;
               // Fallback: busca na lista completa
-              const listRes = await fetch("/api/admin/partners", { headers: hdrs });
+              const listRes = await fetch(apiUrl("/api/admin/partners"), { headers: hdrs });
               if (!listRes.ok) return;
               const list = await listRes.json() as Array<{ id: number; garageLat?: number | string | null; garageLng?: number | string | null; garageAddress?: string | null }>;
               const found = Array.isArray(list) ? list.find(x => x.id === data.budget.partnerId) ?? null : null;
@@ -506,7 +507,7 @@ function UploadStep({ budgetId, token, existingWorkers, companyId, onComplete, o
   useEffect(() => {
     if (!companyId || companyEmpChecked) return;
     setCompanyEmpChecked(true);
-    fetch(`/api/companies/${companyId}/employees`, { headers: hdrs })
+    fetch(apiUrl(`/api/companies/${companyId}/employees`), { headers: hdrs })
       .then(r => r.ok ? r.json() as Promise<Record<string, unknown>[]> : Promise.reject())
       .then(data => {
         const emps: ParsedEmployee[] = data
@@ -643,7 +644,7 @@ function UploadStep({ budgetId, token, existingWorkers, companyId, onComplete, o
     }));
     setSub("importing"); setMsg("");
     try {
-      const r = await fetch(`/api/admin/budgets/${budgetId}/employees`, {
+      const r = await fetch(apiUrl(`/api/admin/budgets/${budgetId}/employees`), {
         method: "POST", headers: hdrs, body: JSON.stringify({ employees, replace }),
       });
       const res = await r.json() as { total?: number; error?: string };
@@ -961,8 +962,8 @@ function FinalizeStep({ budgetId, token, onComplete, onBack }: {
 
   useEffect(() => {
     void Promise.all([
-      fetch(`/api/admin/budgets/${budgetId}/boarding-points`, { headers: hdrs }).then(r => r.json()),
-      fetch(`/api/admin/budgets/vehicle-types`, { headers: hdrs }).then(r => r.json()),
+      fetch(apiUrl(`/api/admin/budgets/${budgetId}/boarding-points`), { headers: hdrs }).then(r => r.json()),
+      fetch(apiUrl(`/api/admin/budgets/vehicle-types`), { headers: hdrs }).then(r => r.json()),
     ]).then(([bpsData, vtData]: [ManualBP[], VehicleType[]]) => {
       setBps(bpsData);
       const vt = vtData.sort((a, b) => b.capacity - a.capacity);
@@ -1005,7 +1006,7 @@ function FinalizeStep({ budgetId, token, onComplete, onBack }: {
           vehicleTypeId: selections[key] ?? vehicleTypes[0]?.id ?? 3,
         };
       });
-      const r = await fetch(`/api/admin/budgets/${budgetId}/finalize-manual`, {
+      const r = await fetch(apiUrl(`/api/admin/budgets/${budgetId}/finalize-manual`), {
         method: "POST", headers: hdrs,
         body: JSON.stringify({ shiftRoutes }),
       });
@@ -1129,7 +1130,7 @@ function RoutesStep({ routes, workers, budgetId, token, onBack, onReimport }: {
   const handlePublish = async () => {
     setPublishing(true); setPublishErr(""); 
     try {
-      const r = await fetch(`/api/admin/budgets/${budgetId}/publish`, { method: "POST", headers: hdrs });
+      const r = await fetch(apiUrl(`/api/admin/budgets/${budgetId}/publish`), { method: "POST", headers: hdrs });
       const data = await r.json() as { published?: boolean; error?: string };
       if (!r.ok) { setPublishErr(data.error ?? "Erro ao publicar"); return; }
       setPublished(true);

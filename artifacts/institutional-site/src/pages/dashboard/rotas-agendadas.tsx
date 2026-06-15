@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import DashboardLayout from "./layout";
 import { useDashboard } from "./context";
+import { apiUrl } from "@/lib/api";
 import {
   Calendar, MapPin, Bus, Users, Ruler, Clock,
   ChevronDown, ChevronUp, User, Truck, UserCheck,
@@ -214,7 +215,7 @@ export default function RotasAgendadasPage() {
 
     async function load() {
       try {
-        const r = await fetch(`/api/companies/${companyId}/scheduled-routes`, { headers });
+        const r = await fetch(apiUrl(`/api/companies/${companyId}/scheduled-routes`), { headers });
         if (!r.ok) throw new Error(r.statusText);
         const data = (await r.json()) as PublishedBudget[];
         setBudgets(data);

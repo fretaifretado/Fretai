@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { apiUrl } from "@/lib/api";
 
 /* ─── Types ─────────────────────────────────────────────── */
 
@@ -171,10 +172,10 @@ export default function CompanyDetailPanel({ company, token, onClose }: Props) {
     setLoadingMovements(true);
 
     const [brRes, empRes, ordRes, movRes] = await Promise.allSettled([
-      fetch(`/api/admin/companies/${company.id}/branches`,             { headers }).then(r => r.ok ? r.json() as Promise<Branch[]> : []),
-      fetch(`/api/companies/${company.id}/employees`,                  { headers }).then(r => r.ok ? r.json() as Promise<Employee[]> : []),
-      fetch(`/api/admin/companies/${company.id}/purchase-orders`,      { headers }).then(r => r.ok ? r.json() as Promise<PurchaseOrder[]> : []).catch(() => [] as PurchaseOrder[]),
-      fetch(`/api/admin/companies/${company.id}/scheduled-movements`,  { headers }).then(r => r.ok ? r.json() as Promise<ScheduledMovement[]> : []).catch(() => [] as ScheduledMovement[]),
+      fetch(apiUrl(`/api/admin/companies/${company.id}/branches`),             { headers }).then(r => r.ok ? r.json() as Promise<Branch[]> : []),
+      fetch(apiUrl(`/api/companies/${company.id}/employees`),                  { headers }).then(r => r.ok ? r.json() as Promise<Employee[]> : []),
+      fetch(apiUrl(`/api/admin/companies/${company.id}/purchase-orders`),      { headers }).then(r => r.ok ? r.json() as Promise<PurchaseOrder[]> : []).catch(() => [] as PurchaseOrder[]),
+      fetch(apiUrl(`/api/admin/companies/${company.id}/scheduled-movements`),  { headers }).then(r => r.ok ? r.json() as Promise<ScheduledMovement[]> : []).catch(() => [] as ScheduledMovement[]),
     ]);
 
     setBranches(brRes.status === "fulfilled" ? brRes.value : []);

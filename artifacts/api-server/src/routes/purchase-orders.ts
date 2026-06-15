@@ -6,6 +6,41 @@ import { requireAuth, getAuth } from "../middlewares/auth";
 
 const router = Router();
 
+const purchaseOrderSelect = {
+  id: purchaseOrdersTable.id,
+  companyId: purchaseOrdersTable.companyId,
+  employeeId: purchaseOrdersTable.employeeId,
+  nome: purchaseOrdersTable.nome,
+  turno: purchaseOrdersTable.turno,
+  periodo: purchaseOrdersTable.periodo,
+  dataInicio: purchaseOrdersTable.dataInicio,
+  dataFim: purchaseOrdersTable.dataFim,
+  dias: purchaseOrdersTable.dias,
+  vales: purchaseOrdersTable.vales,
+  valorUnit: purchaseOrdersTable.valorUnit,
+  total: purchaseOrdersTable.total,
+  status: purchaseOrdersTable.status,
+  proRata: purchaseOrdersTable.proRata,
+  createdAt: purchaseOrdersTable.createdAt,
+};
+
+function serializePurchaseOrder(o: typeof purchaseOrdersTable.$inferSelect) {
+  return {
+    ...o,
+    valorUnit: o.valorUnit,
+    total: o.total,
+    createdAt: o.createdAt?.toISOString?.() ?? o.createdAt,
+  };
+}
+
+function internalErrorPayload(err: unknown) {
+  if (process.env.NODE_ENV === "production") return { error: "Erro interno" };
+  return {
+    error: "Erro interno",
+    detail: err instanceof Error ? err.message : String(err),
+  };
+}
+
 /**
  * Returns the set of company IDs the authenticated user is allowed to access.
  * Includes the user's own company (entityId) plus all branches under it.
@@ -47,22 +82,15 @@ router.get(
       }
 
       const orders = await db
-        .select()
+        .select(purchaseOrderSelect)
         .from(purchaseOrdersTable)
         .where(eq(purchaseOrdersTable.companyId, companyId))
         .orderBy(desc(purchaseOrdersTable.createdAt));
 
-      res.json(
-        orders.map(o => ({
-          ...o,
-          valorUnit: o.valorUnit,
-          total: o.total,
-          createdAt: o.createdAt?.toISOString?.() ?? o.createdAt,
-        })),
-      );
+      res.json(orders.map(serializePurchaseOrder));
     } catch (err) {
       req.log.error({ err }, "Error listing purchase orders");
-      res.status(500).json({ error: "Erro interno" });
+      res.status(500).json(internalErrorPayload(err));
     }
   },
 );
@@ -136,10 +164,37 @@ router.post(
         return;
       }
 
+      const existing = await db
+        .select({
+          employeeId: purchaseOrdersTable.employeeId,
+          periodo: purchaseOrdersTable.periodo,
+        })
+        .from(purchaseOrdersTable)
+        .where(eq(purchaseOrdersTable.companyId, body.companyId));
+
+      const existingKeys = new Set(
+        existing
+          .filter(o => o.employeeId !== null)
+          .map(o => `${o.employeeId}:${o.periodo}`),
+      );
+
+      const itemsToInsert = body.items.filter(item =>
+        item.employeeId === null || !existingKeys.has(`${item.employeeId}:${item.periodo}`),
+      );
+
+      if (itemsToInsert.length === 0) {
+        req.log.info(
+          { userId: auth.sub, companyId: body.companyId, count: 0, skipped: body.items.length },
+          "Purchase orders already existed",
+        );
+        res.status(201).json([]);
+        return;
+      }
+
       const inserted = await db
         .insert(purchaseOrdersTable)
         .values(
-          body.items.map(item => ({
+          itemsToInsert.map(item => ({
             companyId: body.companyId,
             employeeId: item.employeeId ?? null,
             nome: item.nome,
@@ -158,19 +213,16 @@ router.post(
         .returning();
 
       req.log.info(
-        { userId: auth.sub, companyId: body.companyId, count: inserted.length },
+        { userId: auth.sub, companyId: body.companyId, count: inserted.length, skipped: body.items.length - itemsToInsert.length },
         "Purchase orders created",
       );
 
       res.status(201).json(
-        inserted.map(o => ({
-          ...o,
-          createdAt: o.createdAt?.toISOString?.() ?? o.createdAt,
-        })),
+        inserted.map(serializePurchaseOrder),
       );
     } catch (err) {
       req.log.error({ err }, "Error creating purchase orders");
-      res.status(500).json({ error: "Erro interno" });
+      res.status(500).json(internalErrorPayload(err));
     }
   },
 );
@@ -187,21 +239,14 @@ router.get(
     }
     try {
       const orders = await db
-        .select()
+        .select(purchaseOrderSelect)
         .from(purchaseOrdersTable)
         .where(eq(purchaseOrdersTable.companyId, companyId))
         .orderBy(desc(purchaseOrdersTable.createdAt));
-      res.json(
-        orders.map(o => ({
-          ...o,
-          valorUnit: o.valorUnit,
-          total: o.total,
-          createdAt: o.createdAt?.toISOString?.() ?? o.createdAt,
-        })),
-      );
+      res.json(orders.map(serializePurchaseOrder));
     } catch (err) {
       req.log.error({ err }, "Admin: error listing purchase orders");
-      res.status(500).json({ error: "Erro interno" });
+      res.status(500).json(internalErrorPayload(err));
     }
   },
 );

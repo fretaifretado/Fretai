@@ -14,24 +14,12 @@ import { Search, Pencil, X, Check, AlertCircle, Upload, Download, FileSpreadshee
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { lookupCep } from "@/lib/viacep";
+import type * as XlsxModule from "xlsx";
 
-type XlsxModule = {
-  read: (data: ArrayBuffer, opts: { type: string }) => { SheetNames: string[]; Sheets: Record<string, unknown> };
-  utils: {
-    sheet_to_json: <T = Record<string, unknown>>(sheet: unknown, opts?: { defval?: unknown; raw?: boolean }) => T[];
-    json_to_sheet: (data: unknown[]) => unknown;
-    book_new: () => unknown;
-    book_append_sheet: (book: unknown, sheet: unknown, name: string) => void;
-  };
-  write: (book: unknown, opts: { bookType: string; type: string }) => ArrayBuffer;
-};
-
-declare module "https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs";
-
-let xlsxPromise: Promise<XlsxModule> | null = null;
-function loadXlsx(): Promise<XlsxModule> {
+let xlsxPromise: Promise<typeof XlsxModule> | null = null;
+function loadXlsx(): Promise<typeof XlsxModule> {
   if (!xlsxPromise) {
-    xlsxPromise = import(/* @vite-ignore */ "https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs") as Promise<XlsxModule>;
+    xlsxPromise = import("xlsx");
   }
   return xlsxPromise;
 }
@@ -368,6 +356,32 @@ export default function ColaboradoresPage() {
   /** employeeId → vales do período mais recente com pedido aprovado */
   const [valesMap, setValesMap] = useState<Map<number, number>>(new Map());
 
+  /** Conta dias úteis de um turno entre duas datas (inclusive) */
+  function countWorkDays(from: Date, to: Date, tipoEscala: string): number {
+    let count = 0;
+    const cur = new Date(from);
+    cur.setHours(0, 0, 0, 0);
+    const end = new Date(to);
+    end.setHours(0, 0, 0, 0);
+    while (cur <= end) {
+      const wd = cur.getDay(); // 0=dom, 6=sab
+      if (tipoEscala === "5x2" && wd >= 1 && wd <= 5) count++;
+      else if (tipoEscala === "6x1" && wd >= 1 && wd <= 6) count++;
+      else if (tipoEscala !== "5x2" && tipoEscala !== "6x1") count++;
+      cur.setDate(cur.getDate() + 1);
+    }
+    return count;
+  }
+
+  /** Parseia dd/mm/yyyy ou yyyy-mm-dd para Date */
+  function parseOrderDate(s: string): Date | null {
+    const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (iso) return new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+    const br = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (br) return new Date(Number(br[3]), Number(br[2]) - 1, Number(br[1]));
+    return null;
+  }
+
   const fetchVales = useCallback(async (companyId: number) => {
     try {
       const res = await fetch(`${API_URL}/api/me/purchase-orders?companyId=${companyId}`, {
@@ -377,15 +391,52 @@ export default function ColaboradoresPage() {
       const data = await res.json() as {
         employeeId: number | null;
         vales: number;
+        dias: number;
         status: string;
+        dataInicio: string;
+        dataFim: string;
+        turno: string;
       }[];
+
+      const hoje = new Date();
+      hoje.setHours(0, 0, 0, 0);
+
       const map = new Map<number, number>();
+
       for (const o of data) {
-        if (o.employeeId && o.status !== "Cancelado") {
-          const prev = map.get(o.employeeId) ?? 0;
-          map.set(o.employeeId, prev + o.vales);
+        if (!o.employeeId || o.status === "Cancelado") continue;
+
+        const inicio = parseOrderDate(o.dataInicio);
+        const fim    = parseOrderDate(o.dataFim);
+        if (!inicio || !fim) {
+          // sem datas: usa total sem desconto
+          map.set(o.employeeId, (map.get(o.employeeId) ?? 0) + o.vales);
+          continue;
         }
+
+        if (hoje < inicio) {
+          // período ainda não começou — todos disponíveis
+          map.set(o.employeeId, (map.get(o.employeeId) ?? 0) + o.vales);
+          continue;
+        }
+
+        // Até quando descontar: o menor entre hoje e a data fim
+        const ateQuando = hoje <= fim ? hoje : fim;
+
+        // Detecta escala do turno (5x2 / 6x1)
+        const turnoNorm = o.turno.toLowerCase();
+        const escala = turnoNorm.includes("adm") || turnoNorm.includes("seg-sex") || turnoNorm.includes("5x2")
+          ? "5x2"
+          : "6x1";
+
+        // Dias úteis já passados desde o início do período
+        const diasConsumidos = countWorkDays(inicio, ateQuando, escala);
+        const valesConsumidos = Math.min(diasConsumidos * 2, o.vales);
+        const disponivel = Math.max(o.vales - valesConsumidos, 0);
+
+        map.set(o.employeeId, (map.get(o.employeeId) ?? 0) + disponivel);
       }
+
       setValesMap(map);
     } catch {
       // silently ignore
@@ -417,7 +468,7 @@ export default function ColaboradoresPage() {
   async function handleDownloadTemplate() {
     try {
       const XLSX = await loadXlsx();
-      const sheet = XLSX.utils.json_to_sheet([TEMPLATE_EXAMPLE], { header: TEMPLATE_HEADERS } as never);
+      const sheet = XLSX.utils.json_to_sheet([TEMPLATE_EXAMPLE], { header: TEMPLATE_HEADERS });
       const book = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(book, sheet, "Colaboradores");
       const buf = XLSX.write(book, { bookType: "xlsx", type: "array" });
@@ -687,6 +738,11 @@ export default function ColaboradoresPage() {
    * horário in their own row, so no horário is silently dropped.
    */
   async function applyPendingImport(pending: PendingImport) {
+    const batchToken = localStorage.getItem("jwt_token") ?? "";
+    // Deriva o companyId do JWT atual — nunca do estado React, que pode estar
+    // desatualizado quando o usuário troca de empresa sem recarregar a página.
+    const jwtPayload = batchToken ? (() => { try { return JSON.parse(atob(batchToken.split(".")[1].replace(/-/g,"+").replace(/_/g,"/"))); } catch { return null; } })() : null;
+    const companyIdForBatch = (jwtPayload?.entityId as number | undefined) ?? filialAtiva?.id ?? empresaAtiva?.id ?? null;
     const renameMap = buildConflictRenameMap(pending);
 
     // Reassign each colaborador whose turno is in conflict to the numbered
@@ -715,11 +771,6 @@ export default function ColaboradoresPage() {
     let ok = 0;
 
     // Tenta importar em lote via endpoint batch (garante persistência no banco)
-    const batchToken = localStorage.getItem("jwt_token") ?? "";
-    // Deriva o companyId do JWT atual — nunca do estado React, que pode estar
-    // desatualizado quando o usuário troca de empresa sem recarregar a página.
-    const jwtPayload = batchToken ? (() => { try { return JSON.parse(atob(batchToken.split(".")[1].replace(/-/g,"+").replace(/_/g,"/"))); } catch { return null; } })() : null;
-    const companyIdForBatch = (jwtPayload?.entityId as number | undefined) ?? filialAtiva?.id ?? empresaAtiva?.id ?? null;
     if (companyIdForBatch && batchToken && toImport.length > 0) {
       try {
         const batchBody = toImport.map(a => {
@@ -787,7 +838,7 @@ export default function ColaboradoresPage() {
       }
     } else {
       // Sem companyId ou token, usa o método normal
-      for (const a of remappedActions) {
+      for (const a of toImport) {
         const added = addColaborador(a);
         if (added) ok++;
       }
@@ -1098,7 +1149,7 @@ export default function ColaboradoresPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-muted/30 border-b">
-                    {["Nome", "Data de Início", "Status", "Turno", "Vale", ""].map(h => (
+                    {["Nome", "Data de Início", "Status", "Turno", "Saldo de Vales", ""].map(h => (
                       <th key={h} className="text-left px-5 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">{h}</th>
                     ))}
                   </tr>
@@ -1125,12 +1176,20 @@ export default function ColaboradoresPage() {
                       </td>
                       <td className="px-5 py-3.5 text-muted-foreground text-sm">{c.turno}</td>
                       <td className="px-5 py-3.5 text-sm">
-                        {valesMap.has(c.id) ? (
-                          <span className="inline-flex items-center gap-1 font-semibold text-foreground">
-                            {valesMap.get(c.id)!.toLocaleString("pt-BR")}
-                            <span className="text-xs font-normal text-muted-foreground">vales</span>
-                          </span>
-                        ) : (
+                        {valesMap.has(c.id) ? (() => {
+                          const saldo = valesMap.get(c.id)!;
+                          const color = saldo === 0
+                            ? "text-red-600"
+                            : saldo <= 4
+                              ? "text-amber-600"
+                              : "text-emerald-600";
+                          return (
+                            <span className={`inline-flex items-center gap-1 font-semibold ${color}`}>
+                              {saldo.toLocaleString("pt-BR")}
+                              <span className="text-xs font-normal text-muted-foreground">disponíveis</span>
+                            </span>
+                          );
+                        })() : (
                           <span className="text-muted-foreground">—</span>
                         )}
                       </td>
