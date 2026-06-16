@@ -11,18 +11,15 @@ const router = Router();
 
 function cleanCnpj(v: string) { return v.replace(/\D/g, ""); }
 function cleanCpf(v: string) { return v.replace(/\D/g, ""); }
-function publicCompanyUser(user: { id: number; name: string | null; email: string; role: string; createdAt?: Date | string | null }) {
+function publicCompanyUser(user: { id: number; name: string | null; cpf?: string | null; email: string; role: string; createdAt?: Date | string | null }) {
   return {
     id: user.id,
     name: user.name,
+    cpf: user.cpf ?? null,
     email: user.email,
     role: user.role,
     createdAt: user.createdAt instanceof Date ? user.createdAt.toISOString() : user.createdAt,
   };
-}
-
-function generateInitialPassword(): string {
-  return Math.random().toString(36).slice(2, 10);
 }
 
 /* ── Administrador: listar empresas (apenas raiz — sem parentCompanyId) ── */
@@ -58,13 +55,26 @@ router.post("/admin/companies", requireAdmin, async (req, res) => {
   if (cleanedCnpj.length !== 14) { res.status(400).json({ error: "CNPJ inválido" }); return; }
   if (cleanedCpf.length !== 11) { res.status(400).json({ error: "CPF do administrador inválido" }); return; }
 
-  const initialPassword = cleanedCpf.slice(0, 6);
-  const passwordHash = await bcrypt.hash(initialPassword, 12);
-
   try {
+    const [existingCompany] = await db
+      .select({ id: companiesTable.id })
+      .from(companiesTable)
+      .where(or(eq(companiesTable.cnpj, cleanedCnpj), eq(companiesTable.email, email.trim().toLowerCase())))
+      .limit(1);
+    if (existingCompany) { res.status(400).json({ error: "CNPJ ou e-mail da empresa já cadastrado no sistema" }); return; }
+
+    const masterEmailLower = masterEmail.trim().toLowerCase();
+    const [existingEmail] = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.email, masterEmailLower)).limit(1);
+    if (existingEmail) { res.status(409).json({ error: "E-mail do administrador já cadastrado no sistema" }); return; }
+    const [existingCpf] = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.cpf, cleanedCpf)).limit(1);
+    if (existingCpf) { res.status(409).json({ error: "CPF do administrador já cadastrado no sistema" }); return; }
+
+    const initialPassword = cleanedCpf.slice(0, 6);
+    const passwordHash = await bcrypt.hash(initialPassword, 12);
     const [masterUser] = await db.insert(usersTable).values({
       name: masterName.trim(),
-      email: masterEmail.trim().toLowerCase(),
+      cpf: cleanedCpf,
+      email: masterEmailLower,
       passwordHash,
       role: "cliente_master",
       entityType: "company",
@@ -101,7 +111,7 @@ router.post("/admin/companies", requireAdmin, async (req, res) => {
     // Drizzle wraps pg errors — check message string for unique violation
     const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
     if (msg.includes("23505") || msg.includes("unique") || msg.includes("duplicate")) {
-      res.status(400).json({ error: "CNPJ ou e-mail já cadastrado no sistema" }); return;
+      res.status(400).json({ error: "CNPJ, e-mail ou CPF já cadastrado no sistema" }); return;
     }
     req.log.error({ err }, "Error creating company");
     res.status(500).json({ error: "Erro interno" });
@@ -705,7 +715,7 @@ router.get("/companies/:id/users", requireAuth("platform_admin"), async (req, re
   if (isNaN(companyId)) { res.status(400).json({ error: "ID inválido" }); return; }
   try {
     const users = await db
-      .select({ id: usersTable.id, name: usersTable.name, email: usersTable.email, role: usersTable.role, createdAt: usersTable.createdAt })
+      .select({ id: usersTable.id, name: usersTable.name, cpf: usersTable.cpf, email: usersTable.email, role: usersTable.role, createdAt: usersTable.createdAt })
       .from(usersTable)
       .where(and(eq(usersTable.entityId, companyId), inArray(usersTable.role, ["cliente_master", "cliente_subadmin"])))
       .orderBy(usersTable.createdAt);
@@ -720,20 +730,25 @@ router.get("/companies/:id/users", requireAuth("platform_admin"), async (req, re
 router.post("/companies/:id/users", requireAuth("platform_admin"), async (req, res) => {
   const companyId = parseInt(req.params.id as string, 10);
   if (isNaN(companyId)) { res.status(400).json({ error: "ID inválido" }); return; }
-  const { name, email, role = "cliente_master" } = req.body as { name: string; email: string; role?: string };
-  if (!name || !email) { res.status(400).json({ error: "Nome e e-mail são obrigatórios" }); return; }
+  const { name, cpf, email, role = "cliente_master" } = req.body as { name: string; cpf?: string; email: string; role?: string };
+  if (!name || !cpf || !email) { res.status(400).json({ error: "Nome, CPF e e-mail são obrigatórios" }); return; }
   if (!["cliente_master", "cliente_subadmin"].includes(role)) { res.status(400).json({ error: "Role inválido" }); return; }
+  const cleanedCpf = cleanCpf(cpf);
+  if (cleanedCpf.length !== 11) { res.status(400).json({ error: "CPF inválido" }); return; }
   const auth = getAuth(req);
   try {
     const emailLower = email.trim().toLowerCase();
-    const existing = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.email, emailLower)).limit(1);
-    if (existing.length > 0) { res.status(409).json({ error: "E-mail já cadastrado no sistema" }); return; }
+    const existingEmail = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.email, emailLower)).limit(1);
+    if (existingEmail.length > 0) { res.status(409).json({ error: "E-mail já cadastrado no sistema" }); return; }
+    const existingCpf = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.cpf, cleanedCpf)).limit(1);
+    if (existingCpf.length > 0) { res.status(409).json({ error: "CPF já cadastrado no sistema" }); return; }
 
-    const initialPassword = Math.random().toString(36).slice(-8);
+    const initialPassword = cleanedCpf.slice(0, 6);
     const passwordHash = await bcrypt.hash(initialPassword, 10);
 
     const [user] = await db.insert(usersTable).values({
       name: name.trim(),
+      cpf: cleanedCpf,
       email: emailLower,
       passwordHash,
       role: role as "cliente_master" | "cliente_subadmin",
@@ -744,10 +759,10 @@ router.post("/companies/:id/users", requireAuth("platform_admin"), async (req, r
     await logAudit({
       userId: auth.sub as number, userEmail: auth.email, companyId,
       action: "create_company_user", entityType: "user", entityId: user!.id,
-      newValue: { name, email: emailLower, role },
+      newValue: { name, cpf: cleanedCpf, email: emailLower, role },
     });
 
-    res.status(201).json({ id: user!.id, name: user!.name, email: user!.email, role: user!.role, initialPassword });
+    res.status(201).json({ id: user!.id, name: user!.name, cpf: user!.cpf, email: user!.email, role: user!.role, initialPassword });
   } catch (err) {
     req.log.error({ err }, "Error creating company user");
     res.status(500).json({ error: "Erro interno" });
@@ -782,7 +797,7 @@ router.get("/me/profile", requireAuth("cliente_master", "cliente_subadmin"), asy
   if (typeof auth.sub !== "number") { res.status(400).json({ error: "Usuário inválido" }); return; }
   try {
     const [user] = await db
-      .select({ id: usersTable.id, name: usersTable.name, email: usersTable.email, role: usersTable.role, entityId: usersTable.entityId, createdAt: usersTable.createdAt })
+      .select({ id: usersTable.id, name: usersTable.name, cpf: usersTable.cpf, email: usersTable.email, role: usersTable.role, entityId: usersTable.entityId, createdAt: usersTable.createdAt })
       .from(usersTable)
       .where(eq(usersTable.id, auth.sub))
       .limit(1);
@@ -849,7 +864,7 @@ router.get("/me/users", requireAuth("cliente_master"), async (req, res) => {
   if (typeof companyId !== "number") { res.status(400).json({ error: "Empresa não identificada" }); return; }
   try {
     const users = await db
-      .select({ id: usersTable.id, name: usersTable.name, email: usersTable.email, role: usersTable.role, createdAt: usersTable.createdAt })
+      .select({ id: usersTable.id, name: usersTable.name, cpf: usersTable.cpf, email: usersTable.email, role: usersTable.role, createdAt: usersTable.createdAt })
       .from(usersTable)
       .where(and(eq(usersTable.entityId, companyId), inArray(usersTable.role, ["cliente_master", "cliente_subadmin"])))
       .orderBy(usersTable.createdAt);
@@ -864,19 +879,24 @@ router.post("/me/users", requireAuth("cliente_master"), async (req, res) => {
   const auth = getAuth(req);
   const companyId = auth.entityId;
   if (typeof companyId !== "number") { res.status(400).json({ error: "Empresa não identificada" }); return; }
-  const { name, email, role = "cliente_master" } = req.body as { name?: string; email?: string; role?: string };
-  if (!name?.trim() || !email?.trim()) { res.status(400).json({ error: "Nome e e-mail são obrigatórios" }); return; }
+  const { name, cpf, email, role = "cliente_master" } = req.body as { name?: string; cpf?: string; email?: string; role?: string };
+  if (!name?.trim() || !cpf?.trim() || !email?.trim()) { res.status(400).json({ error: "Nome, CPF e e-mail são obrigatórios" }); return; }
   if (!["cliente_master", "cliente_subadmin"].includes(role)) { res.status(400).json({ error: "Perfil inválido" }); return; }
+  const cleanedCpf = cleanCpf(cpf);
+  if (cleanedCpf.length !== 11) { res.status(400).json({ error: "CPF inválido" }); return; }
 
   try {
     const emailLower = email.trim().toLowerCase();
-    const existing = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.email, emailLower)).limit(1);
-    if (existing.length > 0) { res.status(409).json({ error: "E-mail já cadastrado no sistema" }); return; }
+    const existingEmail = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.email, emailLower)).limit(1);
+    if (existingEmail.length > 0) { res.status(409).json({ error: "E-mail já cadastrado no sistema" }); return; }
+    const existingCpf = await db.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.cpf, cleanedCpf)).limit(1);
+    if (existingCpf.length > 0) { res.status(409).json({ error: "CPF já cadastrado no sistema" }); return; }
 
-    const initialPassword = generateInitialPassword();
+    const initialPassword = cleanedCpf.slice(0, 6);
     const passwordHash = await bcrypt.hash(initialPassword, 12);
     const [user] = await db.insert(usersTable).values({
       name: name.trim(),
+      cpf: cleanedCpf,
       email: emailLower,
       passwordHash,
       role: role as "cliente_master" | "cliente_subadmin",
@@ -894,7 +914,7 @@ router.post("/me/users", requireAuth("cliente_master"), async (req, res) => {
       action: "create_company_user",
       entityType: "user",
       entityId: user.id,
-      newValue: { name: user.name, email: user.email, role: user.role },
+      newValue: { name: user.name, cpf: user.cpf, email: user.email, role: user.role },
     });
 
     res.status(201).json({ ...publicCompanyUser(user), initialPassword });

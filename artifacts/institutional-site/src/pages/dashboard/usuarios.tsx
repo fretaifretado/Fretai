@@ -8,12 +8,28 @@ import { apiUrl } from "@/lib/api";
 interface CompanyUser {
   id: number;
   name: string | null;
+  cpf: string | null;
   email: string;
   role: "cliente_master" | "cliente_subadmin";
   createdAt: string;
 }
 
-const EMPTY_FORM = { name: "", email: "", role: "cliente_master" as CompanyUser["role"] };
+const EMPTY_FORM = { name: "", cpf: "", email: "", role: "cliente_master" as CompanyUser["role"] };
+
+function cleanCpf(value: string) {
+  return value.replace(/\D/g, "");
+}
+
+function maskCpf(value: string) {
+  const d = cleanCpf(value).slice(0, 11);
+  return d.replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d{1,2})$/, "$1-$2");
+}
+
+function formatCpf(value: string | null | undefined) {
+  const d = cleanCpf(value ?? "").slice(0, 11);
+  if (d.length !== 11) return d || "—";
+  return d.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4");
+}
 
 function roleLabel(role: CompanyUser["role"]) {
   return role === "cliente_master" ? "Master" : "Subadmin";
@@ -72,12 +88,20 @@ export default function UsuariosPage() {
     event.preventDefault();
     setFormError("");
     setCreatedInfo(null);
+    if (cleanCpf(form.cpf).length !== 11) {
+      setFormError("Informe um CPF válido.");
+      return;
+    }
+    if (users.some(user => cleanCpf(user.cpf ?? "") === cleanCpf(form.cpf))) {
+      setFormError("CPF já cadastrado para esta empresa.");
+      return;
+    }
     setFormLoading(true);
     try {
       const response = await fetch(apiUrl("/api/me/users"), {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify(form),
+        body: JSON.stringify({ ...form, cpf: cleanCpf(form.cpf) }),
       });
       const data = await response.json().catch(() => ({})) as CompanyUser & { initialPassword?: string; error?: string };
       if (!response.ok) {
@@ -173,7 +197,7 @@ export default function UsuariosPage() {
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="bg-muted/30 border-b">
-                        {["Nome", "E-mail", "Perfil", "Criado em", ""].map(header => (
+                        {["Nome", "CPF", "E-mail", "Perfil", "Criado em", ""].map(header => (
                           <th key={header} className="text-left px-5 py-3 text-xs font-semibold text-muted-foreground uppercase tracking-wide">{header}</th>
                         ))}
                       </tr>
@@ -185,6 +209,7 @@ export default function UsuariosPage() {
                         return (
                           <tr key={user.id} className="hover:bg-muted/20 transition-colors">
                             <td className="px-5 py-4 font-medium text-foreground">{user.name || "—"}</td>
+                            <td className="px-5 py-4 text-muted-foreground font-mono text-xs">{formatCpf(user.cpf)}</td>
                             <td className="px-5 py-4 text-muted-foreground">{user.email}</td>
                             <td className="px-5 py-4">
                               <span className={`inline-flex items-center px-2 py-0.5 rounded border text-xs font-medium ${user.role === "cliente_master" ? "bg-blue-100 text-blue-700 border-blue-200" : "bg-slate-100 text-slate-700 border-slate-200"}`}>
@@ -226,6 +251,10 @@ export default function UsuariosPage() {
               <div>
                 <label className="text-sm font-medium text-foreground block mb-1.5">Nome</label>
                 <Input value={form.name} onChange={event => setForm(prev => ({ ...prev, name: event.target.value }))} required />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-foreground block mb-1.5">CPF</label>
+                <Input value={form.cpf} onChange={event => setForm(prev => ({ ...prev, cpf: maskCpf(event.target.value) }))} placeholder="000.000.000-00" required />
               </div>
               <div>
                 <label className="text-sm font-medium text-foreground block mb-1.5">E-mail</label>

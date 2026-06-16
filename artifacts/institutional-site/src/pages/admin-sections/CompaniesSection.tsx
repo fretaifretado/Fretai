@@ -28,6 +28,7 @@ interface Branch {
 }
 
 interface Props { token: string }
+type ExtraUser = { name: string; cpf: string; email: string; role: "cliente_master" | "cliente_subadmin" };
 
 function formatCNPJ(v: string) {
   const d = v.replace(/\D/g, "").slice(0, 14);
@@ -41,6 +42,10 @@ function formatCNPJ(v: string) {
 function formatCPF(v: string) {
   const d = v.replace(/\D/g, "").slice(0, 11);
   return d.replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d{1,2})$/, "$1-$2");
+}
+
+function cleanCPF(v: string) {
+  return v.replace(/\D/g, "");
 }
 
 function formatPhone(v: string) {
@@ -70,7 +75,7 @@ export default function CompaniesSection({ token }: Props) {
   const [form, setForm] = useState(EMPTY_FORM);
   const [formError, setFormError] = useState("");
   const [formLoading, setFormLoading] = useState(false);
-  const [extraUsers, setExtraUsers] = useState<{ name: string; email: string; role: "cliente_master" | "cliente_subadmin" }[]>([]);
+  const [extraUsers, setExtraUsers] = useState<ExtraUser[]>([]);
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [createdInfo, setCreatedInfo] = useState<{ email: string; password: string; extras: { email: string; password: string; role: string }[] } | null>(null);
 
@@ -173,6 +178,20 @@ export default function CompaniesSection({ token }: Props) {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setFormError(""); setFormLoading(true);
+    const invalidExtra = extraUsers.find(u => u.name.trim() || u.cpf.trim() || u.email.trim()
+      ? (!u.name.trim() || cleanCPF(u.cpf).length !== 11 || !u.email.trim())
+      : false);
+    if (invalidExtra) {
+      setFormError("Preencha nome, CPF válido e e-mail de todos os usuários adicionais.");
+      setFormLoading(false);
+      return;
+    }
+    const formCpfs = [form.masterCpf, ...extraUsers.map(u => u.cpf)].map(cleanCPF).filter(Boolean);
+    if (new Set(formCpfs).size !== formCpfs.length) {
+      setFormError("Há CPFs repetidos entre os administradores.");
+      setFormLoading(false);
+      return;
+    }
     try {
       const res = await fetch(apiUrl("/api/admin/companies"), {
         method: "POST",
@@ -183,18 +202,24 @@ export default function CompaniesSection({ token }: Props) {
       if (!res.ok) { setFormError(data.error ?? "Erro ao salvar."); return; }
       // Criar usuários extras e coletar senhas
       const extrasCreated: { email: string; password: string; role: string }[] = [];
-      for (const u of extraUsers.filter(x => x.email && x.name)) {
+      for (const u of extraUsers.filter(x => x.email && x.name && cleanCPF(x.cpf).length === 11)) {
         try {
           const r = await fetch(apiUrl(`/api/companies/${data.id}/users`), {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-            body: JSON.stringify(u),
+            body: JSON.stringify({ ...u, cpf: cleanCPF(u.cpf) }),
           });
           if (r.ok) {
             const ud = await r.json() as { initialPassword?: string; email?: string };
             extrasCreated.push({ email: u.email, password: ud.initialPassword ?? "—", role: u.role });
+          } else {
+            const err = await r.json().catch(() => ({})) as { error?: string };
+            throw new Error(err.error ?? `Erro ao criar usuário adicional ${u.email}`);
           }
-        } catch { /* ignora erros individuais */ }
+        } catch (err) {
+          setFormError(err instanceof Error ? err.message : "Erro ao criar usuário adicional.");
+          return;
+        }
       }
       setCreatedInfo(data.masterUser ? { email: data.masterUser.email, password: data.masterUser.initialPassword, extras: extrasCreated } : null);
       setShowForm(false);
@@ -468,7 +493,7 @@ export default function CompaniesSection({ token }: Props) {
                   <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Administradores</p>
                   <button type="button"
                     className="flex items-center gap-1 text-xs font-medium text-accent hover:text-accent/80 transition-colors"
-                    onClick={() => setExtraUsers(prev => [...prev, { name: "", email: "", role: "cliente_master" }])}>
+                    onClick={() => setExtraUsers(prev => [...prev, { name: "", cpf: "", email: "", role: "cliente_master" }])}>
                     <Plus size={13} />Adicionar outro usuário
                   </button>
                 </div>
@@ -526,13 +551,18 @@ export default function CompaniesSection({ token }: Props) {
                         <Input className="h-9" placeholder="Nome do usuário" value={u.name}
                           onChange={e => setExtraUsers(prev => prev.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} />
                       </div>
-                      <div className="sm:col-span-2">
+                      <div>
+                        <label className="text-xs font-medium text-muted-foreground block mb-1">CPF</label>
+                        <Input className="h-9" placeholder="000.000.000-00" value={u.cpf}
+                          onChange={e => setExtraUsers(prev => prev.map((x, j) => j === i ? { ...x, cpf: formatCPF(e.target.value) } : x))} />
+                      </div>
+                      <div>
                         <label className="text-xs font-medium text-muted-foreground block mb-1">E-mail</label>
                         <Input className="h-9" type="email" placeholder="usuario@empresa.com" value={u.email}
                           onChange={e => setExtraUsers(prev => prev.map((x, j) => j === i ? { ...x, email: e.target.value } : x))} />
                       </div>
                     </div>
-                    <p className="text-xs text-muted-foreground">Senha gerada automaticamente e exibida após criar a empresa.</p>
+                    <p className="text-xs text-muted-foreground">Senha inicial: <strong>6 primeiros dígitos do CPF</strong>.</p>
                   </div>
                 ))}
               </div>
