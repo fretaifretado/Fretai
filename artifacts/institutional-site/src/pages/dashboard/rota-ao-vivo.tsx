@@ -167,22 +167,32 @@ export default function RotaAoVivoPage() {
       });
     };
 
-    // Se o Leaflet já estiver carregado (ex.: ao voltar para a aba), inicializa direto.
-    // Caso contrário, injeta o script e aguarda o carregamento.
-    if ((window as any).L) {
-      initMap();
-    } else {
+    // Garante que o Leaflet esteja carregado, chamando o callback quando pronto.
+    const ensureLeaflet = (cb: () => void) => {
+      if ((window as any).L) { cb(); return; }
       let script = document.querySelector<HTMLScriptElement>('script[data-leaflet="js"]');
-      if (script) {
-        script.addEventListener("load", initMap, { once: true });
-      } else {
+      if (!script) {
         script = document.createElement("script");
         script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
         script.setAttribute("data-leaflet", "js");
-        script.addEventListener("load", initMap, { once: true });
         document.head.appendChild(script);
       }
-    }
+      script.addEventListener("load", cb, { once: true });
+    };
+
+    // O DashboardLayout só renderiza os filhos depois de autenticar (authed),
+    // então o <div> do mapa pode ainda não existir quando o efeito roda.
+    // Aguardamos o container aparecer antes de inicializar.
+    const start = () => {
+      if (cancelled) return;
+      if (!mapRef.current) {
+        requestAnimationFrame(start);
+        return;
+      }
+      ensureLeaflet(() => { if (!cancelled) initMap(); });
+    };
+
+    start();
 
     return () => {
       cancelled = true;
