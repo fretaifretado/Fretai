@@ -42,13 +42,42 @@ function normalizeTurnoKey(name: string): string {
   return (name || "").toLowerCase().replace(/\s+/g, "");
 }
 
+const DIAS_ORDEM = ["SEG", "TER", "QUA", "QUI", "SEX", "SAB", "DOM"] as const;
+
+function normalizeEscala(escala: string | null | undefined): string {
+  return (escala ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toUpperCase();
+}
+
+function weekdaysFromEscala(escala: string | null | undefined): Set<number> | null {
+  const parts = normalizeEscala(escala).split("/");
+  if (parts.length !== 2) return null;
+  const fromIdx = DIAS_ORDEM.indexOf(parts[0] as typeof DIAS_ORDEM[number]);
+  const toIdx = DIAS_ORDEM.indexOf(parts[1] as typeof DIAS_ORDEM[number]);
+  if (fromIdx < 0 || toIdx < 0) return null;
+
+  const weekdays = new Set<number>();
+  for (let i = 0; i < DIAS_ORDEM.length; i++) {
+    const inRange = toIdx >= fromIdx
+      ? i >= fromIdx && i <= toIdx
+      : i >= fromIdx || i <= toIdx;
+    if (!inRange) continue;
+    weekdays.add(i === 6 ? 0 : i + 1);
+  }
+  return weekdays;
+}
+
 function inferTipoEscala(turnoNome: string, turno?: { tipoEscala: string; escala: string; entrada: string; saida: string } | null): string {
   const explicit = turno?.tipoEscala?.trim();
   if (explicit) return explicit;
 
-  const escala = turno?.escala?.trim().toUpperCase() ?? "";
-  if (escala === "SEG/SEX") return "5x2";
-  if (escala === "SEG/SAB" || escala === "DOM/SEX") return "6x1";
+  const escala = normalizeEscala(turno?.escala);
+  const explicitWeekdays = weekdaysFromEscala(escala);
+  if (explicitWeekdays?.size === 5) return "5x2";
+  if (explicitWeekdays?.size === 6) return "6x1";
   if (escala === "12X36") return "12x36";
   if (escala === "24X48") return "24x48";
 
@@ -129,7 +158,15 @@ function roundMoney(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
-function countWorkDays(from: Date, to: Date, tipoEscala: string, anchor?: Date | null): number {
+function isWorkingDay(wd: number, tipoEscala: string, escala?: string | null): boolean {
+  const explicitWeekdays = weekdaysFromEscala(escala);
+  if (explicitWeekdays) return explicitWeekdays.has(wd);
+  if (tipoEscala === "5x2") return wd >= 1 && wd <= 5;
+  if (tipoEscala === "6x1") return wd >= 1 && wd <= 6;
+  return true;
+}
+
+function countWorkDays(from: Date, to: Date, tipoEscala: string, anchor?: Date | null, escala?: string | null): number {
   if (from > to) return 0;
   let count = 0;
   const cur = startOfDay(from);
@@ -146,9 +183,7 @@ function countWorkDays(from: Date, to: Date, tipoEscala: string, anchor?: Date |
   }
   while (cur <= end) {
     const wd = cur.getDay();
-    if (tipoEscala === "5x2" && wd >= 1 && wd <= 5) count++;
-    else if (tipoEscala === "6x1" && wd >= 1 && wd <= 6) count++;
-    else if (tipoEscala !== "5x2" && tipoEscala !== "6x1") count++;
+    if (isWorkingDay(wd, tipoEscala, escala)) count++;
     cur.setDate(cur.getDate() + 1);
   }
   return count;
@@ -272,7 +307,7 @@ export async function createUnusedValeDiscountForEmployee(params: {
       const tipoEscala = inferTipoEscala(order.turno, turno);
       let remainingDays = 0;
       if (fim && inicio) {
-        remainingDays = countWorkDays(from, fim, tipoEscala, anchor);
+        remainingDays = countWorkDays(from, fim, tipoEscala, anchor, turno?.escala);
       }
 
       const unusedVales = Math.min(order.vales, Math.max(0, remainingDays * 2));

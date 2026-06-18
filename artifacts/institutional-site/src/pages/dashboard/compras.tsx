@@ -54,6 +54,44 @@ function normalizeTurnoKey(name: string): string {
   return (name || "").toLowerCase().replace(/\s+/g, "");
 }
 
+const DIAS_ORDEM = ["SEG", "TER", "QUA", "QUI", "SEX", "SAB", "DOM"] as const;
+
+function normalizeEscala(escala: string | null | undefined): string {
+  return (escala ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toUpperCase();
+}
+
+function weekdaysFromEscala(escala: string | null | undefined): Set<number> | null {
+  const normalized = normalizeEscala(escala);
+  const parts = normalized.split("/");
+  if (parts.length !== 2) return null;
+
+  const fromIdx = DIAS_ORDEM.indexOf(parts[0] as typeof DIAS_ORDEM[number]);
+  const toIdx = DIAS_ORDEM.indexOf(parts[1] as typeof DIAS_ORDEM[number]);
+  if (fromIdx < 0 || toIdx < 0) return null;
+
+  const weekdays = new Set<number>();
+  for (let i = 0; i < DIAS_ORDEM.length; i++) {
+    const inRange = toIdx >= fromIdx
+      ? i >= fromIdx && i <= toIdx
+      : i >= fromIdx || i <= toIdx;
+    if (!inRange) continue;
+    weekdays.add(i === 6 ? 0 : i + 1);
+  }
+  return weekdays;
+}
+
+function isWorkingDay(wd: number, tipoEscala: string, escala?: string | null): boolean {
+  const explicitWeekdays = weekdaysFromEscala(escala);
+  if (explicitWeekdays) return explicitWeekdays.has(wd);
+  if (tipoEscala === "5x2") return wd >= 1 && wd <= 5;
+  if (tipoEscala === "6x1") return wd >= 1 && wd <= 6;
+  return true;
+}
+
 function parseInicioOp(raw: string | null | undefined): Date | null {
   if (!raw) return null;
   const s = String(raw).trim();
@@ -162,6 +200,7 @@ function calcularDiasNoMes(
   ano: number,
   mes: number,
   feriados: Set<string> = new Set(),
+  escala?: string | null,
 ): { dias: number; proRata: boolean; fromDay: number } {
   const start = parseInicioOp(inicioOp);
   const hoje = new Date();
@@ -170,7 +209,6 @@ function calcularDiasNoMes(
   const mesHoje = hoje.getMonth() + 1;
   const diaHoje = hoje.getDate();
   const ehMesAtual = ano === anoHoje && mes === mesHoje;
-  const ehMesFuturo = ano > anoHoje || (ano === anoHoje && mes > mesHoje);
 
   // ── Caso 1: colaborador em ADMISSÃO (data de início no futuro) ────────────
   // Se a data de início é futura, não comprar vales antes dela.
@@ -194,9 +232,7 @@ function calcularDiasNoMes(
           const dateStr = `${ano}-${String(mes).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
           if (feriados.has(dateStr)) continue; // ignora feriados
           const wd = new Date(ano, mes - 1, day).getDay();
-          if (tipoEscala === "5x2" && wd >= 1 && wd <= 5) dias++;
-          else if (tipoEscala === "6x1" && wd >= 1 && wd <= 6) dias++;
-          else if (tipoEscala !== "5x2" && tipoEscala !== "6x1") dias++;
+          if (isWorkingDay(wd, tipoEscala, escala)) dias++;
         }
       }
       return { dias, proRata: true, fromDay };
@@ -231,32 +267,21 @@ function calcularDiasNoMes(
 
   const proRata = fromDay > 1;
   const daysInMonth = ultimoDiaDoMes(ano, mes);
-  let dias: number;
+  let dias = 0;
 
   if (tipoEscala === "12x36" || tipoEscala === "24x48") {
     dias = diasCiclicosNoMes(tipoEscala as "12x36" | "24x48", inicioOp, ano, mes, fromDay);
-  } else if (proRata || ehMesFuturo === false) {
+  } else if (start) {
     dias = 0;
     for (let day = fromDay; day <= daysInMonth; day++) {
       const dateStr = `${ano}-${String(mes).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
       if (feriados.has(dateStr)) continue; // ignora feriados
       const wd = new Date(ano, mes - 1, day).getDay();
-      if (tipoEscala === "5x2" && wd >= 1 && wd <= 5) dias++;
-      else if (tipoEscala === "6x1" && wd >= 1 && wd <= 6) dias++;
-      else if (tipoEscala !== "5x2" && tipoEscala !== "6x1") dias++;
+      if (isWorkingDay(wd, tipoEscala, escala)) dias++;
     }
   } else if (!start) {
     // inicioOperacao não preenchido: não gerar compra
     dias = 0;
-  } else {
-    // Mês futuro cheio — mês inteiro
-    switch (tipoEscala) {
-      case "5x2":   dias = 22; break;
-      case "6x1":   dias = 26; break;
-      case "12x36": dias = 15; break;
-      case "24x48": dias = 10; break;
-      default:      dias = 22;
-    }
   }
 
   return { dias, proRata, fromDay };
@@ -463,7 +488,7 @@ export default function ComprasPage() {
       .map(c => {
         const t = turnos.find(x => normalizeTurnoKey(x.nome) === normalizeTurnoKey(c.turno));
         const escala = inferTipoEscala(c.turno, t);
-        const { dias, proRata, fromDay } = calcularDiasNoMes(escala, c.inicioOperacao, periodoAno, periodoMes, todosFeriados);
+        const { dias, proRata, fromDay } = calcularDiasNoMes(escala, c.inicioOperacao, periodoAno, periodoMes, todosFeriados, t?.escala);
         const vales = dias * 2;
         const total = vales * valeDiario;
         const dataInicio = formatDate(periodoAno, periodoMes, fromDay);
@@ -485,7 +510,10 @@ export default function ComprasPage() {
     if (!companyId || loadingPedidos || savingPedidos) return;
     if (!contextCarregado || !feriadosLoaded || previewItems.length === 0) return;
 
-    const colaboradoresKey = previewItems.map(item => item.colaborador.id).sort((a, b) => a - b).join(",");
+    const colaboradoresKey = previewItems
+      .map(item => `${item.colaborador.id}:${item.dias}:${item.vales}:${item.total}:${item.dataInicio}:${item.dataFim}`)
+      .sort()
+      .join(",");
     const runKey = `${companyId}:${periodoLabel}:${colaboradoresKey}`;
     if (autoGeradoParaRef.current === runKey) return;
 

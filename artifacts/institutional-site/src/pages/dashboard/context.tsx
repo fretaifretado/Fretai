@@ -407,9 +407,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const deleteFilial = (id: number)             => setFiliais(p => p.filter(x => x.id !== id));
 
   async function addTurno(t: Omit<Turno, "id">) {
+    const tempId = -Date.now();
+    setTurnos(p => [...p, { ...t, id: tempId }]);
     const token = getToken();
     if (!token) {
-      setTurnos(p => [...p, { ...t, id: Date.now() }]);
       return;
     }
     try {
@@ -421,9 +422,12 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       });
       if (res.ok) {
         const saved = await res.json() as { id: number; nome: string; entrada: string; saida: string; escala: string; tipoEscala: string };
-        setTurnos(p => [...p, { ...t, id: saved.id }]);
+        setTurnos(p => p.map(x => x.id === tempId ? { ...t, id: saved.id } : x));
+      } else {
+        setTurnos(p => p.filter(x => x.id !== tempId));
       }
     } catch (err) {
+      setTurnos(p => p.filter(x => x.id !== tempId));
       console.error("[dashboard] erro ao criar turno:", err);
     }
   }

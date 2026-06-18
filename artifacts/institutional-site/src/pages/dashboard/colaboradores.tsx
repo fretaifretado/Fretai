@@ -71,8 +71,16 @@ function normalizeTurnoKey(name: string): string {
 
 const DIAS_ORDEM = ["SEG", "TER", "QUA", "QUI", "SEX", "SAB", "DOM"] as const;
 
+function normalizeEscala(escala: string | null | undefined): string {
+  return (escala ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toUpperCase();
+}
+
 function tipoEscalaFromDias(diasStr: string): string {
-  const parts = diasStr.toUpperCase().split("/");
+  const parts = normalizeEscala(diasStr).split("/");
   if (parts.length !== 2) return "";
   const fromIdx = DIAS_ORDEM.indexOf(parts[0] as typeof DIAS_ORDEM[number]);
   const toIdx   = DIAS_ORDEM.indexOf(parts[1] as typeof DIAS_ORDEM[number]);
@@ -82,6 +90,32 @@ function tipoEscalaFromDias(diasStr: string): string {
   if (count === 6) return "6x1";
   if (count === 7) return "7x0";
   return "";
+}
+
+function weekdaysFromEscala(escala: string | null | undefined): Set<number> | null {
+  const parts = normalizeEscala(escala).split("/");
+  if (parts.length !== 2) return null;
+  const fromIdx = DIAS_ORDEM.indexOf(parts[0] as typeof DIAS_ORDEM[number]);
+  const toIdx = DIAS_ORDEM.indexOf(parts[1] as typeof DIAS_ORDEM[number]);
+  if (fromIdx < 0 || toIdx < 0) return null;
+
+  const weekdays = new Set<number>();
+  for (let i = 0; i < DIAS_ORDEM.length; i++) {
+    const inRange = toIdx >= fromIdx
+      ? i >= fromIdx && i <= toIdx
+      : i >= fromIdx || i <= toIdx;
+    if (!inRange) continue;
+    weekdays.add(i === 6 ? 0 : i + 1);
+  }
+  return weekdays;
+}
+
+function isWorkingDay(wd: number, tipoEscala: string, escala?: string | null): boolean {
+  const explicitWeekdays = weekdaysFromEscala(escala);
+  if (explicitWeekdays) return explicitWeekdays.has(wd);
+  if (tipoEscala === "5x2") return wd >= 1 && wd <= 5;
+  if (tipoEscala === "6x1") return wd >= 1 && wd <= 6;
+  return true;
 }
 
 function autoNomeTurno(entrada: string, saida: string): string {
@@ -116,16 +150,16 @@ function parseTurnoCombinado(val: string): ParsedTurno {
   if (/^12x36$/i.test(v)) return { nome: "12x36", entrada: "", saida: "", escala: "", tipoEscala: "12x36", isCombined: true };
   if (/^24x48$/i.test(v)) return { nome: "24x48", entrada: "", saida: "", escala: "", tipoEscala: "24x48", isCombined: true };
 
-  const matchFull = v.match(/^(\d{1,2}:\d{2})\/(\d{1,2}:\d{2})\s+([A-Za-z]{3}\/[A-Za-z]{3})$/);
+  const matchFull = v.match(/^(\d{1,2}:\d{2})\s*\/\s*(\d{1,2}:\d{2})\s+([A-Za-zÀ-ÿ]{3}\s*\/\s*[A-Za-zÀ-ÿ]{3})$/);
   if (matchFull) {
     const entrada    = matchFull[1]!.padStart(5, "0");
     const saida      = matchFull[2]!.padStart(5, "0");
-    const diasStr    = matchFull[3]!.toUpperCase();
+    const diasStr    = normalizeEscala(matchFull[3]).replace(/\s+/g, "");
     const tipoEscala = tipoEscalaFromDias(diasStr);
     return { nome: autoNomeTurno(entrada, saida), entrada, saida, escala: diasStr, tipoEscala, isCombined: true };
   }
 
-  const matchShort = v.match(/^(\d{1,2}:\d{2})\/(\d{1,2}:\d{2})$/);
+  const matchShort = v.match(/^(\d{1,2}:\d{2})\s*\/\s*(\d{1,2}:\d{2})$/);
   if (matchShort) {
     const entrada = matchShort[1]!.padStart(5, "0");
     const saida   = matchShort[2]!.padStart(5, "0");
@@ -311,7 +345,7 @@ interface TurnoDetectado {
  */
 interface TurnoConflict {
   nome: string;
-  variants: Array<{ entrada: string; saida: string; count: number }>;
+  variants: Array<{ entrada: string; saida: string; escala: string; tipoEscala: string; count: number }>;
 }
 
 /**
@@ -320,6 +354,10 @@ interface TurnoConflict {
  * is open, so we can apply or discard it based on the user's choice.
  */
 type ColaboradorImportPayload = Omit<Colaborador, "id" | "codigo">;
+type ImportedColaboradorPayload = ColaboradorImportPayload & {
+  turnoEscala: string;
+  turnoTipoEscala: string;
+};
 
 interface TurnoAggEntry {
   nome: string;
@@ -332,7 +370,7 @@ interface TurnoAggEntry {
 
 interface PendingImport {
   /** Each pending colaborador, ready to be passed to `addColaborador`. */
-  actions: ColaboradorImportPayload[];
+  actions: ImportedColaboradorPayload[];
   /** Aggregated turnos to surface in the result panel and create as needed. */
   turnoAgg: Map<string, TurnoAggEntry>;
   /** Rows whose nome was missing — already counted as skipped. */
@@ -357,7 +395,7 @@ export default function ColaboradoresPage() {
   const [valesMap, setValesMap] = useState<Map<number, number>>(new Map());
 
   /** Conta dias úteis de um turno entre duas datas (inclusive) */
-  function countWorkDays(from: Date, to: Date, tipoEscala: string): number {
+  function countWorkDays(from: Date, to: Date, tipoEscala: string, escala?: string | null): number {
     let count = 0;
     const cur = new Date(from);
     cur.setHours(0, 0, 0, 0);
@@ -365,9 +403,7 @@ export default function ColaboradoresPage() {
     end.setHours(0, 0, 0, 0);
     while (cur <= end) {
       const wd = cur.getDay(); // 0=dom, 6=sab
-      if (tipoEscala === "5x2" && wd >= 1 && wd <= 5) count++;
-      else if (tipoEscala === "6x1" && wd >= 1 && wd <= 6) count++;
-      else if (tipoEscala !== "5x2" && tipoEscala !== "6x1") count++;
+      if (isWorkingDay(wd, tipoEscala, escala)) count++;
       cur.setDate(cur.getDate() + 1);
     }
     return count;
@@ -423,14 +459,16 @@ export default function ColaboradoresPage() {
         // Até quando descontar: o menor entre hoje e a data fim
         const ateQuando = hoje <= fim ? hoje : fim;
 
-        // Detecta escala do turno (5x2 / 6x1)
+        // Detecta escala do turno (5x2 / 6x1) usando a escala real do cadastro quando existir.
         const turnoNorm = o.turno.toLowerCase();
-        const escala = turnoNorm.includes("adm") || turnoNorm.includes("seg-sex") || turnoNorm.includes("5x2")
+        const turno = turnos.find(t => normalizeTurnoKey(t.nome) === normalizeTurnoKey(o.turno));
+        const tipoEscala = turno?.tipoEscala
+          || (turnoNorm.includes("adm") || turnoNorm.includes("seg-sex") || turnoNorm.includes("5x2")
           ? "5x2"
-          : "6x1";
+          : "6x1");
 
         // Dias úteis já passados desde o início do período
-        const diasConsumidos = countWorkDays(inicio, ateQuando, escala);
+        const diasConsumidos = countWorkDays(inicio, ateQuando, tipoEscala, turno?.escala);
         const valesConsumidos = Math.min(diasConsumidos * 2, o.vales);
         const disponivel = Math.max(o.vales - valesConsumidos, 0);
 
@@ -441,7 +479,7 @@ export default function ColaboradoresPage() {
     } catch {
       // silently ignore
     }
-  }, []);
+  }, [turnos]);
 
   useEffect(() => {
     const cid = filialAtiva?.id;
@@ -526,7 +564,7 @@ export default function ColaboradoresPage() {
       // pairs where BOTH entrada and saida are non-empty are considered —
       // empty cells just inherit the first horário seen and aren't a
       // conflict.
-      const turnoVariants = new Map<string, Map<string, { entrada: string; saida: string; count: number }>>();
+      const turnoVariants = new Map<string, Map<string, { entrada: string; saida: string; escala: string; tipoEscala: string; count: number }>>();
       // Map normalized name → canonical (already-saved) name. Used to
       // make sure colaboradores from this import are stored under the
       // exact turno string already present in the Turnos menu, so
@@ -536,7 +574,7 @@ export default function ColaboradoresPage() {
         turnosCanonicalExistentes.set(normalizeTurnoKey(t.nome), t.nome);
       }
 
-      const actions: ColaboradorImportPayload[] = [];
+      const actions: ImportedColaboradorPayload[] = [];
 
       for (const r of rows) {
         const nome = pick(r, "Nome").trim();
@@ -600,7 +638,7 @@ export default function ColaboradoresPage() {
 
           if (horarioEntradaRow && horarioSaidaRow) {
             const variantsForKey = turnoVariants.get(key) ?? new Map();
-            const variantKey = `${horarioEntradaRow}|${horarioSaidaRow}`;
+            const variantKey = `${horarioEntradaRow}|${horarioSaidaRow}|${parsed.escala}`;
             const existingVariant = variantsForKey.get(variantKey);
             if (existingVariant) {
               existingVariant.count += 1;
@@ -608,6 +646,8 @@ export default function ColaboradoresPage() {
               variantsForKey.set(variantKey, {
                 entrada: horarioEntradaRow,
                 saida: horarioSaidaRow,
+                escala: parsed.escala,
+                tipoEscala: parsed.tipoEscala,
                 count: 1,
               });
             }
@@ -658,6 +698,8 @@ export default function ColaboradoresPage() {
           cep,
           horarioEntrada: horarioEntradaRow,
           horarioSaida: horarioSaidaRow,
+          turnoEscala: parsed.escala,
+          turnoTipoEscala: parsed.tipoEscala,
           inicioOperacao: parseExcelDate(pick(r, "Início da operação", "Inicio da operacao", "Início operação", "Inicio operacao", "Data de início", "Data de inicio", "Data início", "Data inicio", "Admissão", "Admissao", "Data admissão", "Data admissao", "Data de admissão", "Data de admissao", "Início", "Inicio", "Data início operação", "Data inicio operacao", "Dt. Início", "Dt. Inicio", "dt_inicio", "inicio_operacao", "data_inicio")),
           vale: "—",
           grupoId: null,
@@ -718,7 +760,7 @@ export default function ColaboradoresPage() {
           candidate = `${conflict.nome} ${counter}`;
         }
         usedNames.add(normalizeTurnoKey(candidate));
-        variantMap.set(`${v.entrada}|${v.saida}`, candidate);
+        variantMap.set(`${v.entrada}|${v.saida}|${v.escala}`, candidate);
         counter++;
       }
       renameMap.set(baseKey, variantMap);
@@ -752,7 +794,8 @@ export default function ColaboradoresPage() {
     const remappedActions = pending.actions.map(a => {
       const variantMapForKey = renameMap.get(normalizeTurnoKey(a.turno));
       if (!variantMapForKey) return a;
-      const newName = variantMapForKey.get(`${a.horarioEntrada}|${a.horarioSaida}`);
+      const newName = variantMapForKey.get(`${a.horarioEntrada}|${a.horarioSaida}|${a.turnoEscala ?? ""}`)
+        ?? variantMapForKey.get(`${a.horarioEntrada}|${a.horarioSaida}|`);
       if (!newName) return a;
       return { ...a, turno: newName };
     });
@@ -876,14 +919,14 @@ export default function ColaboradoresPage() {
       const variantMap = renameMap.get(normalizeTurnoKey(conflict.nome));
       if (!variantMap) continue;
       for (const v of conflict.variants) {
-        const newName = variantMap.get(`${v.entrada}|${v.saida}`);
+        const newName = variantMap.get(`${v.entrada}|${v.saida}|${v.escala}`);
         if (!newName) continue;
         augmentedAgg.set(normalizeTurnoKey(newName), {
           nome: newName,
           entrada: v.entrada,
           saida: v.saida,
-          escala: "",
-          tipoEscala: "",
+          escala: v.escala,
+          tipoEscala: v.tipoEscala,
           count: v.count,
         });
       }

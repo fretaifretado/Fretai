@@ -80,13 +80,52 @@ export function normalizeTurnoKey(name: string): string {
   return (name || "").toLowerCase().replace(/\s+/g, "");
 }
 
+const DIAS_ORDEM = ["SEG", "TER", "QUA", "QUI", "SEX", "SAB", "DOM"] as const;
+
+function normalizeEscala(escala: string | null | undefined): string {
+  return (escala ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toUpperCase();
+}
+
+function weekdaysFromEscala(escala: string | null | undefined): Set<number> | null {
+  const normalized = normalizeEscala(escala);
+  const parts = normalized.split("/");
+  if (parts.length !== 2) return null;
+
+  const fromIdx = DIAS_ORDEM.indexOf(parts[0] as typeof DIAS_ORDEM[number]);
+  const toIdx = DIAS_ORDEM.indexOf(parts[1] as typeof DIAS_ORDEM[number]);
+  if (fromIdx < 0 || toIdx < 0) return null;
+
+  const weekdays = new Set<number>();
+  for (let i = 0; i < DIAS_ORDEM.length; i++) {
+    const inRange = toIdx >= fromIdx
+      ? i >= fromIdx && i <= toIdx
+      : i >= fromIdx || i <= toIdx;
+    if (!inRange) continue;
+    weekdays.add(i === 6 ? 0 : i + 1);
+  }
+  return weekdays;
+}
+
+function isWorkingDay(wd: number, tipoEscala: string, escala?: string | null): boolean {
+  const explicitWeekdays = weekdaysFromEscala(escala);
+  if (explicitWeekdays) return explicitWeekdays.has(wd);
+  if (tipoEscala === "5x2") return wd >= 1 && wd <= 5;
+  if (tipoEscala === "6x1") return wd >= 1 && wd <= 6;
+  return true;
+}
+
 export function inferTipoEscala(turnoNome: string, turno?: Pick<Turno, "tipoEscala" | "escala" | "entrada" | "saida">): string {
   const explicit = turno?.tipoEscala?.trim();
   if (explicit) return explicit;
 
-  const escala = turno?.escala?.trim().toUpperCase() ?? "";
-  if (escala === "SEG/SEX") return "5x2";
-  if (escala === "SEG/SAB" || escala === "DOM/SEX") return "6x1";
+  const escala = normalizeEscala(turno?.escala);
+  const explicitWeekdays = weekdaysFromEscala(escala);
+  if (explicitWeekdays?.size === 5) return "5x2";
+  if (explicitWeekdays?.size === 6) return "6x1";
   if (escala === "12X36") return "12x36";
   if (escala === "24X48") return "24x48";
 
@@ -195,6 +234,7 @@ export function calcularDiasNoMes(
   ano: number,
   mes: number,
   feriados: Set<string> = new Set(),
+  escala?: string | null,
 ): { dias: number; proRata: boolean; fromDay: number } {
   const start = parseInicioOp(inicioOp);
   const hoje = new Date();
@@ -203,7 +243,6 @@ export function calcularDiasNoMes(
   const mesHoje = hoje.getMonth() + 1;
   const diaHoje = hoje.getDate();
   const ehMesAtual = ano === anoHoje && mes === mesHoje;
-  const ehMesFuturo = ano > anoHoje || (ano === anoHoje && mes > mesHoje);
 
   if (start && start > hoje) {
     const sy = start.getFullYear();
@@ -223,9 +262,7 @@ export function calcularDiasNoMes(
           const dateStr = `${ano}-${String(mes).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
           if (feriados.has(dateStr)) continue;
           const wd = new Date(ano, mes - 1, day).getDay();
-          if (tipoEscala === "5x2" && wd >= 1 && wd <= 5) dias++;
-          else if (tipoEscala === "6x1" && wd >= 1 && wd <= 6) dias++;
-          else if (tipoEscala !== "5x2" && tipoEscala !== "6x1") dias++;
+          if (isWorkingDay(wd, tipoEscala, escala)) dias++;
         }
       }
       return { dias, proRata: true, fromDay };
@@ -255,30 +292,20 @@ export function calcularDiasNoMes(
 
   const proRata = fromDay > 1;
   const daysInMonth = ultimoDiaDoMes(ano, mes);
-  let dias: number;
+  let dias = 0;
 
   if (tipoEscala === "12x36" || tipoEscala === "24x48") {
     dias = diasCiclicosNoMes(tipoEscala, inicioOp, ano, mes, fromDay);
-  } else if (proRata || ehMesFuturo === false) {
+  } else if (start) {
     dias = 0;
     for (let day = fromDay; day <= daysInMonth; day++) {
       const dateStr = `${ano}-${String(mes).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
       if (feriados.has(dateStr)) continue;
       const wd = new Date(ano, mes - 1, day).getDay();
-      if (tipoEscala === "5x2" && wd >= 1 && wd <= 5) dias++;
-      else if (tipoEscala === "6x1" && wd >= 1 && wd <= 6) dias++;
-      else if (tipoEscala !== "5x2" && tipoEscala !== "6x1") dias++;
+      if (isWorkingDay(wd, tipoEscala, escala)) dias++;
     }
   } else if (!start) {
     dias = 0;
-  } else {
-    switch (tipoEscala) {
-      case "5x2":   dias = 22; break;
-      case "6x1":   dias = 26; break;
-      case "12x36": dias = 15; break;
-      case "24x48": dias = 10; break;
-      default:      dias = 22;
-    }
   }
 
   return { dias, proRata, fromDay };
@@ -387,7 +414,7 @@ export function buildPurchasePreview(params: {
     .map(c => {
       const t = turnos.find(x => normalizeTurnoKey(x.nome) === normalizeTurnoKey(c.turno));
       const escala = inferTipoEscala(c.turno, t);
-      const { dias, proRata, fromDay } = calcularDiasNoMes(escala, c.inicioOperacao, periodoAno, periodoMes, feriados);
+      const { dias, proRata, fromDay } = calcularDiasNoMes(escala, c.inicioOperacao, periodoAno, periodoMes, feriados, t?.escala);
       const vales = dias * 2;
       const total = vales * valeDiario;
       const dataInicio = formatDate(periodoAno, periodoMes, fromDay);
@@ -442,15 +469,28 @@ export async function processCompanyPurchaseOrders(params: {
 
   const pedidos = await fetchPurchaseOrders(params.companyId);
   const periodoLabel = `${MESES_CURTO[params.periodoMes - 1]}/${params.periodoAno}`;
-  const jaGeradosIds = new Set(
+  const pedidosDoPeriodo = new Map(
     pedidos
-      .filter(p => p.periodo === periodoLabel && p.colaboradorId > 0)
-      .map(p => p.colaboradorId),
+      .filter(p => p.periodo === periodoLabel && p.colaboradorId > 0 && p.status !== "Cancelado" && p.vales > 0)
+      .map(p => [p.colaboradorId, p]),
   );
-  const faltando = previewItems.filter(item => !jaGeradosIds.has(item.colaborador.id));
-  if (faltando.length === 0) return [];
+  const precisaSalvar = previewItems.filter(item => {
+    const existing = pedidosDoPeriodo.get(item.colaborador.id);
+    if (!existing) return true;
+    return (
+      existing.turno !== item.turnoNome ||
+      existing.dataInicio !== item.dataInicio ||
+      existing.dataFim !== item.dataFim ||
+      existing.dias !== item.dias ||
+      existing.vales !== item.vales ||
+      Math.abs(existing.valorUnit - item.valorUnit) > 0.001 ||
+      Math.abs(existing.total - item.total) > 0.001 ||
+      existing.proRata !== item.proRata
+    );
+  });
+  if (precisaSalvar.length === 0) return [];
 
-  return savePurchaseItems(faltando, params.companyId);
+  return savePurchaseItems(precisaSalvar, params.companyId);
 }
 
 export function usePurchaseOrderAutomation(params: {
@@ -482,7 +522,7 @@ export function usePurchaseOrderAutomation(params: {
     if (companyIds.length === 0) return;
 
     const employeeKey = colaboradores.map(c => `${c.id}:${c.status}:${c.turno}:${c.inicioOperacao}:${c.filialId}`).sort().join("|");
-    const shiftKey = turnos.map(t => `${t.nome}:${t.tipoEscala}`).sort().join("|");
+    const shiftKey = turnos.map(t => `${t.nome}:${t.entrada}:${t.saida}:${t.escala}:${t.tipoEscala}`).sort().join("|");
     const runKey = `${periodoAno}-${periodoMes}:${companyIds.join(",")}:${employeeKey}:${shiftKey}:${empresaAtiva.valeValue}`;
     if (processedRef.current.has(runKey)) return;
 
