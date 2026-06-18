@@ -205,7 +205,15 @@ export default function DashboardPage() {
   const passageirosFutura  = passageirosNoDia(scheduledBudgets, futureDate);
   const temRotas = scheduledBudgets.length > 0 && scheduledBudgets.some(b => b.routes.length > 0);
   const afastados   = colaboradores.filter(c => ["Férias", "Licença", "Afastado"].includes(c.status)).length;
-  const pendencias  = colaboradores.filter(c => !c.telefone || !c.endereco || !c.cep).length;
+  const pendencias = colaboradores.filter(c =>
+    c.status !== "Desligado" && (
+      !c.cpf?.trim() ||
+      !c.telefone?.trim() ||
+      !c.endereco?.trim() ||
+      !c.turno || c.turno === "—" ||
+      !c.inicioOperacao?.trim()
+    )
+  ).length;
   const filiaisAtivas = filiais.filter(f => f.empresaId === empresaAtiva.id).length;
 
   const alertMessage = colaboradores.length > 0 && pendencias > 0
