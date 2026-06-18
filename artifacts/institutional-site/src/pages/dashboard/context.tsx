@@ -573,7 +573,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       cep: formatCep((e.zipCode as string) ?? ""),
       horarioEntrada: (e.shiftStart as string) ?? "",
       horarioSaida: (e.shiftEnd as string) ?? "",
-      inicioOperacao: isoToDisplay((e.admissionDate as string) ?? ""),
+      inicioOperacao: isoToDisplay((e.operationStart as string) ?? ""),
       vale: (e.valeValue as string) ?? "—",
       grupoId: (e.grupoId as number | null) ?? null,
     };
