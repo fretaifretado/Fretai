@@ -69,9 +69,11 @@ export default function DashboardLayout({ children, alertMessage }: LayoutProps)
 
   const pendencias = colaboradores.filter(c =>
     c.status !== "Desligado" && (
+      !c.cpf?.trim() ||
       !c.telefone?.trim() ||
       !c.endereco?.trim() ||
-      (!c.turno || c.turno === "—")
+      (!c.turno || c.turno === "—") ||
+      !c.inicioOperacao?.trim()
     )
   ).length;
 
