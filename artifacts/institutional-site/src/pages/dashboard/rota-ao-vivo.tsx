@@ -49,21 +49,27 @@ export default function RotaAoVivoPage() {
   const mapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const link = document.createElement("link");
-    link.rel = "stylesheet";
-    link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
-    document.head.appendChild(link);
-
-    const script = document.createElement("script");
-    script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
-
     const animFrames: number[] = [];
+    let map: any = null;
+    let cancelled = false;
 
-    script.onload = async () => {
+    // Carrega o CSS do Leaflet apenas uma vez (mantido no <head> entre montagens)
+    if (!document.querySelector('link[data-leaflet="css"]')) {
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+      link.setAttribute("data-leaflet", "css");
+      document.head.appendChild(link);
+    }
+
+    const initMap = async () => {
       const L = (window as any).L;
-      if (!mapRef.current) return;
+      if (cancelled || !L || !mapRef.current) return;
 
-      const map = L.map(mapRef.current).setView([-22.9099, -47.0626], 14);
+      map = L.map(mapRef.current).setView([-22.9099, -47.0626], 14);
+
+      // Garante o cálculo correto do tamanho após a montagem
+      setTimeout(() => { if (map) map.invalidateSize(); }, 0);
 
       L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
         attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
@@ -161,11 +167,30 @@ export default function RotaAoVivoPage() {
       });
     };
 
-    document.head.appendChild(script);
+    // Se o Leaflet já estiver carregado (ex.: ao voltar para a aba), inicializa direto.
+    // Caso contrário, injeta o script e aguarda o carregamento.
+    if ((window as any).L) {
+      initMap();
+    } else {
+      let script = document.querySelector<HTMLScriptElement>('script[data-leaflet="js"]');
+      if (script) {
+        script.addEventListener("load", initMap, { once: true });
+      } else {
+        script = document.createElement("script");
+        script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+        script.setAttribute("data-leaflet", "js");
+        script.addEventListener("load", initMap, { once: true });
+        document.head.appendChild(script);
+      }
+    }
 
     return () => {
+      cancelled = true;
       animFrames.forEach(cancelAnimationFrame);
-      if (document.head.contains(link)) document.head.removeChild(link);
+      if (map) {
+        map.remove();
+        map = null;
+      }
     };
   }, []);
 
