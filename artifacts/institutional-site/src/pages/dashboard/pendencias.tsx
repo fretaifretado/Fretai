@@ -19,6 +19,7 @@ export default function PendenciasPage() {
   const [fEndereco, setFEndereco] = useState("");
   const [fCep, setFCep] = useState("");
   const [fTurno, setFTurno] = useState("");
+  const [fInicioOperacao, setFInicioOperacao] = useState("");
   const [error, setError] = useState("");
   const [savedIds, setSavedIds] = useState<Set<number>>(new Set());
 
@@ -48,6 +49,7 @@ export default function PendenciasPage() {
     setFEndereco(c.endereco);
     setFCep(c.cep);
     setFTurno(c.turno === "—" ? "" : c.turno);
+    setFInicioOperacao(c.inicioOperacao ?? "");
     setError("");
   }
 
@@ -60,6 +62,7 @@ export default function PendenciasPage() {
       endereco: fEndereco.trim(),
       cep: fCep.trim(),
       turno: fTurno || editing.turno,
+      inicioOperacao: fInicioOperacao.trim() || editing.inicioOperacao,
       vale: turnoSel && ["Ativo", "Inativo"].includes(editing.status) ? "R$ 8,50/dia" : editing.vale,
     });
     setSavedIds(prev => new Set([...prev, editing.id]));
@@ -180,6 +183,22 @@ export default function PendenciasPage() {
                   onChange={e => setFCep(formatCepProgressive(e.target.value))}
                   inputMode="numeric"
                   maxLength={9}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-1.5">Data de Início</label>
+                <Input
+                  placeholder="DD/MM/AAAA"
+                  value={fInicioOperacao}
+                  onChange={e => {
+                    // Formata progressivamente: 00/00/0000
+                    let v = e.target.value.replace(/\D/g, "").slice(0, 8);
+                    if (v.length > 4) v = v.slice(0,2) + "/" + v.slice(2,4) + "/" + v.slice(4);
+                    else if (v.length > 2) v = v.slice(0,2) + "/" + v.slice(2);
+                    setFInicioOperacao(v);
+                  }}
+                  inputMode="numeric"
+                  maxLength={10}
                 />
               </div>
               {error && <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2"><AlertCircle size={14} />{error}</div>}
