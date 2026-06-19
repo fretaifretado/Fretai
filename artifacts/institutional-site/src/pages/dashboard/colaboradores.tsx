@@ -621,7 +621,9 @@ export default function ColaboradoresPage() {
         if (cpfNorm) batchCpfs.add(cpfNorm);
 
         const turnoRaw = pick(r, "Turno").trim();
+        console.log("[DEBUG] turnoRaw:", turnoRaw);
         const parsed = parseTurnoCombinado(turnoRaw);
+        console.log("[DEBUG] parsed:", parsed);
 
         // Backward compat: for old-format rows (plain turno name + separate
         // "Horário entrada"/"Horário saída" columns), fall back to those columns.
@@ -631,6 +633,8 @@ export default function ColaboradoresPage() {
         const horarioSaidaRow = parsed.isCombined
           ? parsed.saida
           : (pick(r, "Horário saída", "Horario saida", "Saída", "Saida").trim() || parsed.saida);
+        
+        console.log("[DEBUG] horarioEntradaRow:", horarioEntradaRow, "horarioSaidaRow:", horarioSaidaRow);
 
         const turnoNomeDerived = parsed.nome;
 
