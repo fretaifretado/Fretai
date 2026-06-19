@@ -636,21 +636,56 @@ export default function ColaboradoresPage() {
 
         const turnoNomeDerived = parsed.nome;
 
-        // Canonicalize the turno name: prefer an existing turno's exact
-        // spelling, then a name already aggregated from this batch, then
-        // the derived/raw value. This guarantees casing variants collapse
-        // to a single turno and the collaborator-count on the Turnos page
-        // stays correct.
+        // Canonicalize the turno name.
+        // Priority:
+        //   1. Existing turno with the same NAME (case/space insensitive)
+        //   2. Existing turno with the same HORÁRIO (entrada+saída) — this is
+        //      the critical case: planilhas that only carry "07:30/17:30" with
+        //      no explicit name would otherwise all collapse to "Turno extra"
+        //      and trigger a false conflict when multiple distinct horários
+        //      are present. By matching on horário first we route each row
+        //      straight to the correct existing turno.
+        //   3. A name already aggregated from an earlier row in this batch
+        //   4. The auto-derived name from parseTurnoCombinado
         let turno = turnoNomeDerived;
         if (turnoNomeDerived && turnoNomeDerived !== "—") {
-          const key = normalizeTurnoKey(turnoNomeDerived);
-          const canonical =
-            turnosCanonicalExistentes.get(key) ??
-            turnoAgg.get(key)?.nome ??
-            turnoNomeDerived;
+          const nameKey = normalizeTurnoKey(turnoNomeDerived);
+
+          // --- horário-based match against existing turnos ---
+          const horarioMatchExisting = (horarioEntradaRow && horarioSaidaRow)
+            ? turnos.find(t => t.entrada === horarioEntradaRow && t.saida === horarioSaidaRow)
+            : undefined;
+
+          // Determine the canonical key to use for aggregation:
+          // If the name already exists → use that name's key.
+          // Else if horário matches an existing turno → use that turno's name key.
+          // Otherwise → use the auto-derived name key (may cause a "new" entry).
+          let aggKey: string;
+          let canonical: string;
+
+          if (turnosCanonicalExistentes.has(nameKey)) {
+            // Exact name match with existing turno
+            aggKey = nameKey;
+            canonical = turnosCanonicalExistentes.get(nameKey)!;
+          } else if (horarioMatchExisting) {
+            // Horário match: route this row to the existing turno, bypassing
+            // the auto-derived name entirely. This prevents "Turno extra 07:30",
+            // "Turno extra 15:00" etc. from all sharing the "turnoextra" key.
+            aggKey = normalizeTurnoKey(horarioMatchExisting.nome);
+            canonical = horarioMatchExisting.nome;
+          } else {
+            // Genuinely new turno — key by the horário string when available
+            // so two rows with different horários but the same auto-name (e.g.
+            // both "Turno extra") get DIFFERENT keys and don't conflict.
+            aggKey = (horarioEntradaRow && horarioSaidaRow)
+              ? `horario:${horarioEntradaRow}|${horarioSaidaRow}`
+              : nameKey;
+            canonical = turnoAgg.get(aggKey)?.nome ?? turnoNomeDerived;
+          }
+
           turno = canonical;
 
-          const prev = turnoAgg.get(key);
+          const prev = turnoAgg.get(aggKey);
           if (prev) {
             // Keep the first non-empty values seen.
             if (!prev.entrada && horarioEntradaRow) prev.entrada = horarioEntradaRow;
@@ -659,7 +694,7 @@ export default function ColaboradoresPage() {
             if (!prev.tipoEscala && parsed.tipoEscala) prev.tipoEscala = parsed.tipoEscala;
             prev.count += 1;
           } else {
-            turnoAgg.set(key, {
+            turnoAgg.set(aggKey, {
               nome: canonical,
               entrada: horarioEntradaRow,
               saida: horarioSaidaRow,
@@ -670,7 +705,7 @@ export default function ColaboradoresPage() {
           }
 
           if (horarioEntradaRow && horarioSaidaRow) {
-            const variantsForKey = turnoVariants.get(key) ?? new Map();
+            const variantsForKey = turnoVariants.get(aggKey) ?? new Map();
             const variantKey = `${horarioEntradaRow}|${horarioSaidaRow}|${parsed.escala}`;
             const existingVariant = variantsForKey.get(variantKey);
             if (existingVariant) {
@@ -684,7 +719,7 @@ export default function ColaboradoresPage() {
                 count: 1,
               });
             }
-            turnoVariants.set(key, variantsForKey);
+            turnoVariants.set(aggKey, variantsForKey);
           }
         }
         let endereco = pick(r, "Endereço", "Endereco", "Logradouro").trim();
@@ -741,11 +776,19 @@ export default function ColaboradoresPage() {
 
       // Detect conflicts: a turno key with more than one distinct
       // (entrada, saida) pair means the spreadsheet contradicts itself.
+      // Keys that matched an existing turno by horário (prefixed "horario:")
+      // are already resolved and must never show as conflicts — each such key
+      // has exactly one horário variant by construction.
       const conflicts: TurnoConflict[] = [];
       turnoVariants.forEach((variantsForKey, key) => {
+        // Skip keys that were resolved by horário-match to an existing turno
+        const aggEntry = turnoAgg.get(key);
+        if (aggEntry && turnos.some(t => normalizeTurnoKey(t.nome) === normalizeTurnoKey(aggEntry.nome))) {
+          return; // already mapped to an existing turno — not a real conflict
+        }
         if (variantsForKey.size > 1) {
           conflicts.push({
-            nome: turnoAgg.get(key)?.nome ?? key,
+            nome: aggEntry?.nome ?? key,
             variants: Array.from(variantsForKey.values()),
           });
         }
@@ -765,10 +808,14 @@ export default function ColaboradoresPage() {
         const turnosParaNomear: TurnoParaNomear[] = [];
 
         for (const [key, agg] of Array.from(turnoAgg.entries())) {
-          const existsByName = turnos.find(t => normalizeTurnoKey(t.nome) === key);
-          if (existsByName) continue; // already matched by name — no action needed
+          // If the agg entry's canonical name matches an existing turno, it was
+          // already resolved (either by name or by horário match during parsing).
+          const existsByName = turnos.find(t => normalizeTurnoKey(t.nome) === normalizeTurnoKey(agg.nome));
+          if (existsByName) continue; // already matched — no action needed
 
           // Check if any existing turno has the same horário (entrada + saída)
+          // This handles the edge case where the agg key is a "horario:…" key
+          // but the name was NOT resolved during parsing (shouldn't happen, but safe).
           const matchByHorario = (agg.entrada && agg.saida)
             ? turnos.find(t =>
                 t.entrada === agg.entrada &&
