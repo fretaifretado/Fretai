@@ -160,6 +160,29 @@ export function formatCepProgressive(cep: string): string {
   return `${d.slice(0, 5)}-${d.slice(5)}`;
 }
 
+/**
+ * Progressive phone mask intended for `onChange` handlers. Strips
+ * non-digits, caps at 11 digits and formats progressively as the user types.
+ * Examples:
+ *   ""           → ""
+ *   "1"          → "1"
+ *   "11"         → "(11"
+ *   "119"        → "(11) 9"
+ *   "1198"       → "(11) 9 8"
+ *   "1198123"    → "(11) 9 8123"
+ *   "1198123456" → "(11) 9 8123-456"
+ *   "11981234567"→ "(11) 98123-4567" (landline format)
+ */
+export function formatTelefoneProgressive(tel: string): string {
+  const d = (tel || "").replace(/\D/g, "").slice(0, 11);
+  if (d.length === 0) return "";
+  if (d.length <= 2) return `(${d}`;
+  if (d.length <= 3) return `(${d.slice(0, 2)}) ${d.slice(2)}`;
+  if (d.length <= 7) return `(${d.slice(0, 2)}) ${d.slice(2, 3)} ${d.slice(3)}`;
+  if (d.length <= 11) return `(${d.slice(0, 2)}) ${d.slice(2, 3)} ${d.slice(3, 7)}-${d.slice(7)}`;
+  return d;
+}
+
 function decodeJwt(token: string): Record<string, unknown> | null {
   try {
     const payload = token.split(".")[1];
@@ -669,7 +692,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       })
         .then(r => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          if (previous?.status !== c.status) window.dispatchEvent(new CustomEvent("purchase-orders:updated"));
+          // Dispatch event when status changes OR when phone is added (removing a pending issue)
+          if (previous?.status !== c.status || (!previous?.telefone?.trim() && c.telefone?.trim())) {
+            window.dispatchEvent(new CustomEvent("purchase-orders:updated"));
+          }
         })
         .catch((err) => {
           console.error("[dashboard] erro ao atualizar colaborador, revertendo estado local:", err);

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import DashboardLayout from "./layout";
-import { useDashboard, type Colaborador } from "./context";
+import { useDashboard, formatTelefoneProgressive, type Colaborador } from "./context";
 import { PhoneOff, Pencil, X, Check, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -97,9 +97,10 @@ export default function SemTelefonePage() {
                 <Input
                   placeholder="(11) 9 0000-0000"
                   value={fTelefone}
-                  onChange={e => { setFTelefone(e.target.value); setError(""); }}
+                  onChange={e => { setFTelefone(formatTelefoneProgressive(e.target.value)); setError(""); }}
                   className={error ? "border-destructive" : ""}
                   autoFocus
+                  inputMode="numeric"
                 />
                 {error && <p className="text-destructive text-xs mt-1 flex items-center gap-1"><AlertCircle size={12} />{error}</p>}
               </div>

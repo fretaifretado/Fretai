@@ -5,6 +5,7 @@ import {
   normalizeCpf,
   formatCpf,
   formatTelefone,
+  formatTelefoneProgressive,
   formatCep,
   formatCepProgressive,
   type Colaborador,
@@ -1581,7 +1582,7 @@ export default function ColaboradoresPage() {
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-foreground mb-1">Telefone</label>
-                    <Input value={fTelefone} onChange={e => setFTelefone(e.target.value)} placeholder="(11) 9 0000-0000" />
+                    <Input value={fTelefone} onChange={e => setFTelefone(formatTelefoneProgressive(e.target.value))} placeholder="(11) 9 0000-0000" inputMode="numeric" />
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-foreground mb-1">Matrícula</label>

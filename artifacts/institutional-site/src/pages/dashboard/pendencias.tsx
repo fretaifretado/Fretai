@@ -1,6 +1,6 @@
 import { useState } from "react";
 import DashboardLayout from "./layout";
-import { useDashboard, formatCepProgressive, type Colaborador } from "./context";
+import { useDashboard, formatCepProgressive, formatTelefoneProgressive, type Colaborador } from "./context";
 import { AlertTriangle, Pencil, CheckCircle, XCircle, X, AlertCircle, PhoneOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -162,7 +162,7 @@ export default function PendenciasPage() {
             <div className="p-6 space-y-4">
               <div>
                 <label className="block text-sm font-medium text-foreground mb-1.5">Telefone</label>
-                <Input placeholder="(11) 9 0000-0000" value={fTelefone} onChange={e => setFTelefone(e.target.value)} />
+                <Input placeholder="(11) 9 0000-0000" value={fTelefone} onChange={e => setFTelefone(formatTelefoneProgressive(e.target.value))} inputMode="numeric" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-foreground mb-1.5">Turno</label>
