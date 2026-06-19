@@ -31,4 +31,10 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
 
+// Health check — used by Uptime Robot and the Render keep-alive ping.
+// Returns 200 so monitoring tools don't report the service as down.
+app.get("/", (_req, res) => {
+  res.status(200).json({ status: "ok" });
+});
+
 export default app;
