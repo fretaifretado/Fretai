@@ -379,6 +379,38 @@ interface PendingImport {
   conflicts: TurnoConflict[];
 }
 
+/**
+ * A turno detected in the spreadsheet that needs the user to provide
+ * a name before it can be created. Only shown for genuinely new shifts
+ * (no name+horario match found in the existing Turnos list).
+ */
+interface TurnoParaNomear {
+  /** The key used in turnoAgg (lowercased original name from sheet). */
+  key: string;
+  /** Original name as derived by autoNomeTurno or from the sheet. */
+  originalNome: string;
+  entrada: string;
+  saida: string;
+  escala: string;
+  tipoEscala: string;
+  count: number;
+  /** User-typed name. Starts as originalNome. */
+  nomeEditado: string;
+  /**
+   * When a turno exists in the system with the SAME horário but a
+   * different name, this holds the existing turno's data so the user
+   * can choose to reuse it instead of creating a new one.
+   */
+  matchByHorario?: { id: number; nome: string; entrada: string; saida: string };
+  /** Whether the user chose to reuse the existing matched turno. */
+  useExisting?: boolean;
+}
+
+interface PendingNamingImport {
+  pending: PendingImport;
+  turnosParaNomear: TurnoParaNomear[];
+}
+
 const API_URL = import.meta.env.VITE_API_URL ?? "";
 
 function getAuthHeaders(): HeadersInit {
@@ -501,6 +533,7 @@ export default function ColaboradoresPage() {
     turnosDetectados: TurnoDetectado[];
   } | null>(null);
   const [pendingImport, setPendingImport] = useState<PendingImport | null>(null);
+  const [pendingNaming, setPendingNaming] = useState<PendingNamingImport | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   async function handleDownloadTemplate() {
@@ -726,7 +759,46 @@ export default function ColaboradoresPage() {
         // without re-picking; clearing happens only after apply or cancel.
         setPendingImport(pending);
       } else {
-        void applyPendingImport(pending);
+        // Before applying, check if any NEW turno (not matched by name)
+        // can be matched by horário to an existing turno, OR needs the user
+        // to provide a custom name. Either condition triggers the naming modal.
+        const turnosParaNomear: TurnoParaNomear[] = [];
+
+        for (const [key, agg] of Array.from(turnoAgg.entries())) {
+          const existsByName = turnos.find(t => normalizeTurnoKey(t.nome) === key);
+          if (existsByName) continue; // already matched by name — no action needed
+
+          // Check if any existing turno has the same horário (entrada + saída)
+          const matchByHorario = (agg.entrada && agg.saida)
+            ? turnos.find(t =>
+                t.entrada === agg.entrada &&
+                t.saida === agg.saida
+              )
+            : undefined;
+
+          turnosParaNomear.push({
+            key,
+            originalNome: agg.nome,
+            entrada: agg.entrada,
+            saida: agg.saida,
+            escala: agg.escala,
+            tipoEscala: agg.tipoEscala,
+            count: agg.count,
+            nomeEditado: agg.nome,
+            matchByHorario: matchByHorario
+              ? { id: matchByHorario.id, nome: matchByHorario.nome, entrada: matchByHorario.entrada, saida: matchByHorario.saida }
+              : undefined,
+            useExisting: matchByHorario ? true : false,
+          });
+        }
+
+        if (turnosParaNomear.length > 0) {
+          // Show naming modal so the user can confirm/rename each new shift
+          // and choose whether to reuse matched-by-horário existing shifts.
+          setPendingNaming({ pending, turnosParaNomear });
+        } else {
+          void applyPendingImport(pending);
+        }
       }
     } catch (err) {
       setImportError(err instanceof Error ? err.message : "Erro ao processar a planilha.");
@@ -978,6 +1050,68 @@ export default function ColaboradoresPage() {
    */
   function cancelPendingImport() {
     setPendingImport(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  /**
+   * Called when the user confirms the naming modal. Applies each user
+   * decision: either reuse an existing turno (by remapping collaborators
+   * to the existing turno's name) or create a new turno with the user's
+   * chosen name (replacing the auto-derived name in turnoAgg and actions).
+   */
+  function applyNaming(namingState: PendingNamingImport) {
+    const { pending, turnosParaNomear } = namingState;
+
+    // Build a map from old turno key → final turno name to use
+    const keyToFinalName = new Map<string, string>();
+    for (const t of turnosParaNomear) {
+      if (t.useExisting && t.matchByHorario) {
+        // Reuse existing turno: map the key to the existing turno's name
+        keyToFinalName.set(t.key, t.matchByHorario.nome);
+      } else {
+        // Create new: use the user-provided name (trimmed, fallback to original)
+        keyToFinalName.set(t.key, t.nomeEditado.trim() || t.originalNome);
+      }
+    }
+
+    // Remap actions: replace turno name for any key that was renamed/reused
+    const remappedActions = pending.actions.map(a => {
+      const k = normalizeTurnoKey(a.turno);
+      const finalName = keyToFinalName.get(k);
+      if (!finalName) return a;
+      return { ...a, turno: finalName };
+    });
+
+    // Rebuild turnoAgg: for reused shifts, remove from agg (no new turno
+    // to create). For renamed shifts, update the nome in the agg entry.
+    const newAgg = new Map(pending.turnoAgg);
+    for (const t of turnosParaNomear) {
+      if (t.useExisting && t.matchByHorario) {
+        // Remove from agg — the existing turno already covers these collaborators
+        newAgg.delete(t.key);
+      } else {
+        const finalName = (t.nomeEditado.trim() || t.originalNome);
+        const prev = newAgg.get(t.key);
+        if (prev && finalName !== prev.nome) {
+          // Move to a new key with the new name
+          newAgg.delete(t.key);
+          newAgg.set(normalizeTurnoKey(finalName), { ...prev, nome: finalName });
+        }
+      }
+    }
+
+    const remappedPending: PendingImport = {
+      ...pending,
+      actions: remappedActions,
+      turnoAgg: newAgg,
+    };
+
+    setPendingNaming(null);
+    void applyPendingImport(remappedPending);
+  }
+
+  function cancelNaming() {
+    setPendingNaming(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
@@ -1620,6 +1754,167 @@ export default function ColaboradoresPage() {
           </div>
         </div>
       )}
+
+      {/* ── Shift Naming Modal ──
+          Shown when new shifts are detected whose name was auto-derived
+          (e.g. "Primeiro turno" from "06:00/14:00"). The user can:
+          - rename each shift to a custom name
+          - reuse an existing shift that has the same horário (detected automatically)
+      */}
+      {pendingNaming && (() => {
+        const { turnosParaNomear } = pendingNaming;
+        const hasMatchByHorario = turnosParaNomear.some(t => t.matchByHorario);
+        return (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <div className="bg-card border rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+              <div className="flex items-start gap-3 px-6 pt-6 pb-2">
+                <div className="h-10 w-10 rounded-full bg-accent/10 flex items-center justify-center shrink-0">
+                  <Clock size={18} className="text-accent" />
+                </div>
+                <div>
+                  <h2 className="font-bold text-base text-foreground">
+                    {hasMatchByHorario ? "Turnos detectados na planilha" : "Nomear novos turnos"}
+                  </h2>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    {hasMatchByHorario
+                      ? "Alguns turnos da planilha têm os mesmos horários de turnos já cadastrados. Escolha se deseja reaproveitar o turno existente ou criar um novo com outro nome."
+                      : "A planilha contém turnos novos. Confirme ou altere o nome de cada turno antes de importar."}
+                  </p>
+                </div>
+              </div>
+
+              <div className="px-6 py-4 space-y-3">
+                {turnosParaNomear.map((t, idx) => (
+                  <div key={t.key} className="border rounded-xl p-4 bg-muted/20 space-y-3">
+                    {/* Horário header */}
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-sm font-semibold text-foreground">
+                        {t.entrada || "—"} → {t.saida || "—"}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {t.count} colaborador{t.count !== 1 ? "es" : ""}
+                      </span>
+                    </div>
+
+                    {/* If a same-horário turno already exists, offer to reuse it */}
+                    {t.matchByHorario && (
+                      <div className="space-y-2">
+                        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                          Turno existente com mesmo horário
+                        </p>
+                        <label className="flex items-start gap-2.5 cursor-pointer group">
+                          <input
+                            type="radio"
+                            name={`turno-choice-${idx}`}
+                            className="mt-0.5 accent-accent"
+                            checked={!!t.useExisting}
+                            onChange={() => {
+                              setPendingNaming(prev => {
+                                if (!prev) return prev;
+                                const updated = prev.turnosParaNomear.map((x, i) =>
+                                  i === idx ? { ...x, useExisting: true } : x
+                                );
+                                return { ...prev, turnosParaNomear: updated };
+                              });
+                            }}
+                          />
+                          <div>
+                            <p className="text-sm font-semibold text-foreground group-hover:text-accent transition-colors">
+                              Usar &ldquo;{t.matchByHorario.nome}&rdquo;
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              Reaproveitar turno já existente — nenhum novo turno será criado
+                            </p>
+                          </div>
+                        </label>
+
+                        <label className="flex items-start gap-2.5 cursor-pointer group">
+                          <input
+                            type="radio"
+                            name={`turno-choice-${idx}`}
+                            className="mt-0.5 accent-accent"
+                            checked={!t.useExisting}
+                            onChange={() => {
+                              setPendingNaming(prev => {
+                                if (!prev) return prev;
+                                const updated = prev.turnosParaNomear.map((x, i) =>
+                                  i === idx ? { ...x, useExisting: false } : x
+                                );
+                                return { ...prev, turnosParaNomear: updated };
+                              });
+                            }}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-semibold text-foreground group-hover:text-accent transition-colors">
+                              Criar novo turno com nome personalizado
+                            </p>
+                            {!t.useExisting && (
+                              <input
+                                type="text"
+                                className="mt-1.5 w-full border rounded-lg px-3 py-2 text-sm bg-card focus:outline-none focus:ring-2 focus:ring-accent/50"
+                                placeholder="Nome do turno..."
+                                value={t.nomeEditado}
+                                onChange={e => {
+                                  const val = e.target.value;
+                                  setPendingNaming(prev => {
+                                    if (!prev) return prev;
+                                    const updated = prev.turnosParaNomear.map((x, i) =>
+                                      i === idx ? { ...x, nomeEditado: val } : x
+                                    );
+                                    return { ...prev, turnosParaNomear: updated };
+                                  });
+                                }}
+                              />
+                            )}
+                          </div>
+                        </label>
+                      </div>
+                    )}
+
+                    {/* No existing match — just let the user name it */}
+                    {!t.matchByHorario && (
+                      <div>
+                        <label className="block text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">
+                          Nome do turno
+                        </label>
+                        <input
+                          type="text"
+                          className="w-full border rounded-lg px-3 py-2 text-sm bg-card focus:outline-none focus:ring-2 focus:ring-accent/50"
+                          placeholder="Ex: Manhã, Tarde, Noturno..."
+                          value={t.nomeEditado}
+                          onChange={e => {
+                            const val = e.target.value;
+                            setPendingNaming(prev => {
+                              if (!prev) return prev;
+                              const updated = prev.turnosParaNomear.map((x, i) =>
+                                i === idx ? { ...x, nomeEditado: val } : x
+                              );
+                              return { ...prev, turnosParaNomear: updated };
+                            });
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex flex-col-reverse sm:flex-row gap-2 sm:gap-3 px-6 pb-6 pt-2">
+                <Button variant="outline" className="flex-1" onClick={cancelNaming}>
+                  Cancelar importação
+                </Button>
+                <Button
+                  className="flex-1 bg-accent hover:bg-accent/90 text-white font-semibold"
+                  disabled={pendingNaming.turnosParaNomear.some(t => !t.useExisting && !t.nomeEditado.trim())}
+                  onClick={() => applyNaming(pendingNaming)}
+                >
+                  Confirmar e importar
+                </Button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Duplicate-shift confirmation modal: appears when the spreadsheet
           contains the same turno name with conflicting horários. The
