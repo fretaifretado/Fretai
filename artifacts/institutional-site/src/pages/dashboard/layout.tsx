@@ -116,7 +116,7 @@ export default function DashboardLayout({ children, alertMessage }: LayoutProps)
         <div className="flex-1" />
         <div className="flex items-center gap-1 px-4">
           {pendencias > 0 && (
-            <button className="relative flex items-center justify-center h-9 w-9 rounded-lg hover:bg-white/10 transition-colors">
+            <button onClick={() => setLocation("/painel/pendencias")} className="relative flex items-center justify-center h-9 w-9 rounded-lg hover:bg-white/10 transition-colors" title={`${pendencias} colaboradores com pendências`}>
               <Bell size={17} />
               <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-400" />
             </button>
