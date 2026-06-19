@@ -806,10 +806,14 @@ export default function ColaboradoresPage() {
         const turnosParaNomear: TurnoParaNomear[] = [];
 
         for (const [key, agg] of Array.from(turnoAgg.entries())) {
+          console.log("[DEBUG] Processing turno agg:", { key, agg });
+          
           // If the agg entry's canonical name matches an existing turno, it was
           // already resolved (either by name or by horário match during parsing).
           const existsByName = turnos.find(t => normalizeTurnoKey(t.nome) === normalizeTurnoKey(agg.nome));
-          if (existsByName) continue; // already matched — no action needed
+          console.log("[DEBUG] existsByName:", existsByName, "agg.nome:", agg.nome);
+          
+          if (existsByName && agg.nome) continue; // already matched — no action needed
 
           // Check if any existing turno has the same horário (entrada + saída)
           // This handles the edge case where the agg key is a "horario:…" key
@@ -820,22 +824,50 @@ export default function ColaboradoresPage() {
                 t.saida === agg.saida
               )
             : undefined;
+          console.log("[DEBUG] matchByHorario:", matchByHorario);
 
-          turnosParaNomear.push({
-            key,
-            originalNome: agg.nome,
-            entrada: agg.entrada,
-            saida: agg.saida,
-            escala: agg.escala,
-            tipoEscala: agg.tipoEscala,
-            count: agg.count,
-            nomeEditado: agg.nome,
-            matchByHorario: matchByHorario
-              ? { id: matchByHorario.id, nome: matchByHorario.nome, entrada: matchByHorario.entrada, saida: matchByHorario.saida }
-              : undefined,
-            useExisting: matchByHorario ? true : false,
-          });
+          // If the name is empty but has horários, add to naming list
+          // so the user can provide a name
+          if (!agg.nome && (agg.entrada || agg.saida)) {
+            console.log("[DEBUG] Adding to naming list (empty name with horarios):", agg);
+            turnosParaNomear.push({
+              key,
+              originalNome: agg.nome,
+              entrada: agg.entrada,
+              saida: agg.saida,
+              escala: agg.escala,
+              tipoEscala: agg.tipoEscala,
+              count: agg.count,
+              nomeEditado: agg.nome,
+              matchByHorario: matchByHorario
+                ? { id: matchByHorario.id, nome: matchByHorario.nome, entrada: matchByHorario.entrada, saida: matchByHorario.saida }
+                : undefined,
+              useExisting: matchByHorario ? true : false,
+            });
+            continue;
+          }
+
+          // Only add to naming list if it doesn't exist by name and has a name
+          if (agg.nome && !existsByName) {
+            console.log("[DEBUG] Adding to naming list (new name):", agg);
+            turnosParaNomear.push({
+              key,
+              originalNome: agg.nome,
+              entrada: agg.entrada,
+              saida: agg.saida,
+              escala: agg.escala,
+              tipoEscala: agg.tipoEscala,
+              count: agg.count,
+              nomeEditado: agg.nome,
+              matchByHorario: matchByHorario
+                ? { id: matchByHorario.id, nome: matchByHorario.nome, entrada: matchByHorario.entrada, saida: matchByHorario.saida }
+                : undefined,
+              useExisting: matchByHorario ? true : false,
+            });
+          }
         }
+        
+        console.log("[DEBUG] turnosParaNomear length:", turnosParaNomear.length);
 
         if (turnosParaNomear.length > 0) {
           // Show naming modal so the user can confirm/rename each new shift
