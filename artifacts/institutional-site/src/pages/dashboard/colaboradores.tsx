@@ -805,6 +805,9 @@ export default function ColaboradoresPage() {
         // to provide a custom name. Either condition triggers the naming modal.
         const turnosParaNomear: TurnoParaNomear[] = [];
 
+        console.log("[DEBUG] turnoAgg entries:", Array.from(turnoAgg.entries()));
+        console.log("[DEBUG] turnoAgg size:", turnoAgg.size);
+        
         for (const [key, agg] of Array.from(turnoAgg.entries())) {
           console.log("[DEBUG] Processing turno agg:", { key, agg });
           
