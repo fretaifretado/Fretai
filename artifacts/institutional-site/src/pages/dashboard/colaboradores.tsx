@@ -809,7 +809,8 @@ export default function ColaboradoresPage() {
           // Todos os colaboradores importados começam como "Ativo" no banco.
           // "Admissão" é exibição visual apenas (derivado da data futura no frontend).
           status: "Ativo",
-          turno: turno || "—",
+          // When nome is empty but horários are present, use the horário-based key
+          turno: (turno && turno !== "—") ? turno : (horarioEntradaRow && horarioSaidaRow ? `horario:${horarioEntradaRow}|${horarioSaidaRow}` : "—"),
           local: filialAtiva?.nome ?? nomeEmpresaAtiva ?? "",
           filialId: filialAtiva?.id ?? null,
           endereco,
