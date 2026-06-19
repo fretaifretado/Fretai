@@ -650,6 +650,8 @@ export default function ColaboradoresPage() {
         //   3. A name already aggregated from an earlier row in this batch
         //   4. The auto-derived name from parseTurnoCombinado
         let turno = turnoNomeDerived;
+        
+        // Allow aggregation even when nome is empty (user will provide name later)
         if (turnoNomeDerived && turnoNomeDerived !== "—") {
           const nameKey = normalizeTurnoKey(turnoNomeDerived);
 
@@ -706,6 +708,57 @@ export default function ColaboradoresPage() {
             });
           }
 
+          if (horarioEntradaRow && horarioSaidaRow) {
+            const variantsForKey = turnoVariants.get(aggKey) ?? new Map();
+            const variantKey = `${horarioEntradaRow}|${horarioSaidaRow}|${parsed.escala}`;
+            const existingVariant = variantsForKey.get(variantKey);
+            if (existingVariant) {
+              existingVariant.count += 1;
+            } else {
+              variantsForKey.set(variantKey, {
+                entrada: horarioEntradaRow,
+                saida: horarioSaidaRow,
+                escala: parsed.escala,
+                tipoEscala: parsed.tipoEscala,
+                count: 1,
+              });
+            }
+            turnoVariants.set(aggKey, variantsForKey);
+          }
+        } else if (horarioEntradaRow && horarioSaidaRow) {
+          // Handle case where nome is empty but horários are present
+          // This happens when user provides horários without names
+          const horarioMatchExisting = turnos.find(t => t.entrada === horarioEntradaRow && t.saida === horarioSaidaRow);
+          
+          let aggKey: string;
+          let canonical: string;
+          
+          if (horarioMatchExisting) {
+            // Use existing turno with matching horário
+            aggKey = normalizeTurnoKey(horarioMatchExisting.nome);
+            canonical = horarioMatchExisting.nome;
+          } else {
+            // Create new entry keyed by horário
+            aggKey = `horario:${horarioEntradaRow}|${horarioSaidaRow}`;
+            canonical = "";
+          }
+          
+          turno = canonical;
+          
+          const prev = turnoAgg.get(aggKey);
+          if (prev) {
+            prev.count += 1;
+          } else {
+            turnoAgg.set(aggKey, {
+              nome: canonical,
+              entrada: horarioEntradaRow,
+              saida: horarioSaidaRow,
+              escala: parsed.escala,
+              tipoEscala: parsed.tipoEscala,
+              count: 1,
+            });
+          }
+          
           if (horarioEntradaRow && horarioSaidaRow) {
             const variantsForKey = turnoVariants.get(aggKey) ?? new Map();
             const variantKey = `${horarioEntradaRow}|${horarioSaidaRow}|${parsed.escala}`;
