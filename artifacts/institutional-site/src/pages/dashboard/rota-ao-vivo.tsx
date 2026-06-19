@@ -11,11 +11,11 @@ const VANS = [
 ];
 
 const TRAJETOS = [
-  { origem: [-22.9050, -47.0600], destino: [-22.9150, -47.0450] },
-  { origem: [-22.9000, -47.0700], destino: [-22.9200, -47.0500] },
-  { origem: [-22.8950, -47.0650], destino: [-22.9100, -47.0400] },
-  { origem: [-22.9180, -47.0680], destino: [-22.9020, -47.0520] },
-  { origem: [-22.9080, -47.0750], destino: [-22.9160, -47.0480] },
+  { origem: [-22.7600, -47.1500], destino: [-22.7700, -47.1350] },
+  { origem: [-22.7550, -47.1600], destino: [-22.7750, -47.1400] },
+  { origem: [-22.7500, -47.1550], destino: [-22.7650, -47.1300] },
+  { origem: [-22.7730, -47.1580], destino: [-22.7570, -47.1420] },
+  { origem: [-22.7630, -47.1650], destino: [-22.7710, -47.1380] },
 ];
 
 async function buscarRota(origem: number[], destino: number[]): Promise<number[][]> {
@@ -66,7 +66,7 @@ export default function RotaAoVivoPage() {
       const L = (window as any).L;
       if (cancelled || !L || !mapRef.current) return;
 
-      map = L.map(mapRef.current).setView([-22.9099, -47.0626], 14);
+      map = L.map(mapRef.current).setView([-22.7649, -47.1536], 14);
 
       // Garante o cálculo correto do tamanho após a montagem
       setTimeout(() => { if (map) map.invalidateSize(); }, 0);
