@@ -118,12 +118,19 @@ function isWorkingDay(wd: number, tipoEscala: string, escala?: string | null): b
   return true;
 }
 
-function autoNomeTurno(entrada: string, saida: string): string {
+function autoNomeTurno(entrada: string, saida: string, existingTurnos?: any[]): string {
   const k = `${entrada}/${saida}`;
   if (k === "06:00/14:00") return "Primeiro turno";
   if (k === "14:00/22:00") return "Segundo turno";
   if (k === "22:00/06:00") return "Terceiro turno";
   if (k === "08:00/17:30") return "ADM";
+  
+  // Check if there's an existing turno with these exact horários
+  if (existingTurnos) {
+    const existing = existingTurnos.find(t => t.entrada === entrada && t.saida === saida);
+    if (existing) return existing.nome;
+  }
+  
   return "Turno extra";
 }
 
@@ -143,7 +150,7 @@ interface ParsedTurno {
  * - "12x36" / "24x48"       → rotative schedule shortcuts
  * - Anything else            → treated as an old-format plain turno name (backward compat)
  */
-function parseTurnoCombinado(val: string): ParsedTurno {
+function parseTurnoCombinado(val: string, existingTurnos?: any[]): ParsedTurno {
   const v = val.trim();
   if (!v) return { nome: "", entrada: "", saida: "", escala: "", tipoEscala: "", isCombined: false };
 
@@ -156,14 +163,14 @@ function parseTurnoCombinado(val: string): ParsedTurno {
     const saida      = matchFull[2]!.padStart(5, "0");
     const diasStr    = normalizeEscala(matchFull[3]).replace(/\s+/g, "");
     const tipoEscala = tipoEscalaFromDias(diasStr);
-    return { nome: autoNomeTurno(entrada, saida), entrada, saida, escala: diasStr, tipoEscala, isCombined: true };
+    return { nome: autoNomeTurno(entrada, saida, existingTurnos), entrada, saida, escala: diasStr, tipoEscala, isCombined: true };
   }
 
   const matchShort = v.match(/^(\d{1,2}:\d{2})\s*\/\s*(\d{1,2}:\d{2})$/);
   if (matchShort) {
     const entrada = matchShort[1]!.padStart(5, "0");
     const saida   = matchShort[2]!.padStart(5, "0");
-    return { nome: autoNomeTurno(entrada, saida), entrada, saida, escala: "", tipoEscala: "", isCombined: true };
+    return { nome: autoNomeTurno(entrada, saida, existingTurnos), entrada, saida, escala: "", tipoEscala: "", isCombined: true };
   }
 
   return { nome: v, entrada: "", saida: "", escala: "", tipoEscala: "", isCombined: false };
@@ -623,7 +630,7 @@ export default function ColaboradoresPage() {
         if (cpfNorm) batchCpfs.add(cpfNorm);
 
         const turnoRaw = pick(r, "Turno").trim();
-        const parsed = parseTurnoCombinado(turnoRaw);
+        const parsed = parseTurnoCombinado(turnoRaw, turnos);
 
         // Backward compat: for old-format rows (plain turno name + separate
         // "Horário entrada"/"Horário saída" columns), fall back to those columns.
