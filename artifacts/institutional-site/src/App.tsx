@@ -41,7 +41,7 @@ const RelatoriosPage       = lazy(() => import("@/pages/dashboard/relatorios"));
 /* Fallback invisível — mantém o layout montado, sem flash branco */
 function PageFallback() {
   return (
-    <div className="flex-1 flex items-center justify-center min-h-[60vh]">
+    <div className="flex-1 flex items-center justify-center min-h-[60vh] bg-muted/30">
       <div className="w-6 h-6 rounded-full border-2 border-accent border-t-transparent animate-spin opacity-40" />
     </div>
   );
