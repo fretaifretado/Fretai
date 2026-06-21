@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, memo } from "react";
 import { useLocation, Link } from "wouter";
 import {
   LayoutDashboard, Users, Shuffle, AlertTriangle,
@@ -51,7 +51,7 @@ const NAV: NavSection[] = [
 
 interface LayoutProps { children: React.ReactNode; alertMessage?: string }
 
-export default function DashboardLayout({ children, alertMessage }: LayoutProps) {
+const DashboardLayout = memo(function DashboardLayout({ children, alertMessage }: LayoutProps) {
   const [location, setLocation] = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -262,4 +262,4 @@ export default function DashboardLayout({ children, alertMessage }: LayoutProps)
       />
     </div>
   );
-}
+});
