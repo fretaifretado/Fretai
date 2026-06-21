@@ -83,6 +83,18 @@ const DashboardLayout = memo(function DashboardLayout({ children, alertMessage }
     else setAuthed(true);
   }, [location, setLocation]);
 
+  // Prevenir overflow duplo quando sidebar está aberta
+  useEffect(() => {
+    if (sidebarOpen) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [sidebarOpen]);
+
   function logout() {
     localStorage.removeItem("jwt_token");
     localStorage.removeItem("jwt_username");
@@ -159,7 +171,7 @@ const DashboardLayout = memo(function DashboardLayout({ children, alertMessage }
         </div>
       )}
 
-      <div className="flex flex-1 relative overflow-hidden">
+      <div className={`flex flex-1 relative ${sidebarOpen ? "overflow-hidden" : "overflow-hidden"}`}>
         {sidebarOpen && <div className="lg:hidden fixed inset-0 z-30 bg-black/40 backdrop-blur-sm" onClick={() => setSidebarOpen(false)} />}
 
         {/* Sidebar */}
