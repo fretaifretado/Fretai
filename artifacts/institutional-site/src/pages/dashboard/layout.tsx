@@ -275,3 +275,5 @@ const DashboardLayout = memo(function DashboardLayout({ children, alertMessage }
     </div>
   );
 });
+
+export default DashboardLayout;
