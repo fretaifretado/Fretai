@@ -18,34 +18,24 @@ import Admin from "@/pages/admin";
 /* ── Parceiro Dashboard ── */
 import MotoristasPage from "@/pages/parceiro/motoristas";
 
-/* ── SaaS Dashboard — lazy loaded para evitar flash branco na navegação ── */
+/* ── SaaS Dashboard — import direto para evitar flash branco na navegação ── */
 import { DashboardProvider } from "@/pages/dashboard/context";
 import DashboardPage       from "@/pages/dashboard/index";
-
-const ColaboradoresPage    = lazy(() => import("@/pages/dashboard/colaboradores"));
-const MovimentacaoPage     = lazy(() => import("@/pages/dashboard/movimentacao"));
-const PendenciasPage       = lazy(() => import("@/pages/dashboard/pendencias"));
-const StatusAgendadosPage  = lazy(() => import("@/pages/dashboard/status-agendados"));
-const RotaAoVivoPage       = lazy(() => import("@/pages/dashboard/rota-ao-vivo"));
-const RotasAgendadasPage   = lazy(() => import("@/pages/dashboard/rotas-agendadas"));
-const ComprasPage          = lazy(() => import("@/pages/dashboard/compras"));
-const NotasFiscaisPage     = lazy(() => import("@/pages/dashboard/notas-fiscais"));
-const FeriadosPage         = lazy(() => import("@/pages/dashboard/feriados"));
-const TurnosPage           = lazy(() => import("@/pages/dashboard/turnos"));
-const UsuariosPage         = lazy(() => import("@/pages/dashboard/usuarios"));
-const GruposPage           = lazy(() => import("@/pages/dashboard/grupos"));
-const FiliaisPage          = lazy(() => import("@/pages/dashboard/filiais"));
-const DemoGateway          = lazy(() => import("@/pages/dashboard/demo"));
-const RelatoriosPage       = lazy(() => import("@/pages/dashboard/relatorios"));
-
-/* Fallback invisível — mantém o layout montado, sem flash branco */
-function PageFallback() {
-  return (
-    <div className="flex-1 flex items-center justify-center min-h-[60vh] bg-muted/30">
-      <div className="w-6 h-6 rounded-full border-2 border-accent border-t-transparent animate-spin opacity-40" />
-    </div>
-  );
-}
+import ColaboradoresPage    from "@/pages/dashboard/colaboradores";
+import MovimentacaoPage     from "@/pages/dashboard/movimentacao";
+import PendenciasPage       from "@/pages/dashboard/pendencias";
+import StatusAgendadosPage  from "@/pages/dashboard/status-agendados";
+import RotaAoVivoPage       from "@/pages/dashboard/rota-ao-vivo";
+import RotasAgendadasPage   from "@/pages/dashboard/rotas-agendadas";
+import ComprasPage          from "@/pages/dashboard/compras";
+import NotasFiscaisPage     from "@/pages/dashboard/notas-fiscais";
+import FeriadosPage         from "@/pages/dashboard/feriados";
+import TurnosPage           from "@/pages/dashboard/turnos";
+import UsuariosPage         from "@/pages/dashboard/usuarios";
+import GruposPage           from "@/pages/dashboard/grupos";
+import FiliaisPage          from "@/pages/dashboard/filiais";
+import DemoGateway          from "@/pages/dashboard/demo";
+import RelatoriosPage       from "@/pages/dashboard/relatorios";
 
 const queryClient = new QueryClient();
 
@@ -63,7 +53,7 @@ function Router() {
       <Route path="/login" component={Login} />
       <Route path="/admin" component={Admin} />
       <Route path="/painel-demo">
-        <Suspense fallback={<PageFallback />}><DemoGateway /></Suspense>
+        <DashboardProvider><DemoGateway /></DashboardProvider>
       </Route>
 
       {/* Parceiro Dashboard */}
@@ -73,25 +63,23 @@ function Router() {
       {/* SaaS Dashboard — todas as rotas compartilham um único DashboardProvider */}
       <Route>
         <DashboardProvider>
-          <Suspense fallback={<PageFallback />}>
-            <Switch>
-              <Route path="/painel"                    component={DashboardPage} />
-              <Route path="/painel/relatorios"         component={DashboardPage} />
-              <Route path="/painel/colaboradores"      component={ColaboradoresPage} />
-              <Route path="/painel/movimentacao"       component={MovimentacaoPage} />
-              <Route path="/painel/pendencias"         component={PendenciasPage} />
-              <Route path="/painel/status-agendados"   component={StatusAgendadosPage} />
-              <Route path="/painel/rota-ao-vivo"       component={RotaAoVivoPage} />
-              <Route path="/painel/rotas-agendadas"    component={RotasAgendadasPage} />
-              <Route path="/painel/compras"            component={ComprasPage} />
-              <Route path="/painel/notas-fiscais"      component={NotasFiscaisPage} />
-              <Route path="/painel/feriados"           component={FeriadosPage} />
-              <Route path="/painel/turnos"             component={TurnosPage} />
-              <Route path="/painel/usuarios"           component={UsuariosPage} />
-              <Route path="/painel/grupos"             component={GruposPage} />
-              <Route path="/painel/filiais"            component={FiliaisPage} />
-            </Switch>
-          </Suspense>
+          <Switch>
+            <Route path="/painel"                    component={DashboardPage} />
+            <Route path="/painel/relatorios"         component={DashboardPage} />
+            <Route path="/painel/colaboradores"      component={ColaboradoresPage} />
+            <Route path="/painel/movimentacao"       component={MovimentacaoPage} />
+            <Route path="/painel/pendencias"         component={PendenciasPage} />
+            <Route path="/painel/status-agendados"   component={StatusAgendadosPage} />
+            <Route path="/painel/rota-ao-vivo"       component={RotaAoVivoPage} />
+            <Route path="/painel/rotas-agendadas"    component={RotasAgendadasPage} />
+            <Route path="/painel/compras"            component={ComprasPage} />
+            <Route path="/painel/notas-fiscais"      component={NotasFiscaisPage} />
+            <Route path="/painel/feriados"           component={FeriadosPage} />
+            <Route path="/painel/turnos"             component={TurnosPage} />
+            <Route path="/painel/usuarios"           component={UsuariosPage} />
+            <Route path="/painel/grupos"             component={GruposPage} />
+            <Route path="/painel/filiais"            component={FiliaisPage} />
+          </Switch>
         </DashboardProvider>
       </Route>
 

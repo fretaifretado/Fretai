@@ -158,6 +158,6 @@
   }
 
   body {
-    @apply font-sans antialiased bg-background text-foreground;
+    @apply font-sans antialiased bg-muted/30 text-foreground;
   }
 }
