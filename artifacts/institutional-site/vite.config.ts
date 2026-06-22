@@ -75,7 +75,7 @@ export default defineConfig({
 
     proxy: {
       "/api": {
-        target: "https://fretai-1.onrender.com",
+        target: "https://fretaiserver.onrender.com",
         changeOrigin: true,
         secure: false,
       },
