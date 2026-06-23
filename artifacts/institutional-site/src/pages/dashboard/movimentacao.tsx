@@ -290,7 +290,7 @@ export default function MovimentacaoPage() {
         <div className="mb-8">
           <div className="flex items-center gap-2 mb-1">
             <Shuffle size={18} className="text-accent" />
-            <h1 className="text-xl font-bold text-foreground">Movimentação em Bloco</h1>
+            <h1 className="text-xl font-bold text-foreground">Movimentar colaboradores</h1>
           </div>
           <p className="text-muted-foreground text-sm">
             Agende alterações de turno, status ou filial com data de início e fim.

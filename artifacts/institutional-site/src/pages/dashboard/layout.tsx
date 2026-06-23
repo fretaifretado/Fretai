@@ -20,7 +20,7 @@ const NAV: NavSection[] = [
     title: "COLABORADORES",
     items: [
       { icon: Users,         label: "Meus colaboradores",    path: "/painel/colaboradores" },
-      { icon: Shuffle,       label: "Movimentação em bloco", path: "/painel/movimentacao" },
+      { icon: Shuffle,       label: "Movimentar colaboradores", path: "/painel/movimentacao" },
       { icon: AlertTriangle, label: "Pendências",            path: "/painel/pendencias" },
       { icon: CalendarClock, label: "Status agendados",      path: "/painel/status-agendados" },
     ],
