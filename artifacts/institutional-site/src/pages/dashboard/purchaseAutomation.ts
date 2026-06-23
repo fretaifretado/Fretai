@@ -476,17 +476,9 @@ export async function processCompanyPurchaseOrders(params: {
   );
   const precisaSalvar = previewItems.filter(item => {
     const existing = pedidosDoPeriodo.get(item.colaborador.id);
-    if (!existing) return true;
-    return (
-      existing.turno !== item.turnoNome ||
-      existing.dataInicio !== item.dataInicio ||
-      existing.dataFim !== item.dataFim ||
-      existing.dias !== item.dias ||
-      existing.vales !== item.vales ||
-      Math.abs(existing.valorUnit - item.valorUnit) > 0.001 ||
-      Math.abs(existing.total - item.total) > 0.001 ||
-      existing.proRata !== item.proRata
-    );
+    // Não atualizar purchase orders existentes - elas devem permanecer fixas
+    // Apenas criar novas se não existirem
+    return !existing;
   });
   if (precisaSalvar.length === 0) return [];
 

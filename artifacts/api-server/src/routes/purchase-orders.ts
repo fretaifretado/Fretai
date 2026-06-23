@@ -225,21 +225,13 @@ router.post(
           .map(o => [`${o.employeeId}:${o.periodo}`, o]),
       );
 
+      // Purchase orders devem ser fixas - não atualizar existentes
+      // Apenas criar novas se não existirem
       const itemsToInsert = body.items.filter(item =>
         item.employeeId === null || !existingByKey.has(`${item.employeeId}:${item.periodo}`),
       );
-      const itemsToUpdate = body.items
-        .map(item => ({ item, existing: item.employeeId === null ? undefined : existingByKey.get(`${item.employeeId}:${item.periodo}`) }))
-        .filter(({ item, existing }) => existing && (
-          existing.dataInicio !== item.dataInicio ||
-          existing.dataFim !== item.dataFim ||
-          existing.dias !== item.dias ||
-          existing.vales !== item.vales ||
-          Number(existing.valorUnit) !== item.valorUnit ||
-          Number(existing.total) !== item.total
-        )) as Array<{ item: (typeof body.items)[number]; existing: NonNullable<ReturnType<typeof existingByKey.get>> }>;
 
-      if (itemsToInsert.length === 0 && itemsToUpdate.length === 0) {
+      if (itemsToInsert.length === 0) {
         req.log.info(
           { userId: auth.sub, companyId: body.companyId, count: 0, skipped: body.items.length },
           "Purchase orders already existed",
@@ -248,56 +240,33 @@ router.post(
         return;
       }
 
-      const inserted = itemsToInsert.length > 0
-        ? await db
-          .insert(purchaseOrdersTable)
-          .values(
-            itemsToInsert.map(item => ({
-              companyId: body.companyId,
-              employeeId: item.employeeId ?? null,
-              nome: item.nome,
-              turno: item.turno,
-              periodo: item.periodo,
-              dataInicio: item.dataInicio,
-              dataFim: item.dataFim,
-              dias: item.dias,
-              vales: item.vales,
-              valorUnit: String(item.valorUnit),
-              total: String(item.total),
-              status: "Aprovado" as const,
-              proRata: item.proRata,
-            })),
-          )
-          .returning()
-        : [];
-
-      const updated = [];
-      for (const { item, existing: existingOrder } of itemsToUpdate) {
-        const [row] = await db.update(purchaseOrdersTable)
-          .set({
+      const inserted = await db
+        .insert(purchaseOrdersTable)
+        .values(
+          itemsToInsert.map(item => ({
+            companyId: body.companyId,
+            employeeId: item.employeeId ?? null,
             nome: item.nome,
             turno: item.turno,
+            periodo: item.periodo,
             dataInicio: item.dataInicio,
             dataFim: item.dataFim,
             dias: item.dias,
             vales: item.vales,
             valorUnit: String(item.valorUnit),
             total: String(item.total),
+            status: "Aprovado" as const,
             proRata: item.proRata,
-          })
-          .where(eq(purchaseOrdersTable.id, existingOrder.id))
-          .returning();
-        if (row) updated.push(row);
-      }
+          })),
+        )
+        .returning();
 
       req.log.info(
-        { userId: auth.sub, companyId: body.companyId, inserted: inserted.length, updated: updated.length, skipped: body.items.length - itemsToInsert.length - itemsToUpdate.length },
+        { userId: auth.sub, companyId: body.companyId, inserted: inserted.length, skipped: body.items.length - itemsToInsert.length },
         "Purchase orders saved",
       );
 
-      res.status(201).json(
-        [...inserted, ...updated].map(serializePurchaseOrder),
-      );
+      res.status(201).json(inserted.map(serializePurchaseOrder));
     } catch (err) {
       req.log.error({ err }, "Error creating purchase orders");
       res.status(500).json(internalErrorPayload(err));
