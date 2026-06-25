@@ -417,6 +417,12 @@ function getAuthHeaders(): HeadersInit {
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
 }
 
+function shouldShowPurchaseAlert(): boolean {
+  const today = new Date();
+  const day = today.getDate();
+  return day >= 23 && day <= 27;
+}
+
 export default function ColaboradoresPage() {
   const { colaboradoresDaFilial: colaboradores, colaboradores: todosColaboradores, addColaborador, addColaboradorLocal, updateColaborador, deleteColaborador, turnos, addTurno, updateTurno, filiais, filialAtiva, empresaAtiva, nomeEmpresaAtiva } = useDashboard();
   const [search, setSearch] = useState("");
@@ -1428,6 +1434,15 @@ export default function ColaboradoresPage() {
             </Button>
           </div>
         </div>
+
+        {shouldShowPurchaseAlert() && (
+          <div className="bg-amber-500/10 border border-amber-500/20 px-4 py-3 rounded-lg flex items-start gap-3 mb-4">
+            <AlertTriangle size={18} className="text-amber-600 shrink-0 mt-0.5" />
+            <p className="text-sm text-amber-800 font-medium leading-relaxed">
+              Lembrete: Agende os status dos colaboradores (férias, afastamento, desligamento) até o dia 28 para que as compras sejam calculadas corretamente.
+            </p>
+          </div>
+        )}
 
         {/* Status filter pills */}
         <div className="flex flex-wrap items-center gap-2 mb-4">
