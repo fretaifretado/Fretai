@@ -3,6 +3,29 @@ import type { Colaborador, Empresa, Filial, Turno } from "./context";
 
 export type StatusPedido = "Processando" | "Aprovado" | "Cancelado";
 
+export type TipoAgendamento = "turno" | "status" | "filial";
+export type EstadoAgendamento = "pendente" | "ativo" | "concluido";
+
+export interface AgendamentoAlvo {
+  colaboradorId: number;
+  valorAnterior: string;
+  filialIdAnterior: number | null;
+  appliedAt: string | null;
+  revertedAt: string | null;
+}
+
+export interface Agendamento {
+  id: number;
+  tipo: TipoAgendamento;
+  valorNovo: string;
+  filialIdNovo: number | null;
+  inicio: string;
+  fim: string;
+  estado: EstadoAgendamento;
+  criadoEm: string;
+  alvos: AgendamentoAlvo[];
+}
+
 export interface PedidoCompra {
   id: number;
   colaboradorId: number;
@@ -235,6 +258,8 @@ export function calcularDiasNoMes(
   mes: number,
   feriados: Set<string> = new Set(),
   escala?: string | null,
+  colaboradorId?: number,
+  agendamentos?: Agendamento[],
 ): { dias: number; proRata: boolean; fromDay: number } {
   const start = parseInicioOp(inicioOp);
   const hoje = new Date();
@@ -262,7 +287,13 @@ export function calcularDiasNoMes(
           const dateStr = `${ano}-${String(mes).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
           if (feriados.has(dateStr)) continue;
           const wd = new Date(ano, mes - 1, day).getDay();
-          if (isWorkingDay(wd, tipoEscala, escala)) dias++;
+          if (!isWorkingDay(wd, tipoEscala, escala)) continue;
+          // Check for scheduled movements if provided
+          if (colaboradorId && agendamentos) {
+            const { shouldCount } = hasActiveScheduledMovement(colaboradorId, dateStr, agendamentos);
+            if (!shouldCount) continue;
+          }
+          dias++;
         }
       }
       return { dias, proRata: true, fromDay };
@@ -302,7 +333,13 @@ export function calcularDiasNoMes(
       const dateStr = `${ano}-${String(mes).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
       if (feriados.has(dateStr)) continue;
       const wd = new Date(ano, mes - 1, day).getDay();
-      if (isWorkingDay(wd, tipoEscala, escala)) dias++;
+      if (!isWorkingDay(wd, tipoEscala, escala)) continue;
+      // Check for scheduled movements if provided
+      if (colaboradorId && agendamentos) {
+        const { shouldCount } = hasActiveScheduledMovement(colaboradorId, dateStr, agendamentos);
+        if (!shouldCount) continue;
+      }
+      dias++;
     }
   } else if (!start) {
     dias = 0;
@@ -384,6 +421,43 @@ export async function loadCompanyHolidays(): Promise<string[]> {
   return data.map(h => h.date);
 }
 
+export async function fetchScheduledMovements(companyId: number): Promise<Agendamento[]> {
+  const res = await fetchWithTimeout(`${API_URL}/api/me/scheduled-movements`, {
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) return [];
+  return await res.json() as Agendamento[];
+}
+
+const INACTIVE_STATUSES = new Set(["Home Office", "Férias", "Licença", "Afastado", "Desligado"]);
+
+function hasActiveScheduledMovement(
+  colaboradorId: number,
+  dateStr: string,
+  agendamentos: Agendamento[],
+): { shouldCount: boolean; reason?: string } {
+  for (const ag of agendamentos) {
+    // Check if this agendamento applies to this employee
+    const target = ag.alvos.find(a => a.colaboradorId === colaboradorId);
+    if (!target) continue;
+
+    // Check if the date is within the agendamento window
+    if (dateStr < ag.inicio || dateStr > ag.fim) continue;
+
+    // For status changes, check if it's an inactive status
+    if (ag.tipo === "status" && INACTIVE_STATUSES.has(ag.valorNovo)) {
+      return { shouldCount: false, reason: `Status inativo: ${ag.valorNovo}` };
+    }
+
+    // For filial changes, don't count days from the transfer date onwards
+    if (ag.tipo === "filial") {
+      return { shouldCount: false, reason: "Mudança de filial" };
+    }
+  }
+
+  return { shouldCount: true };
+}
+
 export function buildHolidaySet(periodoAno: number, feriadosCustom: string[]): Set<string> {
   const anos = [periodoAno - 1, periodoAno, periodoAno + 1];
   const nacionais = anos.flatMap(getFeriadosNacionais);
@@ -408,13 +482,14 @@ export function buildPurchasePreview(params: {
   periodoMes: number;
   valeDiario: number;
   feriados: Set<string>;
+  agendamentos?: Agendamento[];
 }): PreviewItem[] {
-  const { colaboradores, turnos, periodoAno, periodoMes, valeDiario, feriados } = params;
+  const { colaboradores, turnos, periodoAno, periodoMes, valeDiario, feriados, agendamentos } = params;
   return getEligibleEmployees(colaboradores)
     .map(c => {
       const t = turnos.find(x => normalizeTurnoKey(x.nome) === normalizeTurnoKey(c.turno));
       const escala = inferTipoEscala(c.turno, t);
-      const { dias, proRata, fromDay } = calcularDiasNoMes(escala, c.inicioOperacao, periodoAno, periodoMes, feriados, t?.escala);
+      const { dias, proRata, fromDay } = calcularDiasNoMes(escala, c.inicioOperacao, periodoAno, periodoMes, feriados, t?.escala, c.id, agendamentos);
       const vales = dias * 2;
       const total = vales * valeDiario;
       const dataInicio = formatDate(periodoAno, periodoMes, fromDay);
@@ -463,6 +538,7 @@ export async function processCompanyPurchaseOrders(params: {
   periodoMes: number;
   valeDiario: number;
   feriados: Set<string>;
+  agendamentos?: Agendamento[];
 }): Promise<PedidoCompra[]> {
   const previewItems = buildPurchasePreview(params);
   if (previewItems.length === 0) return [];
@@ -532,6 +608,9 @@ export function usePurchaseOrderAutomation(params: {
           const colabsDaEmpresa = colaboradores.filter(c => c.filialId === cid);
           if (colabsDaEmpresa.length === 0) continue;
 
+          // Fetch scheduled movements for this company
+          const agendamentos = await fetchScheduledMovements(cid);
+
           const saved = await processCompanyPurchaseOrders({
             companyId: cid,
             colaboradores: colabsDaEmpresa,
@@ -540,6 +619,7 @@ export function usePurchaseOrderAutomation(params: {
             periodoMes,
             valeDiario: parseFloat(empresaAtiva.valeValue ?? "8.50"),
             feriados,
+            agendamentos,
           });
           totalSaved += saved.length;
         }
