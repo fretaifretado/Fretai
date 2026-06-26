@@ -1439,7 +1439,7 @@ export default function ColaboradoresPage() {
           <div className="bg-amber-500/10 border border-amber-500/20 px-4 py-3 rounded-lg flex items-start gap-3 mb-4">
             <AlertTriangle size={18} className="text-amber-600 shrink-0 mt-0.5" />
             <p className="text-sm text-amber-800 font-medium leading-relaxed">
-              Lembrete: Agende os status dos colaboradores (férias, afastamento, desligamento) até o dia 28 para que as compras sejam calculadas corretamente.
+              Atenção: para garantir a otimização da sua compra no próximo mês, registre na plataforma até o dia 28 os colaboradores que iniciarão o mês seguinte de férias.
             </p>
           </div>
         )}

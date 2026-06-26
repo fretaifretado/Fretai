@@ -180,6 +180,94 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
             .where(eq(employeesTable.id, t.colaboradorId));
         }
       }
+
+      // ── Mudança de status inativo: cancelar vales e gerar crédito ──────────
+      // Quando um agendamento de tipo "status" é ativado para um status inativo
+      // (Desligado, Férias, Licença, Afastado), precisamos:
+      // 1) Cancelar todos os pedidos de compra ativos/aprovados
+      // 2) Registrar um pedido de desconto (vales não utilizados)
+      // 3) Atualizar o status do colaborador na tabela employees
+      const INACTIVE_STATUSES = ["Desligado", "Férias", "Licença", "Afastado"];
+      const statusMovements = await tx
+        .select({
+          id: scheduledMovementsTable.id,
+          tipo: scheduledMovementsTable.tipo,
+          valorNovo: scheduledMovementsTable.valorNovo,
+        })
+        .from(scheduledMovementsTable)
+        .where(and(
+          inArray(scheduledMovementsTable.id, ids),
+          eq(scheduledMovementsTable.tipo, "status"),
+        ));
+
+      for (const mv of statusMovements) {
+        if (!INACTIVE_STATUSES.includes(mv.valorNovo)) continue;
+
+        // Get all targets (colaboradores) of this movement
+        const targets = await tx
+          .select({
+            colaboradorId: scheduledMovementTargetsTable.colaboradorId,
+            valorAnterior: scheduledMovementTargetsTable.valorAnterior,
+          })
+          .from(scheduledMovementTargetsTable)
+          .where(eq(scheduledMovementTargetsTable.scheduledMovementId, mv.id));
+
+        for (const t of targets) {
+          // 1) Get approved/pending purchase orders for this employee
+          const activeOrders = await tx
+            .select()
+            .from(purchaseOrdersTable)
+            .where(and(
+              eq(purchaseOrdersTable.companyId, companyId),
+              eq(purchaseOrdersTable.employeeId, t.colaboradorId),
+              ne(purchaseOrdersTable.status, "Cancelado"),
+            ));
+
+          if (activeOrders.length > 0) {
+            // 2) Cancel all active orders
+            await tx.update(purchaseOrdersTable)
+              .set({ status: "Cancelado" })
+              .where(and(
+                eq(purchaseOrdersTable.companyId, companyId),
+                eq(purchaseOrdersTable.employeeId, t.colaboradorId),
+                ne(purchaseOrdersTable.status, "Cancelado"),
+              ));
+
+            // 3) Create a "desconto" entry representing unused vales
+            const totalValesNaoUsados = activeOrders.reduce((s, o) => s + o.vales, 0);
+            const totalValor = activeOrders.reduce((s, o) => s + parseFloat(String(o.total)), 0);
+
+            if (totalValesNaoUsados > 0) {
+              const employeeRow = await tx
+                .select({ name: employeesTable.name })
+                .from(employeesTable)
+                .where(eq(employeesTable.id, t.colaboradorId))
+                .limit(1);
+
+              await tx.insert(purchaseOrdersTable).values({
+                companyId: companyId,
+                employeeId: t.colaboradorId,
+                nome: employeeRow[0]?.name ?? "Colaborador desligado",
+                turno: "—",
+                periodo: periodLabelFromDate(),
+                dataInicio: today,
+                dataFim: today,
+                dias: 0,
+                vales: -totalValesNaoUsados,       // negativo = desconto
+                valorUnit: "0",
+                total: String(-totalValor.toFixed(2)), // negativo = estorno
+                status: "Aprovado",
+                proRata: false,
+              });
+            }
+          }
+
+          // 4) Update employee's status in the employees table
+          await tx.update(employeesTable)
+            .set({ status: mv.valorNovo, updatedAt: new Date() })
+            .where(eq(employeesTable.id, t.colaboradorId));
+        }
+      }
     }
  
     // 3) ativo whose end has passed → concluido (revert effect on targets).
