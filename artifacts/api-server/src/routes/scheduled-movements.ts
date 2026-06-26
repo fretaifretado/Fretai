@@ -213,23 +213,26 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
           .where(eq(scheduledMovementTargetsTable.scheduledMovementId, mv.id));
 
         for (const t of targets) {
-          // 1) Get approved/pending purchase orders for this employee
+          // 1) Get approved/pending purchase orders for this employee in the current period
+          const currentPeriod = periodLabelFromDate();
           const activeOrders = await tx
             .select()
             .from(purchaseOrdersTable)
             .where(and(
               eq(purchaseOrdersTable.companyId, companyId),
               eq(purchaseOrdersTable.employeeId, t.colaboradorId),
+              eq(purchaseOrdersTable.periodo, currentPeriod),
               ne(purchaseOrdersTable.status, "Cancelado"),
             ));
 
           if (activeOrders.length > 0) {
-            // 2) Cancel all active orders
+            // 2) Cancel all active orders in the current period
             await tx.update(purchaseOrdersTable)
               .set({ status: "Cancelado" })
               .where(and(
                 eq(purchaseOrdersTable.companyId, companyId),
                 eq(purchaseOrdersTable.employeeId, t.colaboradorId),
+                eq(purchaseOrdersTable.periodo, currentPeriod),
                 ne(purchaseOrdersTable.status, "Cancelado"),
               ));
 
@@ -319,23 +322,26 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
           continue;
         }
 
-        // Get approved/pending purchase orders for this employee
+        // Get approved/pending purchase orders for this employee in the current period
+        const currentPeriod = periodLabelFromDate(new Date(mv.inicio));
         const activeOrders = await tx
           .select()
           .from(purchaseOrdersTable)
           .where(and(
             eq(purchaseOrdersTable.companyId, companyId),
             eq(purchaseOrdersTable.employeeId, t.colaboradorId),
+            eq(purchaseOrdersTable.periodo, currentPeriod),
             ne(purchaseOrdersTable.status, "Cancelado"),
           ));
 
         if (activeOrders.length > 0) {
-          // Cancel all active orders
+          // Cancel all active orders in the current period
           await tx.update(purchaseOrdersTable)
             .set({ status: "Cancelado" })
             .where(and(
               eq(purchaseOrdersTable.companyId, companyId),
               eq(purchaseOrdersTable.employeeId, t.colaboradorId),
+              eq(purchaseOrdersTable.periodo, currentPeriod),
               ne(purchaseOrdersTable.status, "Cancelado"),
             ));
 
