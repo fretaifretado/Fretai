@@ -5,6 +5,7 @@ import {
   scheduledMovementTargetsTable,
   purchaseOrdersTable,
   employeesTable,
+  companyShiftsTable,
 } from "@workspace/db/schema";
 import { and, eq, lt, lte, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import { requireAuth, getAuth } from "../middlewares/auth";
@@ -35,6 +36,205 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
  
 function isValidIsoDate(v: unknown): v is string {
   return typeof v === "string" && ISO_DATE_RE.test(v);
+}
+
+function normalizeTurnoKey(name: string): string {
+  return (name || "").toLowerCase().replace(/\s+/g, "");
+}
+
+const DIAS_ORDEM = ["SEG", "TER", "QUA", "QUI", "SEX", "SAB", "DOM"] as const;
+
+function normalizeEscala(escala: string | null | undefined): string {
+  return (escala ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toUpperCase();
+}
+
+function weekdaysFromEscala(escala: string | null | undefined): Set<number> | null {
+  const parts = normalizeEscala(escala).split("/");
+  if (parts.length !== 2) return null;
+  const fromIdx = DIAS_ORDEM.indexOf(parts[0] as typeof DIAS_ORDEM[number]);
+  const toIdx = DIAS_ORDEM.indexOf(parts[1] as typeof DIAS_ORDEM[number]);
+  if (fromIdx < 0 || toIdx < 0) return null;
+
+  const weekdays = new Set<number>();
+  for (let i = 0; i < DIAS_ORDEM.length; i++) {
+    const inRange = toIdx >= fromIdx
+      ? i >= fromIdx && i <= toIdx
+      : i >= fromIdx || i <= toIdx;
+    if (!inRange) continue;
+    weekdays.add(i === 6 ? 0 : i + 1);
+  }
+  return weekdays;
+}
+
+function inferTipoEscala(turnoNome: string, turno?: { tipoEscala: string; escala: string; entrada: string; saida: string } | null): string {
+  const explicit = turno?.tipoEscala?.trim();
+  if (explicit) return explicit;
+
+  const escala = normalizeEscala(turno?.escala);
+  const explicitWeekdays = weekdaysFromEscala(escala);
+  if (explicitWeekdays?.size === 5) return "5x2";
+  if (explicitWeekdays?.size === 6) return "6x1";
+  if (escala === "12X36") return "12x36";
+  if (escala === "24X48") return "24x48";
+
+  const key = normalizeTurnoKey(`${turnoNome} ${turno?.entrada ?? ""} ${turno?.saida ?? ""}`);
+  if (key.includes("adm") || key.includes("administrativo") || key.includes("08:00") || key.includes("17:30")) return "5x2";
+  if (key.includes("primeiro") || key.includes("segundo") || key.includes("terceiro")) return "6x1";
+  return "6x1";
+}
+
+function startOfDay(date: Date): Date {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function parseDate(value: string | Date | null | undefined): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return startOfDay(value);
+  const s = String(value).trim();
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return startOfDay(new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])));
+  const br = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (br) return startOfDay(new Date(Number(br[3]), Number(br[2]) - 1, Number(br[1])));
+  const fallback = new Date(s);
+  return Number.isNaN(fallback.getTime()) ? null : startOfDay(fallback);
+}
+
+function money(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(String(value ?? "0"));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function roundMoney(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function isWorkingDay(wd: number, tipoEscala: string, escala?: string | null): boolean {
+  const explicitWeekdays = weekdaysFromEscala(escala);
+  if (explicitWeekdays) return explicitWeekdays.has(wd);
+  if (tipoEscala === "5x2") return wd >= 1 && wd <= 5;
+  if (tipoEscala === "6x1") return wd >= 1 && wd <= 6;
+  return true;
+}
+
+function countWorkDays(from: Date, to: Date, tipoEscala: string, anchor?: Date | null, escala?: string | null): number {
+  if (from > to) return 0;
+  let count = 0;
+  const cur = startOfDay(from);
+  const end = startOfDay(to);
+  if ((tipoEscala === "12x36" || tipoEscala === "24x48") && anchor) {
+    const period = tipoEscala === "12x36" ? 2 : 3;
+    const anchorTime = startOfDay(anchor).getTime();
+    while (cur <= end) {
+      const diff = Math.round((cur.getTime() - anchorTime) / 86400000);
+      if (diff >= 0 && diff % period === 0) count++;
+      cur.setDate(cur.getDate() + 1);
+    }
+    return count;
+  }
+  while (cur <= end) {
+    const wd = cur.getDay();
+    if (isWorkingDay(wd, tipoEscala, escala)) count++;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return count;
+}
+
+async function insertUnusedValeDiscount(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  params: {
+    companyId: number;
+    employeeId: number;
+    effectiveDateIso: string;
+    fallbackName: string;
+    discountTurno: string;
+  },
+): Promise<{ vales: number; total: number }> {
+  const effectiveDate = parseDate(params.effectiveDateIso);
+  if (!effectiveDate) return { vales: 0, total: 0 };
+
+  const existingDiscount = await tx
+    .select({ id: purchaseOrdersTable.id })
+    .from(purchaseOrdersTable)
+    .where(and(
+      eq(purchaseOrdersTable.companyId, params.companyId),
+      eq(purchaseOrdersTable.employeeId, params.employeeId),
+      eq(purchaseOrdersTable.dataInicio, params.effectiveDateIso),
+      eq(purchaseOrdersTable.dataFim, params.effectiveDateIso),
+      lt(purchaseOrdersTable.vales, 0),
+      ne(purchaseOrdersTable.status, "Cancelado"),
+    ))
+    .limit(1);
+  if (existingDiscount.length > 0) return { vales: 0, total: 0 };
+
+  const [employeeRow, activeOrders, shifts] = await Promise.all([
+    tx
+      .select({
+        name: employeesTable.name,
+        operationStart: employeesTable.operationStart,
+        admissionDate: employeesTable.admissionDate,
+      })
+      .from(employeesTable)
+      .where(eq(employeesTable.id, params.employeeId))
+      .limit(1),
+    tx
+      .select()
+      .from(purchaseOrdersTable)
+      .where(and(
+        eq(purchaseOrdersTable.companyId, params.companyId),
+        eq(purchaseOrdersTable.employeeId, params.employeeId),
+        ne(purchaseOrdersTable.status, "Cancelado"),
+      )),
+    tx.select().from(companyShiftsTable).where(eq(companyShiftsTable.companyId, params.companyId)),
+  ]);
+
+  let discountVales = 0;
+  let discountTotal = 0;
+  const anchor = parseDate(employeeRow[0]?.operationStart ?? employeeRow[0]?.admissionDate);
+
+  for (const order of activeOrders.filter(o => o.vales > 0)) {
+    const inicio = parseDate(order.dataInicio);
+    const fim = parseDate(order.dataFim);
+    if (!fim || effectiveDate > fim) continue;
+
+    const from = inicio && effectiveDate < inicio ? inicio : effectiveDate;
+    const turno = shifts.find(s => normalizeTurnoKey(s.nome) === normalizeTurnoKey(order.turno));
+    const tipoEscala = inferTipoEscala(order.turno, turno);
+    const remainingDays = inicio ? countWorkDays(from, fim, tipoEscala, anchor, turno?.escala) : 0;
+    const unusedVales = Math.min(order.vales, Math.max(0, remainingDays * 2));
+    if (unusedVales <= 0) continue;
+
+    const valorUnit = money(order.valorUnit);
+    discountVales += unusedVales;
+    discountTotal += unusedVales * valorUnit;
+  }
+
+  if (discountVales <= 0 || discountTotal <= 0) return { vales: 0, total: 0 };
+
+  const total = roundMoney(discountTotal);
+  const valorUnit = roundMoney(total / discountVales);
+  await tx.insert(purchaseOrdersTable).values({
+    companyId: params.companyId,
+    employeeId: params.employeeId,
+    nome: employeeRow[0]?.name ?? params.fallbackName,
+    turno: params.discountTurno,
+    periodo: periodLabelFromDate(effectiveDate),
+    dataInicio: params.effectiveDateIso,
+    dataFim: params.effectiveDateIso,
+    dias: 0,
+    vales: -discountVales,
+    valorUnit: String(valorUnit),
+    total: String(-total),
+    status: "Aprovado",
+    proRata: false,
+  });
+
+  return { vales: discountVales, total };
 }
  
 /**
@@ -103,6 +303,7 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
           id: scheduledMovementsTable.id,
           tipo: scheduledMovementsTable.tipo,
           filialIdNovo: scheduledMovementsTable.filialIdNovo,
+          inicio: scheduledMovementsTable.inicio,
         })
         .from(scheduledMovementsTable)
         .where(and(
@@ -124,55 +325,13 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
  
         for (const t of targets) {
           const oldCompanyId = t.filialIdAnterior ?? companyId;
- 
-          // 1) Get approved/pending purchase orders for this employee in old company
-          const activeOrders = await tx
-            .select()
-            .from(purchaseOrdersTable)
-            .where(and(
-              eq(purchaseOrdersTable.companyId, oldCompanyId),
-              eq(purchaseOrdersTable.employeeId, t.colaboradorId),
-              ne(purchaseOrdersTable.status, "Cancelado"),
-            ));
- 
-          if (activeOrders.length > 0) {
-            // 2) Cancel all active orders
-            await tx.update(purchaseOrdersTable)
-              .set({ status: "Cancelado" })
-              .where(and(
-                eq(purchaseOrdersTable.companyId, oldCompanyId),
-                eq(purchaseOrdersTable.employeeId, t.colaboradorId),
-                ne(purchaseOrdersTable.status, "Cancelado"),
-              ));
- 
-            // 3) Create a "desconto" entry representing unused vales
-            const totalValesNaoUsados = activeOrders.reduce((s, o) => s + o.vales, 0);
-            const totalValor = activeOrders.reduce((s, o) => s + parseFloat(String(o.total)), 0);
- 
-            if (totalValesNaoUsados > 0) {
-              const employeeRow = await tx
-                .select({ name: employeesTable.name })
-                .from(employeesTable)
-                .where(eq(employeesTable.id, t.colaboradorId))
-                .limit(1);
- 
-              await tx.insert(purchaseOrdersTable).values({
-                companyId: oldCompanyId,
-                employeeId: t.colaboradorId,
-                nome: employeeRow[0]?.name ?? "Colaborador transferido",
-                turno: "—",
-                periodo: periodLabelFromDate(),
-                dataInicio: today,
-                dataFim: today,
-                dias: 0,
-                vales: -totalValesNaoUsados,       // negativo = desconto
-                valorUnit: "0",
-                total: String(-totalValor.toFixed(2)), // negativo = estorno
-                status: "Aprovado",
-                proRata: false,
-              });
-            }
-          }
+          await insertUnusedValeDiscount(tx, {
+            companyId: oldCompanyId,
+            employeeId: t.colaboradorId,
+            effectiveDateIso: mv.inicio,
+            fallbackName: "Colaborador transferido",
+            discountTurno: "Desconto por transferência",
+          });
  
           // 4) Update employee's companyId to the new filial
           await tx.update(employeesTable)
@@ -193,6 +352,7 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
           id: scheduledMovementsTable.id,
           tipo: scheduledMovementsTable.tipo,
           valorNovo: scheduledMovementsTable.valorNovo,
+          inicio: scheduledMovementsTable.inicio,
         })
         .from(scheduledMovementsTable)
         .where(and(
@@ -213,57 +373,13 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
           .where(eq(scheduledMovementTargetsTable.scheduledMovementId, mv.id));
 
         for (const t of targets) {
-          // 1) Get approved/pending purchase orders for this employee in the current period
-          const currentPeriod = periodLabelFromDate();
-          const activeOrders = await tx
-            .select()
-            .from(purchaseOrdersTable)
-            .where(and(
-              eq(purchaseOrdersTable.companyId, companyId),
-              eq(purchaseOrdersTable.employeeId, t.colaboradorId),
-              eq(purchaseOrdersTable.periodo, currentPeriod),
-              ne(purchaseOrdersTable.status, "Cancelado"),
-            ));
-
-          if (activeOrders.length > 0) {
-            // 2) Cancel all active orders in the current period
-            await tx.update(purchaseOrdersTable)
-              .set({ status: "Cancelado" })
-              .where(and(
-                eq(purchaseOrdersTable.companyId, companyId),
-                eq(purchaseOrdersTable.employeeId, t.colaboradorId),
-                eq(purchaseOrdersTable.periodo, currentPeriod),
-                ne(purchaseOrdersTable.status, "Cancelado"),
-              ));
-
-            // 3) Create a "desconto" entry representing unused vales
-            const totalValesNaoUsados = activeOrders.reduce((s, o) => s + o.vales, 0);
-            const totalValor = activeOrders.reduce((s, o) => s + parseFloat(String(o.total)), 0);
-
-            if (totalValesNaoUsados > 0) {
-              const employeeRow = await tx
-                .select({ name: employeesTable.name })
-                .from(employeesTable)
-                .where(eq(employeesTable.id, t.colaboradorId))
-                .limit(1);
-
-              await tx.insert(purchaseOrdersTable).values({
-                companyId: companyId,
-                employeeId: t.colaboradorId,
-                nome: employeeRow[0]?.name ?? "Colaborador desligado",
-                turno: "—",
-                periodo: periodLabelFromDate(),
-                dataInicio: today,
-                dataFim: today,
-                dias: 0,
-                vales: -totalValesNaoUsados,       // negativo = desconto
-                valorUnit: "0",
-                total: String(-totalValor.toFixed(2)), // negativo = estorno
-                status: "Aprovado",
-                proRata: false,
-              });
-            }
-          }
+          await insertUnusedValeDiscount(tx, {
+            companyId,
+            employeeId: t.colaboradorId,
+            effectiveDateIso: mv.inicio,
+            fallbackName: "Colaborador desligado",
+            discountTurno: "Desconto por status",
+          });
 
           // 4) Update employee's status in the employees table
           await tx.update(employeesTable)
@@ -322,57 +438,13 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
           continue;
         }
 
-        // Get approved/pending purchase orders for this employee in the current period
-        const currentPeriod = periodLabelFromDate(new Date(mv.inicio));
-        const activeOrders = await tx
-          .select()
-          .from(purchaseOrdersTable)
-          .where(and(
-            eq(purchaseOrdersTable.companyId, companyId),
-            eq(purchaseOrdersTable.employeeId, t.colaboradorId),
-            eq(purchaseOrdersTable.periodo, currentPeriod),
-            ne(purchaseOrdersTable.status, "Cancelado"),
-          ));
-
-        if (activeOrders.length > 0) {
-          // Cancel all active orders in the current period
-          await tx.update(purchaseOrdersTable)
-            .set({ status: "Cancelado" })
-            .where(and(
-              eq(purchaseOrdersTable.companyId, companyId),
-              eq(purchaseOrdersTable.employeeId, t.colaboradorId),
-              eq(purchaseOrdersTable.periodo, currentPeriod),
-              ne(purchaseOrdersTable.status, "Cancelado"),
-            ));
-
-          // Create a "desconto" entry representing unused vales
-          const totalValesNaoUsados = activeOrders.reduce((s, o) => s + o.vales, 0);
-          const totalValor = activeOrders.reduce((s, o) => s + parseFloat(String(o.total)), 0);
-
-          if (totalValesNaoUsados > 0) {
-            const employeeRow = await tx
-              .select({ name: employeesTable.name })
-              .from(employeesTable)
-              .where(eq(employeesTable.id, t.colaboradorId))
-              .limit(1);
-
-            await tx.insert(purchaseOrdersTable).values({
-              companyId: companyId,
-              employeeId: t.colaboradorId,
-              nome: employeeRow[0]?.name ?? "Colaborador desligado",
-              turno: "—",
-              periodo: periodLabelFromDate(),
-              dataInicio: mv.inicio,
-              dataFim: mv.inicio,
-              dias: 0,
-              vales: -totalValesNaoUsados,       // negativo = desconto
-              valorUnit: "0",
-              total: String(-totalValor.toFixed(2)), // negativo = estorno
-              status: "Aprovado",
-              proRata: false,
-            });
-          }
-        }
+        await insertUnusedValeDiscount(tx, {
+          companyId,
+          employeeId: t.colaboradorId,
+          effectiveDateIso: mv.inicio,
+          fallbackName: "Colaborador desligado",
+          discountTurno: "Desconto por status",
+        });
 
         // Update employee's status in the employees table
         await tx.update(employeesTable)
