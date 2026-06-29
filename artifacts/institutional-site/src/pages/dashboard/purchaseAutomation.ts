@@ -458,6 +458,36 @@ function hasActiveScheduledMovement(
   return { shouldCount: true };
 }
 
+// Check if employee will have inactive status during the purchase period
+function hasInactiveStatusInPeriod(
+  colaboradorId: number,
+  dataInicio: string,
+  dataFim: string,
+  agendamentos: Agendamento[],
+): { shouldExclude: boolean; reason?: string } {
+  for (const ag of agendamentos) {
+    // Check if this agendamento applies to this employee
+    const target = ag.alvos.find(a => a.colaboradorId === colaboradorId);
+    if (!target) continue;
+
+    // Only check status changes to inactive statuses
+    if (ag.tipo !== "status" || !INACTIVE_STATUSES.has(ag.valorNovo)) continue;
+
+    // Check if the agendamento period overlaps with the purchase period
+    // The agendamento starts at ag.inicio and has no end (for desligado) or ends at ag.fim
+    // For desligado, we consider it as starting from ag.inicio and continuing indefinitely
+    const agStart = ag.inicio;
+    const agEnd = ag.fim || "9999-12-31"; // Treat no end date as far future
+
+    // Check for overlap: purchase period starts before agendamento ends AND purchase period ends after agendamento starts
+    if (dataInicio <= agEnd && dataFim >= agStart) {
+      return { shouldExclude: true, reason: `Status inativo no período: ${ag.valorNovo} a partir de ${ag.inicio}` };
+    }
+  }
+
+  return { shouldExclude: false };
+}
+
 export function buildHolidaySet(periodoAno: number, feriadosCustom: string[]): Set<string> {
   const anos = [periodoAno - 1, periodoAno, periodoAno + 1];
   const nacionais = anos.flatMap(getFeriadosNacionais);
@@ -485,19 +515,30 @@ export function buildPurchasePreview(params: {
   agendamentos?: Agendamento[];
 }): PreviewItem[] {
   const { colaboradores, turnos, periodoAno, periodoMes, valeDiario, feriados, agendamentos } = params;
+  const dataInicio = formatDate(periodoAno, periodoMes, 1);
+  const dataFim = formatDate(periodoAno, periodoMes, ultimoDiaDoMes(periodoAno, periodoMes));
+  
   return getEligibleEmployees(colaboradores)
     .map(c => {
+      // Check if employee will have inactive status during the purchase period
+      if (agendamentos) {
+        const { shouldExclude } = hasInactiveStatusInPeriod(c.id, dataInicio, dataFim, agendamentos);
+        if (shouldExclude) {
+          return null; // Skip this employee
+        }
+      }
+      
       const t = turnos.find(x => normalizeTurnoKey(x.nome) === normalizeTurnoKey(c.turno));
       const escala = inferTipoEscala(c.turno, t);
       const { dias, proRata, fromDay } = calcularDiasNoMes(escala, c.inicioOperacao, periodoAno, periodoMes, feriados, t?.escala, c.id, agendamentos);
       const vales = dias * 2;
       const total = vales * valeDiario;
-      const dataInicio = formatDate(periodoAno, periodoMes, fromDay);
-      const dataFim = formatDate(periodoAno, periodoMes, ultimoDiaDoMes(periodoAno, periodoMes));
+      const itemDataInicio = formatDate(periodoAno, periodoMes, fromDay);
+      const itemDataFim = formatDate(periodoAno, periodoMes, ultimoDiaDoMes(periodoAno, periodoMes));
       const periodo = `${MESES_CURTO[periodoMes - 1]}/${periodoAno}`;
-      return { colaborador: c, turnoNome: c.turno, dias, vales, valorUnit: valeDiario, total, dataInicio, dataFim, periodo, proRata };
+      return { colaborador: c, turnoNome: c.turno, dias, vales, valorUnit: valeDiario, total, dataInicio: itemDataInicio, dataFim: itemDataFim, periodo, proRata };
     })
-    .filter(item => item.dias > 0);
+    .filter((item): item is PreviewItem => item !== null && item.dias > 0);
 }
 
 async function savePurchaseItems(items: PreviewItem[], companyId: number): Promise<PedidoCompra[]> {

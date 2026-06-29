@@ -407,21 +407,23 @@ export default function ComprasPage() {
         proRata: boolean;
       }[];
       setPedidos(
-        data.map(o => ({
-          id: o.id,
-          colaboradorId: o.employeeId ?? 0,
-          nome: o.nome,
-          turno: o.turno,
-          periodo: o.periodo,
-          dataInicio: o.dataInicio,
-          dataFim: o.dataFim,
-          dias: o.dias,
-          vales: o.vales,
-          valorUnit: parseFloat(o.valorUnit),
-          total: parseFloat(o.total),
-          status: o.status,
-          proRata: o.proRata,
-        })),
+        data
+          .filter(o => o.vales > 0) // Filter out discount entries (negative vales)
+          .map(o => ({
+            id: o.id,
+            colaboradorId: o.employeeId ?? 0,
+            nome: o.nome,
+            turno: o.turno,
+            periodo: o.periodo,
+            dataInicio: o.dataInicio,
+            dataFim: o.dataFim,
+            dias: o.dias,
+            vales: o.vales,
+            valorUnit: parseFloat(o.valorUnit),
+            total: parseFloat(o.total),
+            status: o.status,
+            proRata: o.proRata,
+          })),
       );
     } catch (err) {
       console.error("[compras] erro ao carregar pedidos:", err);

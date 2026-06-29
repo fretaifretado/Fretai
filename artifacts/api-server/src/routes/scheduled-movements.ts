@@ -381,10 +381,12 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
             discountTurno: "Desconto por status",
           });
 
-          // 4) Update employee's status in the employees table
-          await tx.update(employeesTable)
-            .set({ status: mv.valorNovo, updatedAt: new Date() })
-            .where(eq(employeesTable.id, t.colaboradorId));
+          // Only update employee's status on the actual activation date
+          if (mv.inicio === today) {
+            await tx.update(employeesTable)
+              .set({ status: mv.valorNovo, updatedAt: new Date() })
+              .where(eq(employeesTable.id, t.colaboradorId));
+          }
         }
       }
     }
@@ -446,20 +448,23 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
           discountTurno: "Desconto por status",
         });
 
-        // Update employee's status in the employees table
-        await tx.update(employeesTable)
-          .set({ status: mv.valorNovo, updatedAt: new Date() })
-          .where(eq(employeesTable.id, t.colaboradorId));
+        // Only update employee's status on the actual activation date
+        if (mv.inicio === today) {
+          await tx.update(employeesTable)
+            .set({ status: mv.valorNovo, updatedAt: new Date() })
+            .where(eq(employeesTable.id, t.colaboradorId));
+        }
       }
     }
  
     // 3) ativo whose end has passed → concluido (revert effect on targets).
+    // For status movements without end date (e.g., desligado), transition to concluido the day after start date
     const completedRows = await tx.update(scheduledMovementsTable)
       .set({ estado: "concluido", updatedAt: new Date() })
       .where(and(
         eq(scheduledMovementsTable.companyId, companyId),
         eq(scheduledMovementsTable.estado, "ativo"),
-        lt(scheduledMovementsTable.fim, today),
+        sql`(${scheduledMovementsTable.fim} < ${today} OR (${scheduledMovementsTable.fim} IS NULL AND ${scheduledMovementsTable.inicio} < ${today}))`,
       ))
       .returning({ id: scheduledMovementsTable.id });
     if (completedRows.length > 0) {
