@@ -201,6 +201,7 @@ function calcularDiasNoMes(
   mes: number,
   feriados: Set<string> = new Set(),
   escala?: string | null,
+  deactivationDate?: string | null,
 ): { dias: number; proRata: boolean; fromDay: number } {
   const start = parseInicioOp(inicioOp);
   const hoje = new Date();
@@ -269,11 +270,29 @@ function calcularDiasNoMes(
   const daysInMonth = ultimoDiaDoMes(ano, mes);
   let dias = 0;
 
+  // Parse deactivation date if provided (YYYY-MM-DD format)
+  let deactivationDay: number | null = null;
+  if (deactivationDate) {
+    const parts = deactivationDate.split('-');
+    if (parts.length === 3) {
+      const deactYear = parseInt(parts[0], 10);
+      const deactMonth = parseInt(parts[1], 10);
+      deactivationDay = parseInt(parts[2], 10);
+      // Only apply if deactivation is in the current month/year
+      if (deactYear !== ano || deactMonth !== mes) {
+        deactivationDay = null;
+      }
+    }
+  }
+
   if (tipoEscala === "12x36" || tipoEscala === "24x48") {
     dias = diasCiclicosNoMes(tipoEscala as "12x36" | "24x48", inicioOp, ano, mes, fromDay);
   } else if (start) {
     dias = 0;
     for (let day = fromDay; day <= daysInMonth; day++) {
+      // Stop counting if we reach the deactivation date
+      if (deactivationDay && day >= deactivationDay) break;
+      
       const dateStr = `${ano}-${String(mes).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
       if (feriados.has(dateStr)) continue; // ignora feriados
       const wd = new Date(ano, mes - 1, day).getDay();

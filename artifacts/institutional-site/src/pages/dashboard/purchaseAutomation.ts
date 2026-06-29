@@ -260,6 +260,7 @@ export function calcularDiasNoMes(
   escala?: string | null,
   colaboradorId?: number,
   agendamentos?: Agendamento[],
+  deactivationDate?: string | null,
 ): { dias: number; proRata: boolean; fromDay: number } {
   const start = parseInicioOp(inicioOp);
   const hoje = new Date();
@@ -325,11 +326,29 @@ export function calcularDiasNoMes(
   const daysInMonth = ultimoDiaDoMes(ano, mes);
   let dias = 0;
 
+  // Parse deactivation date if provided (YYYY-MM-DD format)
+  let deactivationDay: number | null = null;
+  if (deactivationDate) {
+    const parts = deactivationDate.split('-');
+    if (parts.length === 3) {
+      const deactYear = parseInt(parts[0], 10);
+      const deactMonth = parseInt(parts[1], 10);
+      deactivationDay = parseInt(parts[2], 10);
+      // Only apply if deactivation is in the current month/year
+      if (deactYear !== ano || deactMonth !== mes) {
+        deactivationDay = null;
+      }
+    }
+  }
+
   if (tipoEscala === "12x36" || tipoEscala === "24x48") {
     dias = diasCiclicosNoMes(tipoEscala, inicioOp, ano, mes, fromDay);
   } else if (start) {
     dias = 0;
     for (let day = fromDay; day <= daysInMonth; day++) {
+      // Stop counting if we reach the deactivation date
+      if (deactivationDay && day >= deactivationDay) break;
+      
       const dateStr = `${ano}-${String(mes).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
       if (feriados.has(dateStr)) continue;
       const wd = new Date(ano, mes - 1, day).getDay();
@@ -520,21 +539,29 @@ export function buildPurchasePreview(params: {
   
   return getEligibleEmployees(colaboradores)
     .map(c => {
-      // Check if employee will have inactive status during the purchase period
+      // Check if employee will have inactive status during the purchase period and get the deactivation date
+      let deactivationDate: string | null = null;
       if (agendamentos) {
-        const { shouldExclude } = hasInactiveStatusInPeriod(c.id, dataInicio, dataFim, agendamentos);
-        if (shouldExclude) {
-          return null; // Skip this employee
+        const { shouldExclude, reason } = hasInactiveStatusInPeriod(c.id, dataInicio, dataFim, agendamentos);
+        if (shouldExclude && reason) {
+          // Extract the deactivation date from the reason
+          const match = reason.match(/a partir de (\d{4}-\d{2}-\d{2})/);
+          if (match) {
+            deactivationDate = match[1];
+          }
         }
       }
       
       const t = turnos.find(x => normalizeTurnoKey(x.nome) === normalizeTurnoKey(c.turno));
       const escala = inferTipoEscala(c.turno, t);
-      const { dias, proRata, fromDay } = calcularDiasNoMes(escala, c.inicioOperacao, periodoAno, periodoMes, feriados, t?.escala, c.id, agendamentos);
+      const { dias, proRata, fromDay } = calcularDiasNoMes(escala, c.inicioOperacao, periodoAno, periodoMes, feriados, t?.escala, c.id, agendamentos, deactivationDate);
       const vales = dias * 2;
       const total = vales * valeDiario;
       const itemDataInicio = formatDate(periodoAno, periodoMes, fromDay);
-      const itemDataFim = formatDate(periodoAno, periodoMes, ultimoDiaDoMes(periodoAno, periodoMes));
+      // If there's a deactivation date, use the day before as the end date
+      const itemDataFim = deactivationDate 
+        ? deactivationDate.split('-').reverse().join('/') // Convert YYYY-MM-DD to DD/MM/YYYY
+        : formatDate(periodoAno, periodoMes, ultimoDiaDoMes(periodoAno, periodoMes));
       const periodo = `${MESES_CURTO[periodoMes - 1]}/${periodoAno}`;
       return { colaborador: c, turnoNome: c.turno, dias, vales, valorUnit: valeDiario, total, dataInicio: itemDataInicio, dataFim: itemDataFim, periodo, proRata };
     })

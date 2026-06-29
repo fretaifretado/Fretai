@@ -464,7 +464,7 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
       .where(and(
         eq(scheduledMovementsTable.companyId, companyId),
         eq(scheduledMovementsTable.estado, "ativo"),
-        sql`(${scheduledMovementsTable.fim} < ${today} OR (${scheduledMovementsTable.fim} IS NULL AND ${scheduledMovementsTable.inicio} < ${today}))`,
+        sql`(${scheduledMovementsTable.fim} < ${today} OR (${scheduledMovementsTable.fim} IS NULL OR ${scheduledMovementsTable.fim} = '') AND ${scheduledMovementsTable.inicio} < ${today})`,
       ))
       .returning({ id: scheduledMovementsTable.id });
     if (completedRows.length > 0) {
