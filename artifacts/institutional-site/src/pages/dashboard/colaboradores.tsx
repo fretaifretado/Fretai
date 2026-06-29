@@ -479,6 +479,12 @@ export default function ColaboradoresPage() {
       for (const o of data) {
         if (!o.employeeId || o.status === "Cancelado") continue;
 
+        // For discounts (negative vales), subtract directly from the balance
+        if (o.vales < 0) {
+          map.set(o.employeeId, (map.get(o.employeeId) ?? 0) + o.vales);
+          continue;
+        }
+
         const inicio = parseOrderDate(o.dataInicio);
         const fim    = parseOrderDate(o.dataFim);
         if (!inicio || !fim) {
