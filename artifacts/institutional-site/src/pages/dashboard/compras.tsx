@@ -345,6 +345,7 @@ export default function ComprasPage() {
   const [loadingPedidos, setLoadingPedidos] = useState(true);
   const [savingPedidos, setSavingPedidos] = useState(false);
   const [autoError, setAutoError] = useState("");
+  const [selectedMonth, setSelectedMonth] = useState<string>("");
   const [periodoAno] = useState(defaultAno);
   const [periodoMes] = useState(defaultMes);
 
@@ -584,8 +585,38 @@ export default function ComprasPage() {
     valeDiario,
   ]);
 
-  const totalGasto          = pedidos.reduce((a, p) => a + p.total, 0);
-  const totalValesHistorico = pedidos.reduce((a, p) => a + p.vales, 0);
+  // Extract unique months from orders, sorted by most recent first
+  const availableMonths = useMemo(() => {
+    const months = new Set(pedidos.map(p => p.periodo));
+    return Array.from(months).sort((a, b) => {
+      // Parse month labels (e.g., "Jun/2026") to sort chronologically
+      const [ma, ya] = a.split('/');
+      const [mb, yb] = b.split('/');
+      const monthA = MESES_CURTO.indexOf(ma);
+      const monthB = MESES_CURTO.indexOf(mb);
+      const yearA = parseInt(ya, 10);
+      const yearB = parseInt(yb, 10);
+      // Sort by year descending, then month descending
+      if (yearA !== yearB) return yearB - yearA;
+      return monthB - monthA;
+    });
+  }, [pedidos]);
+
+  // Set default selected month to the month of the last purchase order
+  useEffect(() => {
+    if (availableMonths.length > 0 && !selectedMonth) {
+      setSelectedMonth(availableMonths[0]);
+    }
+  }, [availableMonths, selectedMonth]);
+
+  // Filter orders by selected month
+  const pedidosFiltrados = useMemo(() => {
+    if (!selectedMonth) return pedidos;
+    return pedidos.filter(p => p.periodo === selectedMonth);
+  }, [pedidos, selectedMonth]);
+
+  const totalGasto          = pedidosFiltrados.reduce((a, p) => a + p.total, 0);
+  const totalValesHistorico = pedidosFiltrados.reduce((a, p) => a + p.vales, 0);
   const ultimoPedido        = pedidos.length > 0 ? pedidos[0].periodo : "—";
 
   const proxDia28 = (() => {
@@ -607,6 +638,21 @@ export default function ComprasPage() {
             </div>
             <p className="text-muted-foreground text-sm">Histórico e gestão de compras de vale-transporte.</p>
           </div>
+          {availableMonths.length > 0 && (
+            <div className="flex items-center gap-2">
+              <label htmlFor="month-filter" className="text-sm text-muted-foreground">Filtrar por:</label>
+              <select
+                id="month-filter"
+                value={selectedMonth}
+                onChange={(e) => setSelectedMonth(e.target.value)}
+                className="bg-background border border-input rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+              >
+                {availableMonths.map(month => (
+                  <option key={month} value={month}>{month}</option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
@@ -677,6 +723,10 @@ export default function ComprasPage() {
             <div className="py-16 text-center text-sm text-muted-foreground">
               Nenhuma compra realizada ainda.
             </div>
+          ) : pedidosFiltrados.length === 0 ? (
+            <div className="py-16 text-center text-sm text-muted-foreground">
+              Nenhuma compra no período selecionado.
+            </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -688,7 +738,7 @@ export default function ComprasPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {pedidos.map(p => (
+                  {pedidosFiltrados.map(p => (
                     <tr key={p.id} className="hover:bg-muted/20 transition-colors">
                       <td className="px-5 py-3.5">
                         <p className="font-medium text-foreground">{p.nome}</p>
