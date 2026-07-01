@@ -3,7 +3,7 @@ import { db } from "@workspace/db";
 import { purchaseOrdersTable, companiesTable } from "@workspace/db/schema";
 import { eq, desc } from "drizzle-orm";
 import { requireAuth, getAuth } from "../middlewares/auth";
-import { getFinancialSummary, parsePeriodParam } from "../services/financial-summary";
+import { getFinancialSummary, parsePeriodParam, getFinancialSummaryByBranches } from "../services/financial-summary";
 
 const router = Router();
 
@@ -129,6 +129,64 @@ router.get(
       res.json(orders.map(serializePurchaseOrder));
     } catch (err) {
       req.log.error({ err }, "Error listing purchase orders");
+      res.status(500).json(internalErrorPayload(err));
+    }
+  },
+);
+
+/* ── Get financial summary for multiple branches ── */
+router.get(
+  "/me/financial-summary-by-branches",
+  requireAuth("cliente_master", "cliente_subadmin"),
+  async (req, res) => {
+    const companyIdsParam = req.query.companyIds as string;
+    const periodParam = req.query.period as string | undefined;
+
+    if (!companyIdsParam) {
+      res.status(400).json({ error: "companyIds é obrigatório" });
+      return;
+    }
+
+    const companyIds = companyIdsParam.split(",").map(id => parseInt(id.trim(), 10));
+    if (companyIds.some(isNaN)) {
+      res.status(400).json({ error: "companyIds inválido" });
+      return;
+    }
+
+    const auth = getAuth(req);
+    const entityId = auth.entityId as number | undefined;
+    if (!entityId) {
+      res.status(403).json({ error: "Acesso negado" });
+      return;
+    }
+
+    try {
+      const allowed = await getAllowedCompanyIds(entityId);
+      const unauthorizedIds = companyIds.filter(id => !allowed.has(id));
+      if (unauthorizedIds.length > 0) {
+        res.status(403).json({ error: "Acesso negado a uma ou mais empresas" });
+        return;
+      }
+
+      const period = periodParam ? parsePeriodParam(periodParam) : { year: new Date().getFullYear(), month: new Date().getMonth() + 1 };
+      const summaries = await getFinancialSummaryByBranches(companyIds, period);
+
+      const result = Array.from(summaries.entries()).map(([companyId, summary]) => ({
+        companyId,
+        period: summary.period,
+        periodLabel: summary.periodLabel,
+        valesComprados: summary.valesComprados,
+        compraDoMes: summary.compraDoMes,
+        valesNaoUtilizados: summary.valesNaoUtilizados,
+        creditoGerado: summary.creditoGerado,
+        creditoAplicado: summary.creditoAplicado,
+        saldoCredito: summary.saldoCredito,
+        valorNotaFiscal: summary.valorNotaFiscal,
+      }));
+
+      res.json(result);
+    } catch (err) {
+      req.log.error({ err }, "Error getting financial summary by branches");
       res.status(500).json(internalErrorPayload(err));
     }
   },

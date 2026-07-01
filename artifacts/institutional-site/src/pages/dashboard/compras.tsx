@@ -668,6 +668,14 @@ export default function ComprasPage() {
           ))}
         </div>
 
+        <div className="flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 mb-6">
+          <CalendarClock size={15} className="text-blue-500 mt-0.5 shrink-0" />
+          <p className="text-sm text-blue-700">
+            Próxima compra programada: <strong>{proxDia28Str}</strong> —{" "}
+            {colaboradoresElegiveis.length} colaborador{colaboradoresElegiveis.length !== 1 ? "es" : ""} elegível{colaboradoresElegiveis.length !== 1 ? "is" : ""}.
+          </p>
+        </div>
+
         {/* ── Aviso: colaboradores com pendências cadastrais ── */}
         {colaboradoresComPendencia.length > 0 && (
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-4 flex items-start gap-3">
@@ -761,14 +769,6 @@ export default function ComprasPage() {
               </table>
             </div>
           )}
-        </div>
-
-        <div className="flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
-          <CalendarClock size={15} className="text-blue-500 mt-0.5 shrink-0" />
-          <p className="text-sm text-blue-700">
-            Próxima compra programada: <strong>{proxDia28Str}</strong> —{" "}
-            {colaboradoresElegiveis.length} colaborador{colaboradoresElegiveis.length !== 1 ? "es" : ""} elegível{colaboradoresElegiveis.length !== 1 ? "is" : ""}.
-          </p>
         </div>
       </div>
     </DashboardLayout>

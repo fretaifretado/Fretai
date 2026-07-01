@@ -250,6 +250,17 @@ export async function getFinancialSummary(companyId: number, period: Period): Pr
   };
 }
 
+export async function getFinancialSummaryByBranches(companyIds: number[], period: Period): Promise<Map<number, FinancialSummary>> {
+  const results = new Map<number, FinancialSummary>();
+  await Promise.all(
+    companyIds.map(async (companyId) => {
+      const summary = await getFinancialSummary(companyId, period);
+      results.set(companyId, summary);
+    })
+  );
+  return results;
+}
+
 export async function createUnusedValeDiscountForEmployee(params: {
   companyId: number;
   employeeId: number;

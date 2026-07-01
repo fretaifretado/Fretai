@@ -141,6 +141,7 @@ export default function DashboardPage() {
   const financialPeriod = monthParam(today);
   const [financialSummary, setFinancialSummary] = useState<FinancialSummary>(EMPTY_FINANCIAL_SUMMARY);
   const [loadingFinancialSummary, setLoadingFinancialSummary] = useState(false);
+  const [financialSummariesByBranch, setFinancialSummariesByBranch] = useState<Map<number, FinancialSummary>>(new Map());
 
   const fetchFinancialSummary = useCallback(async (cid: number, period: string) => {
     setLoadingFinancialSummary(true);
@@ -152,6 +153,20 @@ export default function DashboardPage() {
       setFinancialSummary(EMPTY_FINANCIAL_SUMMARY);
     } finally {
       setLoadingFinancialSummary(false);
+    }
+  }, []);
+
+  const fetchFinancialSummariesByBranches = useCallback(async (companyIds: number[], period: string) => {
+    try {
+      const res = await fetch(`${API_URL}/api/me/financial-summary-by-branches?companyIds=${companyIds.join(",")}&period=${period}`, { headers: getAuthHeaders() });
+      if (res.ok) {
+        const data = await res.json() as Array<{ companyId: number } & FinancialSummary>;
+        const summariesMap = new Map<number, FinancialSummary>();
+        data.forEach(item => summariesMap.set(item.companyId, item));
+        setFinancialSummariesByBranch(summariesMap);
+      }
+    } catch {
+      setFinancialSummariesByBranch(new Map());
     }
   }, []);
 
@@ -268,11 +283,15 @@ export default function DashboardPage() {
   const utilizacaoPorFilial = filiaisEmpresa.map(f => {
     const total  = colaboradoresEmpresa.filter(c => c.filialId === f.id).length;
     const usando = colaboradoresEmpresa.filter(c => c.filialId === f.id && c.status === "Ativo").length;
+    // Use creditoAplicado from financialSummary for the active branch, otherwise use theoretical calculation
+    const economia = (filialAtiva?.id === f.id) 
+      ? financialSummary.creditoAplicado 
+      : (total - usando) * (valeDiario * 2) * diasPeriodo;
     return {
       name: f.nome.replace("Filial ", "").replace("Matriz — ", ""),
       usando,
       naoUsa: total - usando,
-      economia: (total - usando) * (valeDiario * 2) * diasPeriodo,
+      economia,
     };
   });
 
