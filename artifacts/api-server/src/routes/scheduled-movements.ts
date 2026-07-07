@@ -200,12 +200,15 @@ async function insertUnusedValeDiscount(
   for (const order of activeOrders.filter(o => o.vales > 0)) {
     const inicio = parseDate(order.dataInicio);
     const fim = parseDate(order.dataFim);
-    if (!fim || effectiveDate > fim) continue;
+    // Skip if order already ended before effective date
+    if (fim && effectiveDate > fim) continue;
 
     const from = inicio && effectiveDate < inicio ? inicio : effectiveDate;
     const turno = shifts.find(s => normalizeTurnoKey(s.nome) === normalizeTurnoKey(order.turno));
     const tipoEscala = inferTipoEscala(order.turno, turno);
-    const remainingDays = inicio ? countWorkDays(from, fim, tipoEscala, anchor, turno?.escala) : 0;
+    // If no end date, use effective date as the end for calculation
+    const orderEnd = fim || effectiveDate;
+    const remainingDays = inicio ? countWorkDays(from, orderEnd, tipoEscala, anchor, turno?.escala) : 0;
     const unusedVales = Math.min(order.vales, Math.max(0, remainingDays * 2));
     if (unusedVales <= 0) continue;
 

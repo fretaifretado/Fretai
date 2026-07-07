@@ -493,8 +493,19 @@ export default function ColaboradoresPage() {
           continue;
         }
 
-        // Até quando descontar: o menor entre hoje e a data fim
-        const ateQuando = hoje <= fim ? hoje : fim;
+        // Check if employee is inactive (Desligado, Férias, Licença, Afastado)
+        const colaborador = colaboradores.find(c => c.id === o.employeeId);
+        const isInactive = colaborador && ["Desligado", "Férias", "Licença", "Afastado"].includes(colaborador.status);
+        
+        // If employee is inactive, check when they became inactive
+        let ateQuando = hoje <= fim ? hoje : fim;
+        if (isInactive && colaborador.inicioOperacao) {
+          const dataInatividade = parseOrderDate(colaborador.inicioOperacao);
+          if (dataInatividade && dataInatividade < ateQuando) {
+            // Stop counting days from the inactivation date
+            ateQuando = dataInatividade;
+          }
+        }
 
         // Detecta escala do turno (5x2 / 6x1) usando a escala real do cadastro quando existir.
         const turnoNorm = o.turno.toLowerCase();
@@ -516,7 +527,7 @@ export default function ColaboradoresPage() {
     } catch {
       // silently ignore
     }
-  }, [turnos]);
+  }, [turnos, colaboradores]);
 
   useEffect(() => {
     const cid = filialAtiva?.id;
