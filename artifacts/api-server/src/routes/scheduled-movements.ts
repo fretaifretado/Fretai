@@ -153,10 +153,12 @@ async function insertUnusedValeDiscount(
     effectiveDateIso: string;
     fallbackName: string;
     discountTurno: string;
+    fimPeriodoIso?: string; // Optional end date for temporary absences
   },
 ): Promise<{ vales: number; total: number }> {
   const effectiveDate = parseDate(params.effectiveDateIso);
   if (!effectiveDate) return { vales: 0, total: 0 };
+  const fimPeriodo = params.fimPeriodoIso ? parseDate(params.fimPeriodoIso) : null;
 
   const existingDiscount = await tx
     .select({ id: purchaseOrdersTable.id })
@@ -206,8 +208,10 @@ async function insertUnusedValeDiscount(
     const from = inicio && effectiveDate < inicio ? inicio : effectiveDate;
     const turno = shifts.find(s => normalizeTurnoKey(s.nome) === normalizeTurnoKey(order.turno));
     const tipoEscala = inferTipoEscala(order.turno, turno);
-    // If no end date, use effective date as the end for calculation
-    const orderEnd = fim || effectiveDate;
+    
+    // If fimPeriodo is provided (temporary absence), only discount days within that period
+    // Otherwise (permanent separation), discount all remaining days
+    const orderEnd = fimPeriodo || (fim || effectiveDate);
     const remainingDays = inicio ? countWorkDays(from, orderEnd, tipoEscala, anchor, turno?.escala) : 0;
     const unusedVales = Math.min(order.vales, Math.max(0, remainingDays * 2));
     if (unusedVales <= 0) continue;
@@ -346,16 +350,18 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
       // ── Mudança de status inativo: cancelar vales e gerar crédito ──────────
       // Quando um agendamento de tipo "status" é ativado para um status inativo
       // (Desligado, Férias, Licença, Afastado), precisamos:
-      // 1) Cancelar todos os pedidos de compra ativos/aprovados
-      // 2) Registrar um pedido de desconto (vales não utilizados)
+      // 1) Para Desligado: descontar TODOS os vales restantes (separação permanente)
+      // 2) Para Férias/Licença/Afastado: descontar apenas vales do período (ausência temporária)
       // 3) Atualizar o status do colaborador na tabela employees
       const INACTIVE_STATUSES = ["Desligado", "Férias", "Licença", "Afastado"];
+      const TEMPORARY_ABSENCE_STATUSES = ["Férias", "Licença", "Afastado"];
       const statusMovements = await tx
         .select({
           id: scheduledMovementsTable.id,
           tipo: scheduledMovementsTable.tipo,
           valorNovo: scheduledMovementsTable.valorNovo,
           inicio: scheduledMovementsTable.inicio,
+          fim: scheduledMovementsTable.fim,
         })
         .from(scheduledMovementsTable)
         .where(and(
@@ -376,11 +382,15 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
           .where(eq(scheduledMovementTargetsTable.scheduledMovementId, mv.id));
 
         for (const t of targets) {
+          // For temporary absences, only discount days within the absence period
+          // For permanent separation (Desligado), discount all remaining days
+          const isTemporaryAbsence = TEMPORARY_ABSENCE_STATUSES.includes(mv.valorNovo);
           await insertUnusedValeDiscount(tx, {
             companyId,
             employeeId: t.colaboradorId,
             effectiveDateIso: mv.inicio,
-            fallbackName: "Colaborador desligado",
+            fimPeriodoIso: isTemporaryAbsence ? mv.fim : undefined,
+            fallbackName: isTemporaryAbsence ? "Colaborador ausente" : "Colaborador desligado",
             discountTurno: "Desconto por status",
           });
 

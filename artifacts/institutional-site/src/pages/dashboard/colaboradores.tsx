@@ -479,6 +479,12 @@ export default function ColaboradoresPage() {
       for (const o of data) {
         if (!o.employeeId || o.status === "Cancelado") continue;
 
+        // Negative vales (discounts) should be subtracted directly
+        if (o.vales < 0) {
+          map.set(o.employeeId, (map.get(o.employeeId) ?? 0) + o.vales);
+          continue;
+        }
+
         const inicio = parseOrderDate(o.dataInicio);
         const fim    = parseOrderDate(o.dataFim);
         if (!inicio || !fim) {
@@ -493,13 +499,16 @@ export default function ColaboradoresPage() {
           continue;
         }
 
-        // Check if employee is inactive (Desligado, Férias, Licença, Afastado)
+        // Check if employee is inactive
         const colaborador = colaboradores.find(c => c.id === o.employeeId);
         const isInactive = colaborador && ["Desligado", "Férias", "Licença", "Afastado"].includes(colaborador.status);
+        const isPermanentSeparation = colaborador?.status === "Desligado";
         
-        // If employee is inactive, check when they became inactive
+        // If employee is permanently separated (Desligado), stop counting days from inactivation date
+        // For temporary absences (Férias, Licença, Afastado), continue counting normally
+        // The backend will have already generated discounts for the absence period
         let ateQuando = hoje <= fim ? hoje : fim;
-        if (isInactive && colaborador.inicioOperacao) {
+        if (isPermanentSeparation && colaborador.inicioOperacao) {
           const dataInatividade = parseOrderDate(colaborador.inicioOperacao);
           if (dataInatividade && dataInatividade < ateQuando) {
             // Stop counting days from the inactivation date
