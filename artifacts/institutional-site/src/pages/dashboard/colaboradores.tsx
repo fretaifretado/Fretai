@@ -532,6 +532,13 @@ export default function ColaboradoresPage() {
         map.set(o.employeeId, (map.get(o.employeeId) ?? 0) + disponivel);
       }
 
+      // Ensure no negative vales by clamping to 0
+      for (const [employeeId, vales] of map.entries()) {
+        if (vales < 0) {
+          map.set(employeeId, 0);
+        }
+      }
+
       setValesMap(map);
     } catch {
       // silently ignore
