@@ -504,6 +504,17 @@ export default function ColaboradoresPage() {
         const isInactive = colaborador && ["Desligado", "Férias", "Licença", "Afastado"].includes(colaborador.status);
         const isPermanentSeparation = colaborador?.status === "Desligado";
         
+        // If employee is permanently separated (Desligado), skip orders created after operation_start
+        // This prevents new orders from being counted for separated employees
+        if (isPermanentSeparation && colaborador.inicioOperacao) {
+          const dataInatividade = parseOrderDate(colaborador.inicioOperacao);
+          const dataCriacao = parseOrderDate(o.dataInicio);
+          if (dataCriacao && dataInatividade && dataCriacao > dataInatividade) {
+            // Order created after separation - skip it entirely
+            continue;
+          }
+        }
+        
         // If employee is permanently separated (Desligado), stop counting days from inactivation date
         // For temporary absences (Férias, Licença, Afastado), continue counting normally
         // The backend will have already generated discounts for the absence period
