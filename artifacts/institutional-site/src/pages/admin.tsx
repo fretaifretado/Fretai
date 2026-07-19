@@ -18,6 +18,7 @@ import PartnersSection from "./admin-sections/PartnersSection";
 import AuditSection from "./admin-sections/AuditSection";
 import VehicleTypesSection from "./admin-sections/VehicleTypesSection";
 import BudgetsSection from "./admin-sections/BudgetsSection";
+import EmployeeImportLogsSection from "./admin-sections/EmployeeImportLogsSection";
 import { ScheduledMovementsSection } from "./admin-sections/ScheduledMovementsSection";
 import { apiUrl } from "@/lib/api";
 
@@ -598,7 +599,7 @@ export default function Admin() {
               </div>
             )}
 
-            {activeSection === "relatorios" && <ComingSoon title="Relatórios" icon={FileBarChart2} />}
+            {activeSection === "relatorios" && <EmployeeImportLogsSection token={token} />}
             {activeSection === "configuracoes" && <ComingSoon title="Configurações" icon={Settings} />}
           </div>
         </main>

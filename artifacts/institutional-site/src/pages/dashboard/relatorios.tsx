@@ -134,7 +134,7 @@ export default function RelatoriosPage() {
 
   const inativosHoje = useMemo(
     () => colaboradores.filter(c =>
-      ["Férias", "Licença", "Afastado", "Desligado", "Inativo"].includes(c.status)
+      ["Férias", "Licença", "Afastado", "Desligado", "Home Office"].includes(c.status)
     ),
     [colaboradores],
   );

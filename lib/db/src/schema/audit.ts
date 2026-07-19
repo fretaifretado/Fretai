@@ -32,3 +32,16 @@ export const passwordResetTokensTable = pgTable("password_reset_tokens", {
   used: boolean("used").notNull().default(false),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+
+export const employeeImportLogsTable = pgTable("employee_import_logs", {
+  id: serial("id").primaryKey(),
+  companyId: integer("company_id").notNull(),
+  userId: integer("user_id"),
+  userEmail: text("user_email"),
+  employeeId: integer("employee_id"),
+  name: text("name").notNull(),
+  cpf: text("cpf").notNull(),
+  status: text("status").notNull(), // "inserted" or "skipped"
+  reason: text("reason"), // reason for skip if applicable
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});

@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/dialog";
 
 const STATUS_STYLE: Record<string, string> = {
-  "Inativo":   "bg-gray-100 text-gray-700 border-gray-200",
+  "Home Office": "bg-gray-100 text-gray-700 border-gray-200",
   "Pendente":  "bg-cyan-100 text-cyan-700 border-cyan-200",
   "Férias":    "bg-blue-100 text-blue-700 border-blue-200",
   "Licença":   "bg-yellow-100 text-yellow-700 border-yellow-200",
@@ -21,7 +21,7 @@ const STATUS_STYLE: Record<string, string> = {
 
 // Únicos status permitidos nesta página — "Ativo" é excluído intencionalmente
 const STATUS_DISPONIVEIS = [
-  "Inativo",
+  "Home Office",
   "Pendente",
   "Férias",
   "Afastado",
@@ -85,7 +85,7 @@ export default function StatusAgendadosPage() {
   const [busca, setBusca]               = useState("");
   const [filtroTipo, setFiltroTipo]     = useState<FiltroTipo>("status");
   const [filtroEstado, setFiltroEstado] = useState<FiltroEstado>("pendente");
-  const [filtroValor, setFiltroValor]   = useState<StatusDisponivel>("Inativo");
+  const [filtroValor, setFiltroValor]   = useState<StatusDisponivel>("Home Office");
 
   useEffect(() => {
     if (!editing) return;
@@ -195,7 +195,7 @@ export default function StatusAgendadosPage() {
   function handleSetFiltroTipo(t: FiltroTipo) {
     setFiltroTipo(t);
     if (t === "status") {
-      setFiltroValor("Inativo");
+      setFiltroValor("Home Office");
     } else {
       // Para turno/filial usa string vazia — valores serão derivados dos agendamentos
       setFiltroValor("" as StatusDisponivel);

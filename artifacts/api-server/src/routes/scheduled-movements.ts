@@ -349,12 +349,12 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
 
       // ── Mudança de status inativo: cancelar vales e gerar crédito ──────────
       // Quando um agendamento de tipo "status" é ativado para um status inativo
-      // (Desligado, Férias, Licença, Afastado), precisamos:
+      // (Desligado, Férias, Licença, Afastado, Home Office), precisamos:
       // 1) Para Desligado: descontar TODOS os vales restantes (separação permanente)
-      // 2) Para Férias/Licença/Afastado: descontar apenas vales do período (ausência temporária)
+      // 2) Para Férias/Licença/Afastado/Home Office: descontar apenas vales do período (ausência temporária)
       // 3) Atualizar o status do colaborador na tabela employees
-      const INACTIVE_STATUSES = ["Desligado", "Férias", "Licença", "Afastado"];
-      const TEMPORARY_ABSENCE_STATUSES = ["Férias", "Licença", "Afastado"];
+      const INACTIVE_STATUSES = ["Desligado", "Férias", "Licença", "Afastado", "Home Office"];
+      const TEMPORARY_ABSENCE_STATUSES = ["Férias", "Licença", "Afastado", "Home Office"];
       const statusMovements = await tx
         .select({
           id: scheduledMovementsTable.id,
@@ -407,7 +407,7 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
     // ── Processar agendamentos ativos sem créditos gerados (retroativo) ──────────
     // Verifica agendamentos de status inativo que já estão ativos mas não tiveram
     // os créditos gerados, e gera os créditos retroativamente
-    const INACTIVE_STATUSES = ["Desligado", "Férias", "Licença", "Afastado"];
+    const INACTIVE_STATUSES = ["Desligado", "Férias", "Licença", "Afastado", "Home Office"];
     const activeStatusMovements = await tx
       .select({
         id: scheduledMovementsTable.id,

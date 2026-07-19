@@ -97,10 +97,10 @@ function StatCard({ label, value, sub, trend }: { label: string; value: number |
 }
 
 const VALE_DIARIO = 8.50;
-const STATUS_INATIVOS = ["Férias", "Licença", "Afastado", "Desligado"] as const;
+const STATUS_INATIVOS = ["Férias", "Licença", "Afastado", "Desligado", "Home Office"] as const;
 const STATUS_COLORS: Record<string, string> = {
   "Ativo":     "#22c55e",
-  "Inativo":   "#94a3b8",
+  "Home Office": "#94a3b8",
   "Férias":    "#3b82f6",
   "Licença":   "#f59e0b",
   "Afastado":  "#f97316",

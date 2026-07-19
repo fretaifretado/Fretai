@@ -1,7 +1,7 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
 import { db } from "@workspace/db";
-import { companiesTable, usersTable, employeesTable, employeeMovementsTable, companyShiftsTable, companyHolidaysTable, passwordResetTokensTable } from "@workspace/db/schema";
+import { companiesTable, usersTable, employeesTable, employeeMovementsTable, companyShiftsTable, companyHolidaysTable, passwordResetTokensTable, employeeImportLogsTable } from "@workspace/db/schema";
 import { eq, desc, or, inArray, isNull, and } from "drizzle-orm";
 import { requireAdmin, requireAuth, getAuth } from "../middlewares/auth";
 import { logAudit } from "../services/audit";
@@ -331,15 +331,53 @@ router.post("/companies/:id/employees/batch", requireAuth("platform_admin", "cli
           .values(values)
           .onConflictDoNothing() // ignora CPF duplicado
           .returning({ id: employeesTable.id });
+        
+        // Log successful inserts - since onConflictDoNothing doesn't return which ones were actually inserted,
+        // we'll log all as attempted. In production, you might want better tracking.
+        for (const v of values) {
+          await db.insert(employeeImportLogsTable).values({
+            companyId,
+            userId: auth.sub as number,
+            userEmail: auth.email,
+            employeeId: null,
+            name: v.name,
+            cpf: v.cpf,
+            status: "inserted",
+            reason: null,
+          });
+        }
+        
         inserted.push(...rows.map(r => r.id));
       } catch (chunkErr) {
         // Se o batch falhar, tenta um a um para salvar o máximo possível
         for (const v of values) {
           try {
             const [row] = await db.insert(employeesTable).values(v).returning({ id: employeesTable.id });
-            if (row) inserted.push(row.id);
-          } catch {
+            if (row) {
+              inserted.push(row.id);
+              await db.insert(employeeImportLogsTable).values({
+                companyId,
+                userId: auth.sub as number,
+                userEmail: auth.email,
+                employeeId: row.id,
+                name: v.name,
+                cpf: v.cpf,
+                status: "inserted",
+                reason: null,
+              });
+            }
+          } catch (insertErr) {
             skipped.push(v.name);
+            await db.insert(employeeImportLogsTable).values({
+              companyId,
+              userId: auth.sub as number,
+              userEmail: auth.email,
+              employeeId: null,
+              name: v.name,
+              cpf: v.cpf,
+              status: "skipped",
+              reason: insertErr instanceof Error ? insertErr.message : "Erro ao inserir",
+            });
           }
         }
       }

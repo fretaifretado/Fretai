@@ -501,7 +501,7 @@ export default function ColaboradoresPage() {
 
         // Check if employee is inactive
         const colaborador = colaboradores.find(c => c.id === o.employeeId);
-        const isInactive = colaborador && ["Desligado", "Férias", "Licença", "Afastado"].includes(colaborador.status);
+        const isInactive = colaborador && ["Desligado", "Férias", "Licença", "Afastado", "Home Office"].includes(colaborador.status);
         const isPermanentSeparation = colaborador?.status === "Desligado";
         
         // If employee is permanently separated (Desligado), skip orders created after operation_start
