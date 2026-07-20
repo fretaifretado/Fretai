@@ -36,16 +36,16 @@ export default function EmployeeImportLogsSection({ token }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
-  const [selectedCompany, setSelectedCompany] = useState<number | null>(null);
-  const [selectedStatus, setSelectedStatus] = useState<string | null>(null);
+  const [selectedCompany, setSelectedCompany] = useState<string>("all");
+  const [selectedStatus, setSelectedStatus] = useState<string>("all");
 
   const fetchLogs = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
       const params = new URLSearchParams();
-      if (selectedCompany) params.append("companyId", selectedCompany.toString());
-      if (selectedStatus) params.append("status", selectedStatus);
+      if (selectedCompany !== "all") params.append("companyId", selectedCompany);
+      if (selectedStatus !== "all") params.append("status", selectedStatus);
       if (search) params.append("search", search);
 
       const res = await fetch(apiUrl(`/api/admin/employee-import-logs?${params.toString()}`), {
@@ -91,8 +91,8 @@ export default function EmployeeImportLogsSection({ token }: Props) {
   const handleExport = async () => {
     try {
       const params = new URLSearchParams();
-      if (selectedCompany) params.append("companyId", selectedCompany.toString());
-      if (selectedStatus) params.append("status", selectedStatus);
+      if (selectedCompany !== "all") params.append("companyId", selectedCompany);
+      if (selectedStatus !== "all") params.append("status", selectedStatus);
       if (search) params.append("search", search);
 
       const res = await fetch(apiUrl(`/api/admin/employee-import-logs/export?${params.toString()}`), {
@@ -147,23 +147,23 @@ export default function EmployeeImportLogsSection({ token }: Props) {
               onChange={e => setSearch(e.target.value)}
             />
           </div>
-          <Select value={selectedCompany?.toString() || ""} onValueChange={v => setSelectedCompany(v ? parseInt(v) : null)}>
+          <Select value={selectedCompany} onValueChange={v => setSelectedCompany(v)}>
             <SelectTrigger className="w-full sm:w-[200px]">
               <SelectValue placeholder="Todas empresas" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="">Todas empresas</SelectItem>
+              <SelectItem value="all">Todas empresas</SelectItem>
               {companies.map(c => (
                 <SelectItem key={c.id} value={c.id.toString()}>{c.name}</SelectItem>
               ))}
             </SelectContent>
           </Select>
-          <Select value={selectedStatus || ""} onValueChange={v => setSelectedStatus(v || null)}>
+          <Select value={selectedStatus} onValueChange={v => setSelectedStatus(v)}>
             <SelectTrigger className="w-full sm:w-[150px]">
               <SelectValue placeholder="Todos status" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="">Todos status</SelectItem>
+              <SelectItem value="all">Todos status</SelectItem>
               <SelectItem value="inserted">Inseridos</SelectItem>
               <SelectItem value="skipped">Pulados</SelectItem>
             </SelectContent>
