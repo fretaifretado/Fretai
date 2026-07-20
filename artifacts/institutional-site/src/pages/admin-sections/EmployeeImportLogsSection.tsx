@@ -34,12 +34,14 @@ export default function EmployeeImportLogsSection({ token }: Props) {
   const [logs, setLogs] = useState<EmployeeImportLog[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [selectedCompany, setSelectedCompany] = useState<number | null>(null);
   const [selectedStatus, setSelectedStatus] = useState<string | null>(null);
 
   const fetchLogs = useCallback(async () => {
     setLoading(true);
+    setError("");
     try {
       const params = new URLSearchParams();
       if (selectedCompany) params.append("companyId", selectedCompany.toString());
@@ -49,11 +51,15 @@ export default function EmployeeImportLogsSection({ token }: Props) {
       const res = await fetch(apiUrl(`/api/admin/employee-import-logs?${params.toString()}`), {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) throw new Error("Erro ao carregar logs");
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || "Erro ao carregar logs");
+      }
       const data = await res.json();
       setLogs(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error("Error fetching logs:", err);
+      setError(err instanceof Error ? err.message : "Erro ao carregar logs");
       setLogs([]);
     } finally {
       setLoading(false);
@@ -168,6 +174,15 @@ export default function EmployeeImportLogsSection({ token }: Props) {
       <div className="bg-card border rounded-xl shadow-sm overflow-hidden">
         {loading ? (
           <div className="py-16 text-center text-muted-foreground text-sm">Carregando...</div>
+        ) : error ? (
+          <div className="py-16 text-center">
+            <ScrollText size={36} className="text-red-500/30 mx-auto mb-3" />
+            <p className="text-red-500 font-medium text-sm mb-2">Erro ao carregar logs</p>
+            <p className="text-muted-foreground text-xs">{error}</p>
+            <Button variant="outline" size="sm" onClick={fetchLogs} className="mt-4">
+              Tentar novamente
+            </Button>
+          </div>
         ) : filteredLogs.length === 0 ? (
           <div className="py-16 text-center">
             <ScrollText size={36} className="text-muted-foreground/30 mx-auto mb-3" />
