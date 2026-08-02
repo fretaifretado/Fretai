@@ -225,7 +225,9 @@ export async function getFinancialSummary(companyId: number, period: Period): Pr
   }
 
   let carry = 0;
-  for (const key of Array.from(totalsByKey.keys()).filter(k => k < targetKey).sort((a, b) => a - b)) {
+  // Only apply credits from 2+ months ago (deferred by 2 months)
+  const eligibleKeys = Array.from(totalsByKey.keys()).filter(k => k <= targetKey - 2).sort((a, b) => a - b);
+  for (const key of eligibleKeys) {
     const totals = totalsByKey.get(key)!;
     const applied = Math.min(carry, totals.purchases);
     carry = roundMoney(carry - applied + totals.discounts);
