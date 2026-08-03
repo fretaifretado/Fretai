@@ -36,7 +36,24 @@ export interface FinancialSummary {
   creditoAplicado: number;
   saldoCredito: number;
   valorNotaFiscal: number;
+  creditoPendente: number;
+  creditoPendenteDetalhes: Array<{ mesAplicacao: string; valor: number; mesGeracao: string }>;
 }
+
+const EMPTY_FINANCIAL_SUMMARY: FinancialSummary = {
+  companyId: 0,
+  period: "",
+  periodLabel: "",
+  valesComprados: 0,
+  compraDoMes: 0,
+  valesNaoUtilizados: 0,
+  creditoGerado: 0,
+  creditoAplicado: 0,
+  saldoCredito: 0,
+  valorNotaFiscal: 0,
+  creditoPendente: 0,
+  creditoPendenteDetalhes: [],
+};
 
 function normalizeTurnoKey(name: string): string {
   return (name || "").toLowerCase().replace(/\s+/g, "");
@@ -238,6 +255,41 @@ export async function getFinancialSummary(companyId: number, period: Period): Pr
   const saldoCredito = roundMoney(saldoAnteriorRestante + creditoGerado);
   const valorNotaFiscal = roundMoney(Math.max(0, compraDoMes - creditoAplicado));
 
+  // Calculate pending credits (credits from last 2 months that haven't been applied yet)
+  const creditoPendenteDetalhes: Array<{ mesAplicacao: string; valor: number; mesGeracao: string }> = [];
+  let creditoPendente = 0;
+
+  // Credits from targetKey - 1 (last month) apply in targetKey + 1 (next month)
+  const lastMonthKey = targetKey - 1;
+  const lastMonthTotals = totalsByKey.get(lastMonthKey);
+  if (lastMonthTotals?.discounts) {
+    const nextMonthPeriod = periodFromKey(targetKey + 1);
+    const lastMonthPeriod = periodFromKey(lastMonthKey);
+    if (nextMonthPeriod && lastMonthPeriod) {
+      creditoPendente += lastMonthTotals.discounts;
+      creditoPendenteDetalhes.push({
+        mesAplicacao: periodLabel(nextMonthPeriod),
+        valor: roundMoney(lastMonthTotals.discounts),
+        mesGeracao: periodLabel(lastMonthPeriod),
+      });
+    }
+  }
+
+  // Credits from targetKey (current month) apply in targetKey + 2 (month after next)
+  const currentMonthTotals = totalsByKey.get(targetKey);
+  if (currentMonthTotals?.discounts) {
+    const afterNextMonthPeriod = periodFromKey(targetKey + 2);
+    const currentMonthPeriod = periodFromKey(targetKey);
+    if (afterNextMonthPeriod && currentMonthPeriod) {
+      creditoPendente += currentMonthTotals.discounts;
+      creditoPendenteDetalhes.push({
+        mesAplicacao: periodLabel(afterNextMonthPeriod),
+        valor: roundMoney(currentMonthTotals.discounts),
+        mesGeracao: periodLabel(currentMonthPeriod),
+      });
+    }
+  }
+
   return {
     companyId,
     period: periodParam(period),
@@ -249,7 +301,16 @@ export async function getFinancialSummary(companyId: number, period: Period): Pr
     creditoAplicado,
     saldoCredito,
     valorNotaFiscal,
+    creditoPendente: roundMoney(creditoPendente),
+    creditoPendenteDetalhes,
   };
+}
+
+function periodFromKey(key: number): Period | null {
+  const year = Math.floor(key / 12);
+  const month = key % 12;
+  if (month === 0) return null; // Invalid month
+  return { year, month };
 }
 
 export async function getFinancialSummaryByBranches(companyIds: number[], period: Period): Promise<Map<number, FinancialSummary>> {

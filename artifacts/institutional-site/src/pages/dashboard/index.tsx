@@ -4,7 +4,7 @@ import { useDashboard } from "./context";
 import {
   Users, TrendingUp, CalendarDays, ChevronLeft, ChevronRight,
   ArrowUpRight, Info, BarChart2, TrendingDown, DollarSign, Calendar,
-  Building2, Filter, CheckCircle2, XCircle, FileSpreadsheet,
+  Building2, Filter, CheckCircle2, XCircle, FileSpreadsheet, Clock,
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -42,6 +42,8 @@ interface FinancialSummary {
   creditoAplicado: number;
   saldoCredito: number;
   valorNotaFiscal: number;
+  creditoPendente: number;
+  creditoPendenteDetalhes: Array<{ mesAplicacao: string; valor: number; mesGeracao: string }>;
 }
 
 const EMPTY_FINANCIAL_SUMMARY: FinancialSummary = {
@@ -55,6 +57,8 @@ const EMPTY_FINANCIAL_SUMMARY: FinancialSummary = {
   creditoAplicado: 0,
   saldoCredito: 0,
   valorNotaFiscal: 0,
+  creditoPendente: 0,
+  creditoPendenteDetalhes: [],
 };
 
 function passageirosNoDia(budgets: PublishedBudget[], date: Date): number {
@@ -502,6 +506,22 @@ export default function DashboardPage() {
                 <p className="text-3xl font-bold text-rose-700">{fmt(financialSummary.valorNotaFiscal)}</p>
                 <p className="text-[10px] text-muted-foreground">Compra do mês - Crédito aplicado</p>
               </div>
+
+              {/* Card 7: Crédito Pendente */}
+              {financialSummary.creditoPendente > 0 && (
+                <div className="bg-amber-50/50 border border-amber-100 rounded-xl p-5 shadow-sm flex flex-col gap-1">
+                  <div className="flex items-center gap-2 text-amber-600 mb-1">
+                    <Clock size={14} />
+                    <p className="text-[10px] font-bold uppercase tracking-wider">Crédito Pendente</p>
+                  </div>
+                  <p className="text-3xl font-bold text-amber-700">{fmt(financialSummary.creditoPendente)}</p>
+                  <div className="text-[10px] text-muted-foreground space-y-0.5">
+                    {financialSummary.creditoPendenteDetalhes.map((det, idx) => (
+                      <div key={idx}>{det.mesAplicacao}: {fmt(det.valor)} (gerado em {det.mesGeracao})</div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
