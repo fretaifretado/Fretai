@@ -211,7 +211,7 @@ async function insertUnusedValeDiscount(
     
     // If fimPeriodo is provided (temporary absence), only discount days within that period
     // Otherwise (permanent separation), discount all remaining days
-    const orderEnd = fimPeriodo || (fim || effectiveDate);
+    const orderEnd = fimPeriodo ? (fim ? (fimPeriodo < fim ? fimPeriodo : fim) : fimPeriodo) : (fim || effectiveDate);
     const remainingDays = inicio ? countWorkDays(from, orderEnd, tipoEscala, anchor, turno?.escala) : 0;
     const unusedVales = Math.min(order.vales, Math.max(0, remainingDays * 2));
     if (unusedVales <= 0) continue;
@@ -394,12 +394,11 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
             discountTurno: "Desconto por status",
           });
 
-          // Only update employee's status on the actual activation date
-          if (mv.inicio === today) {
-            await tx.update(employeesTable)
-              .set({ status: mv.valorNovo, updatedAt: new Date() })
-              .where(eq(employeesTable.id, t.colaboradorId));
-          }
+          // Update employee's status if the movement is active (even if processing is delayed)
+          // This ensures the status is correct even if the system processes a day late
+          await tx.update(employeesTable)
+            .set({ status: mv.valorNovo, updatedAt: new Date() })
+            .where(eq(employeesTable.id, t.colaboradorId));
         }
       }
     }
