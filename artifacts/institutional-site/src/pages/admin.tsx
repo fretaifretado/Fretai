@@ -20,6 +20,7 @@ import VehicleTypesSection from "./admin-sections/VehicleTypesSection";
 import BudgetsSection from "./admin-sections/BudgetsSection";
 import EmployeeImportLogsSection from "./admin-sections/EmployeeImportLogsSection";
 import { ScheduledMovementsSection } from "./admin-sections/ScheduledMovementsSection";
+import FinancialReportsSection from "./admin-sections/FinancialReportsSection";
 import { apiUrl } from "@/lib/api";
 
 interface Client {
@@ -599,7 +600,12 @@ export default function Admin() {
               </div>
             )}
 
-            {activeSection === "relatorios" && <EmployeeImportLogsSection token={token} />}
+            {activeSection === "relatorios" && (
+              <div className="space-y-6">
+                <EmployeeImportLogsSection token={token} />
+                <FinancialReportsSection token={token} />
+              </div>
+            )}
             {activeSection === "configuracoes" && <ComingSoon title="Configurações" icon={Settings} />}
           </div>
         </main>
