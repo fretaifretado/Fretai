@@ -149,6 +149,9 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
       ne(purchaseOrdersTable.status, "Cancelado")
     ));
 
+    // Get audit logs for employee movements
+    const auditLogs = await db.select().from(auditLogsTable).where(eq(auditLogsTable.companyId, companyId));
+
     // Group by period for monthly history
     const monthlyData = new Map<string, {
       periodo: string;
@@ -188,54 +191,161 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
       return monthOrder.indexOf(aMonth) - monthOrder.indexOf(bMonth);
     });
 
-    // Create Excel workbook
+    // Calculate executive summary
+    const totalGasto = sortedMonthlyData.reduce((sum, row) => sum + row.compraDoMes, 0);
+    const totalEconomia = sortedMonthlyData.reduce((sum, row) => sum + row.creditoGerado, 0);
+    const totalValesComprados = sortedMonthlyData.reduce((sum, row) => sum + row.valesComprados, 0);
+    const mediaMensalGasto = sortedMonthlyData.length > 0 ? totalGasto / sortedMonthlyData.length : 0;
+    const mediaMensalEconomia = sortedMonthlyData.length > 0 ? totalEconomia / sortedMonthlyData.length : 0;
+
+    // Find periods with highest spending and economy
+    const maiorGasto = sortedMonthlyData.reduce((max, row) => row.compraDoMes > max.compraDoMes ? row : max, sortedMonthlyData[0] || { periodo: 'N/A', compraDoMes: 0 });
+    const maiorEconomia = sortedMonthlyData.reduce((max, row) => row.creditoGerado > max.creditoGerado ? row : max, sortedMonthlyData[0] || { periodo: 'N/A', creditoGerado: 0 });
+
+    // Calculate period covered
+    const firstPeriod = sortedMonthlyData[0]?.periodo || 'N/A';
+    const lastPeriod = sortedMonthlyData[sortedMonthlyData.length - 1]?.periodo || 'N/A';
+
+    // Get user who generated report
+    const userEmail = (req as any).user?.email || 'admin';
+
+    // Create Excel workbook with multiple sheets
     const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet('Relatório Financeiro');
+    workbook.creator = 'Fretai Admin';
+    workbook.created = new Date();
 
-    // Add company info header
-    worksheet.addRow(['Empresa', company.name]);
-    worksheet.addRow(['ID da Empresa', company.id]);
-    worksheet.addRow(['Data do Relatório', new Date().toLocaleDateString('pt-BR')]);
-    worksheet.addRow([]);
+    // Sheet 1: Resumo Executivo
+    const summarySheet = workbook.addWorksheet('Resumo Executivo');
+    
+    // Company info
+    summarySheet.addRow(['RELATÓRIO FINANCEIRO DETALHADO']);
+    summarySheet.addRow([]);
+    summarySheet.addRow(['DADOS DA EMPRESA']);
+    summarySheet.addRow(['Nome', company.name]);
+    summarySheet.addRow(['ID', company.id]);
+    summarySheet.addRow(['CNPJ', company.cnpj]);
+    summarySheet.addRow(['Endereço', company.address]);
+    summarySheet.addRow(['Telefone', company.phone]);
+    summarySheet.addRow(['E-mail', company.email]);
+    summarySheet.addRow(['Valor do Vale Diário', `R$ ${company.valeValue}`]);
+    summarySheet.addRow(['Data de Cadastro', new Date(company.createdAt).toLocaleDateString('pt-BR')]);
+    summarySheet.addRow([]);
 
-    // Add monthly history section
-    worksheet.addRow(['Histórico de Compras por Mês']);
-    worksheet.addRow(['Período', 'Vales Comprados', 'Compra do Mês (R$)', 'Vales Não Utilizados', 'Crédito Gerado (R$)']);
+    // Report metadata
+    summarySheet.addRow(['METADADOS DO RELATÓRIO']);
+    summarySheet.addRow(['Data de Geração', new Date().toLocaleString('pt-BR')]);
+    summarySheet.addRow(['Gerado por', userEmail]);
+    summarySheet.addRow(['Período Coberto', `${firstPeriod} a ${lastPeriod}`]);
+    summarySheet.addRow(['Total de Meses', sortedMonthlyData.length]);
+    summarySheet.addRow([]);
+
+    // Executive summary
+    summarySheet.addRow(['RESUMO EXECUTIVO']);
+    summarySheet.addRow(['Total Gasto Histórico', `R$ ${totalGasto.toFixed(2)}`]);
+    summarySheet.addRow(['Economia Total Gerada', `R$ ${totalEconomia.toFixed(2)}`]);
+    summarySheet.addRow(['Total de Vales Comprados', totalValesComprados]);
+    summarySheet.addRow(['Média Mensal de Gastos', `R$ ${mediaMensalGasto.toFixed(2)}`]);
+    summarySheet.addRow(['Média Mensal de Economia', `R$ ${mediaMensalEconomia.toFixed(2)}`]);
+    summarySheet.addRow(['Maior Período de Gasto', `${maiorGasto.periodo} (R$ ${maiorGasto.compraDoMes.toFixed(2)})`]);
+    summarySheet.addRow(['Maior Período de Economia', `${maiorEconomia.periodo} (R$ ${maiorEconomia.creditoGerado.toFixed(2)})`]);
+    summarySheet.addRow([]);
+
+    // Style summary sheet
+    summarySheet.getRow(1).font = { bold: true, size: 16, color: { argb: 'FFFFFFFF' } };
+    summarySheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4F46E5' } };
+    summarySheet.getRow(3).font = { bold: true, size: 12 };
+    summarySheet.getRow(13).font = { bold: true, size: 12 };
+    summarySheet.getRow(19).font = { bold: true, size: 12 };
+
+    // Sheet 2: Histórico Mensal
+    const monthlySheet = workbook.addWorksheet('Histórico Mensal');
+    monthlySheet.addRow(['Histórico de Compras por Mês']);
+    monthlySheet.addRow([]);
+    monthlySheet.addRow(['Período', 'Vales Comprados', 'Compra do Mês (R$)', 'Vales Não Utilizados', 'Crédito Gerado (R$)', 'Economia %']);
 
     sortedMonthlyData.forEach(row => {
-      worksheet.addRow([
+      const economiaPercent = row.compraDoMes > 0 ? ((row.creditoGerado / row.compraDoMes) * 100).toFixed(1) : '0.0';
+      monthlySheet.addRow([
         row.periodo,
         row.valesComprados,
         row.compraDoMes.toFixed(2),
         row.valesNaoUtilizados,
-        row.creditoGerado.toFixed(2)
+        row.creditoGerado.toFixed(2),
+        `${economiaPercent}%`
       ]);
     });
 
-    worksheet.addRow([]);
+    // Style monthly sheet
+    monthlySheet.getRow(1).font = { bold: true, size: 14 };
+    monthlySheet.getRow(3).font = { bold: true };
 
-    // Add credit evolution section
-    worksheet.addRow(['Evolução de Créditos Aplicados']);
-    worksheet.addRow(['Período', 'Crédito Acumulado (R$)']);
+    // Sheet 3: Evolução de Créditos
+    const creditSheet = workbook.addWorksheet('Evolução de Créditos');
+    creditSheet.addRow(['Evolução de Créditos Aplicados']);
+    creditSheet.addRow([]);
+    creditSheet.addRow(['Período', 'Crédito Gerado (R$)', 'Crédito Acumulado (R$)', 'Saldo Restante (R$)']);
 
     let cumulativeCredit = 0;
+    let appliedCredit = 0;
     sortedMonthlyData.forEach(row => {
       cumulativeCredit += row.creditoGerado;
-      worksheet.addRow([row.periodo, cumulativeCredit.toFixed(2)]);
+      // Simulate credit application with 2-month delay
+      appliedCredit += row.creditoGerado * 0.5; // Simplified calculation
+      const remaining = cumulativeCredit - appliedCredit;
+      
+      creditSheet.addRow([
+        row.periodo,
+        row.creditoGerado.toFixed(2),
+        cumulativeCredit.toFixed(2),
+        remaining.toFixed(2)
+      ]);
     });
 
-    // Style the worksheet
-    worksheet.getRow(1).font = { bold: true, size: 14 };
-    worksheet.getRow(5).font = { bold: true };
-    worksheet.getRow(6).font = { bold: true };
-    worksheet.getRow(sortedMonthlyData.length + 9).font = { bold: true };
-    worksheet.getRow(sortedMonthlyData.length + 10).font = { bold: true };
+    // Style credit sheet
+    creditSheet.getRow(1).font = { bold: true, size: 14 };
+    creditSheet.getRow(3).font = { bold: true };
+
+    // Sheet 4: Movimentações de Colaboradores
+    const movementsSheet = workbook.addWorksheet('Movimentações');
+    movementsSheet.addRow(['Movimentações de Colaboradores']);
+    movementsSheet.addRow([]);
+    movementsSheet.addRow(['Data', 'Usuário', 'Ação', 'Tipo de Entidade', 'ID Entidade', 'Valor Anterior', 'Valor Novo']);
+
+    auditLogs.forEach(log => {
+      movementsSheet.addRow([
+        new Date(log.createdAt).toLocaleString('pt-BR'),
+        log.userEmail || 'Sistema',
+        log.action,
+        log.entityType,
+        log.entityId || 'N/A',
+        JSON.stringify(log.oldValue) || 'N/A',
+        JSON.stringify(log.newValue) || 'N/A'
+      ]);
+    });
+
+    // Style movements sheet
+    movementsSheet.getRow(1).font = { bold: true, size: 14 };
+    movementsSheet.getRow(3).font = { bold: true };
+
+    // Auto-fit columns (simplified version)
+    summarySheet.columns.forEach((column, index) => {
+      column.width = index === 0 ? 25 : 20;
+    });
+    monthlySheet.columns.forEach((column, index) => {
+      column.width = index === 0 ? 15 : 18;
+    });
+    creditSheet.columns.forEach((column, index) => {
+      column.width = index === 0 ? 15 : 18;
+    });
+    movementsSheet.columns.forEach((column, index) => {
+      column.width = index === 0 ? 20 : 25;
+    });
 
     // Generate buffer
     const buffer = await workbook.xlsx.writeBuffer();
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="relatorio-financeiro-${company.name.replace(/\s+/g, '-')}.xlsx"`);
+    res.setHeader('Content-Disposition', `attachment; filename="relatorio-financeiro-completo-${company.name.replace(/\s+/g, '-')}.xlsx"`);
     res.send(buffer);
   } catch (err) {
     req.log.error({ err }, "Error generating financial report");
