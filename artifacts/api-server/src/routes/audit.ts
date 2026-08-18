@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { auditLogsTable, loginLogsTable, employeeImportLogsTable, purchaseOrdersTable, companiesTable, scheduledMovementsTable, scheduledMovementTargetsTable, employeesTable } from "@workspace/db/schema";
-import { desc, eq, and, like, ne } from "drizzle-orm";
+import { desc, eq, and, like, ne, inArray } from "drizzle-orm";
 import { requireAdmin } from "../middlewares/auth";
 import ExcelJS from 'exceljs';
 
@@ -178,7 +178,7 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
       id: employeesTable.id,
       name: employeesTable.name,
     }).from(employeesTable).where(
-      employeeIds.length > 0 ? eq(employeesTable.id, employeeIds[0]) : undefined
+      employeeIds.length > 0 ? inArray(employeesTable.id, employeeIds) : undefined
     );
 
     const employeeMap = new Map(employees.map(e => [e.id, e.name]));
