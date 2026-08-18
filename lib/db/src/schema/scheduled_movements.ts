@@ -7,6 +7,7 @@ import {
   timestamp,
   pgEnum,
   bigint,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { companiesTable } from "./companies";
 
@@ -48,7 +49,10 @@ export const scheduledMovementTargetsTable = pgTable("scheduled_movement_targets
   filialIdAnterior: integer("filial_id_anterior"),
   appliedAt: timestamp("applied_at"),
   revertedAt: timestamp("reverted_at"),
-});
+}, table => ({
+  movementCollaboratorUnique: uniqueIndex("scheduled_movement_target_unique_idx")
+    .on(table.scheduledMovementId, table.colaboradorId),
+}));
 
 export type ScheduledMovement = typeof scheduledMovementsTable.$inferSelect;
 export type ScheduledMovementTarget = typeof scheduledMovementTargetsTable.$inferSelect;

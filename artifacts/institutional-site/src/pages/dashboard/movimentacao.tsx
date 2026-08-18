@@ -152,6 +152,8 @@ export default function MovimentacaoPage() {
 
   const [sucesso, setSucesso] = useState(false);
   const [resumoSucesso, setResumoSucesso] = useState<{ qtd: number; inicio: string; fim: string } | null>(null);
+  const [agendando, setAgendando] = useState(false);
+  const [agendamentoErro, setAgendamentoErro] = useState("");
 
   const ativos   = colaboradores.filter(c => c.status !== "Desligado");
   const filtered = ativos.filter(c => c.nome.toLowerCase().includes(search.toLowerCase()));
@@ -165,6 +167,7 @@ export default function MovimentacaoPage() {
     setModo("tabela"); setSelecionados([]); setNaoEncontrados([]);
     setSearch(""); setCpfTexto(""); setImportInfo(""); setImportErro("");
     setInicio(""); setFim("");
+    setAgendamentoErro(""); setAgendando(false);
   }
 
   function toggleSel(id: number) {
@@ -238,30 +241,41 @@ export default function MovimentacaoPage() {
   const podeAgendar = operacao && valorOk && selecionados.length > 0 && datasOk;
 
   async function agendar() {
-    if (!operacao || !valorOk) return;
+    if (!operacao || !valorOk || agendando) return;
+    setAgendamentoErro("");
+    setAgendando(true);
     let valor = "";
     let filialIdNovo: number | null | undefined;
     if (operacao === "filial") {
       const f = filiais.find(x => x.id === filialNova);
-      if (!f) return;
+      if (!f) { setAgendando(false); return; }
       valor = f.nome;
       filialIdNovo = f.id;
     } else {
       valor = valorNovo;
     }
     const fimEfetivo = isDesligado ? "9999-12-31" : fim;
-    const created = await addAgendamento({
-      tipo: operacao,
-      valorNovo: valor,
-      filialIdNovo,
-      inicio,
-      fim: fimEfetivo,
-      alvos: selecionados.map(id => ({ colaboradorId: id, valorAnterior: "" })),
-    });
-    if (!created) return;
-    setResumoSucesso({ qtd: selecionados.length, inicio, fim: fimEfetivo });
-    setSucesso(true);
-    setTimeout(() => { setSucesso(false); setResumoSucesso(null); resetTudo(); }, 3500);
+    try {
+      const created = await addAgendamento({
+        tipo: operacao,
+        valorNovo: valor,
+        filialIdNovo,
+        inicio,
+        fim: fimEfetivo,
+        alvos: selecionados.map(id => ({ colaboradorId: id, valorAnterior: "" })),
+      });
+      if (!created) {
+        setAgendamentoErro("Não foi possível criar o agendamento.");
+        return;
+      }
+      setResumoSucesso({ qtd: selecionados.length, inicio, fim: fimEfetivo });
+      setSucesso(true);
+      setTimeout(() => { setSucesso(false); setResumoSucesso(null); resetTudo(); }, 3500);
+    } catch (error) {
+      setAgendamentoErro(error instanceof Error ? error.message : "Não foi possível criar o agendamento.");
+    } finally {
+      setAgendando(false);
+    }
   }
 
   /* ---------- cards iniciais ---------- */
@@ -577,11 +591,18 @@ export default function MovimentacaoPage() {
                   : "A alteração será aplicada automaticamente a partir do início e revertida ao valor anterior depois do fim."}
               </p>
               <div className="flex justify-end">
-                <Button onClick={agendar} disabled={!podeAgendar}
+                <Button onClick={agendar} disabled={!podeAgendar || agendando}
                   className="bg-accent hover:bg-accent/90 text-white font-semibold px-6">
-                  Agendar para {selecionados.length || "..."} colaborador{selecionados.length !== 1 ? "es" : ""}
+                  {agendando
+                    ? "Agendando..."
+                    : <>Agendar para {selecionados.length || "..."} colaborador{selecionados.length !== 1 ? "es" : ""}</>}
                 </Button>
               </div>
+              {agendamentoErro && (
+                <p className="mt-3 text-xs text-red-600 flex items-center justify-end gap-1.5">
+                  <AlertCircle size={12} />{agendamentoErro}
+                </p>
+              )}
             </div>
           </div>
         )}

@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Response } from "express";
 import { db } from "@workspace/db";
 import {
   scheduledMovementsTable,
@@ -16,11 +16,139 @@ const router = Router();
  
 type Tipo = "turno" | "status" | "filial";
 type Estado = "pendente" | "ativo" | "concluido";
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
  
 interface AlvoBody {
   colaboradorId: number;
   valorAnterior?: string;
   filialIdAnterior?: number | null;
+}
+
+class ScheduleRequestError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+    readonly conflictingCollaboratorIds: number[] = [],
+  ) {
+    super(message);
+  }
+}
+
+const SCHEDULE_LOCK_NAMESPACE = 7124;
+
+async function lockCompanySchedules(tx: DbTransaction, companyId: number): Promise<void> {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(${SCHEDULE_LOCK_NAMESPACE}, ${companyId})`);
+}
+
+async function assertValidTargets(
+  tx: DbTransaction,
+  companyId: number,
+  alvos: AlvoBody[],
+): Promise<AlvoBody[]> {
+  const ids = alvos.map(alvo => alvo.colaboradorId);
+  if (ids.some(id => !Number.isSafeInteger(id) || id <= 0)) {
+    throw new ScheduleRequestError(400, "INVALID_TARGETS", "Há colaboradores inválidos na seleção.");
+  }
+  if (new Set(ids).size !== ids.length) {
+    throw new ScheduleRequestError(400, "DUPLICATE_TARGETS", "A seleção contém o mesmo colaborador mais de uma vez.");
+  }
+
+  const employees = await tx
+    .select({ id: employeesTable.id })
+    .from(employeesTable)
+    .where(and(
+      eq(employeesTable.companyId, companyId),
+      inArray(employeesTable.id, ids),
+    ));
+  if (employees.length !== ids.length) {
+    throw new ScheduleRequestError(400, "INVALID_TARGETS", "Um ou mais colaboradores não pertencem à empresa.");
+  }
+  return alvos;
+}
+
+async function assertNoScheduleConflicts(
+  tx: DbTransaction,
+  params: {
+    companyId: number;
+    tipo: Tipo;
+    valorNovo: string;
+    filialIdNovo: number | null;
+    inicio: string;
+    fim: string;
+    colaboradorIds: number[];
+    excludeMovementId?: number;
+  },
+): Promise<void> {
+  const conditions = [
+    eq(scheduledMovementsTable.companyId, params.companyId),
+    eq(scheduledMovementsTable.tipo, params.tipo),
+    inArray(scheduledMovementTargetsTable.colaboradorId, params.colaboradorIds),
+    lte(scheduledMovementsTable.inicio, params.fim),
+    gte(scheduledMovementsTable.fim, params.inicio),
+  ];
+  if (params.excludeMovementId !== undefined) {
+    conditions.push(ne(scheduledMovementsTable.id, params.excludeMovementId));
+  }
+
+  const conflicts = await tx
+    .select({
+      movementId: scheduledMovementsTable.id,
+      estado: scheduledMovementsTable.estado,
+      valorNovo: scheduledMovementsTable.valorNovo,
+      filialIdNovo: scheduledMovementsTable.filialIdNovo,
+      inicio: scheduledMovementsTable.inicio,
+      fim: scheduledMovementsTable.fim,
+      colaboradorId: scheduledMovementTargetsTable.colaboradorId,
+    })
+    .from(scheduledMovementsTable)
+    .innerJoin(
+      scheduledMovementTargetsTable,
+      eq(scheduledMovementTargetsTable.scheduledMovementId, scheduledMovementsTable.id),
+    )
+    .where(and(...conditions));
+
+  if (conflicts.length === 0) return;
+
+  const exactIds = [...new Set(conflicts
+    .filter(conflict =>
+      conflict.valorNovo === params.valorNovo &&
+      (conflict.filialIdNovo ?? null) === params.filialIdNovo &&
+      conflict.inicio === params.inicio &&
+      conflict.fim === params.fim,
+    )
+    .map(conflict => conflict.colaboradorId))];
+  const overlappingIds = [...new Set(conflicts
+    .filter(conflict => conflict.estado === "pendente" || conflict.estado === "ativo")
+    .map(conflict => conflict.colaboradorId))];
+
+  if (exactIds.length > 0) {
+    throw new ScheduleRequestError(
+      409,
+      "DUPLICATE_SCHEDULE",
+      `Já existe um agendamento idêntico para ${exactIds.length} colaborador${exactIds.length === 1 ? "" : "es"}.`,
+      exactIds,
+    );
+  }
+
+  if (overlappingIds.length === 0) return;
+
+  throw new ScheduleRequestError(
+    409,
+    "OVERLAPPING_SCHEDULE",
+    `${overlappingIds.length} colaborador${overlappingIds.length === 1 ? " possui" : "es possuem"} outro agendamento de ${params.tipo} no período selecionado.`,
+    overlappingIds,
+  );
+}
+
+function sendScheduleError(res: Response, err: unknown): boolean {
+  if (!(err instanceof ScheduleRequestError)) return false;
+  res.status(err.status).json({
+    error: err.message,
+    code: err.code,
+    conflictingCollaboratorIds: err.conflictingCollaboratorIds,
+  });
+  return true;
 }
  
 function todayIso(): string {
@@ -146,7 +274,7 @@ function countWorkDays(from: Date, to: Date, tipoEscala: string, anchor?: Date |
 }
 
 async function insertUnusedValeDiscount(
-  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  tx: DbTransaction,
   params: {
     companyId: number;
     employeeId: number;
@@ -617,7 +745,7 @@ router.post("/me/scheduled-movements",
     if (!body.tipo || !VALID_TIPOS.includes(body.tipo as Tipo)) {
       res.status(400).json({ error: "Tipo inválido" }); return;
     }
-    if (!body.valorNovo || typeof body.valorNovo !== "string") {
+    if (typeof body.valorNovo !== "string" || !body.valorNovo.trim()) {
       res.status(400).json({ error: "valorNovo é obrigatório" }); return;
     }
     if (!isValidIsoDate(body.inicio) || !isValidIsoDate(body.fim)) {
@@ -633,20 +761,36 @@ router.post("/me/scheduled-movements",
       res.status(400).json({ error: "filialIdNovo é obrigatório para tipo=filial" }); return;
     }
  
+    const valorNovo = body.valorNovo.trim();
+    const filialIdNovo = body.tipo === "filial" ? body.filialIdNovo! : null;
+
     try {
+      await advanceStatesForCompany(companyId);
       const created = await db.transaction(async tx => {
+        await lockCompanySchedules(tx, companyId);
+        const alvos = await assertValidTargets(tx, companyId, body.alvos!);
+        await assertNoScheduleConflicts(tx, {
+          companyId,
+          tipo: body.tipo as Tipo,
+          valorNovo,
+          filialIdNovo,
+          inicio: body.inicio!,
+          fim: body.fim!,
+          colaboradorIds: alvos.map(alvo => alvo.colaboradorId),
+        });
+
         const [row] = await tx.insert(scheduledMovementsTable).values({
           companyId,
           tipo: body.tipo as Tipo,
-          valorNovo: body.valorNovo!,
-          filialIdNovo: body.filialIdNovo ?? null,
+          valorNovo,
+          filialIdNovo,
           inicio: body.inicio!,
           fim: body.fim!,
           estado: "pendente",
           createdByUserId: typeof auth.sub === "number" ? auth.sub : null,
         }).returning();
         if (!row) throw new Error("insert failed");
-        const targetRows = body.alvos!.map(a => ({
+        const targetRows = alvos.map(a => ({
           scheduledMovementId: row.id,
           colaboradorId: a.colaboradorId,
           valorAnterior: a.valorAnterior ?? "",
@@ -673,6 +817,7 @@ router.post("/me/scheduled-movements",
  
       res.status(201).json(fresh ?? null);
     } catch (err) {
+      if (sendScheduleError(res, err)) return;
       req.log.error({ err }, "Error creating scheduled movement");
       res.status(500).json({ error: "Erro interno" });
     }
@@ -706,17 +851,32 @@ router.patch("/me/scheduled-movements/:id",
  
     try {
       await advanceStatesForCompany(companyId);
-      const [row] = await db.select().from(scheduledMovementsTable)
-        .where(and(
-          eq(scheduledMovementsTable.id, id),
-          eq(scheduledMovementsTable.companyId, companyId),
-        ));
-      if (!row) { res.status(404).json({ error: "Agendamento não encontrado" }); return; }
-      if (row.estado !== "pendente") {
-        res.status(409).json({ error: "Só é possível editar agendamentos pendentes" }); return;
-      }
- 
       await db.transaction(async tx => {
+        await lockCompanySchedules(tx, companyId);
+        const [row] = await tx.select().from(scheduledMovementsTable)
+          .where(and(
+            eq(scheduledMovementsTable.id, id),
+            eq(scheduledMovementsTable.companyId, companyId),
+          ));
+        if (!row) {
+          throw new ScheduleRequestError(404, "SCHEDULE_NOT_FOUND", "Agendamento não encontrado.");
+        }
+        if (row.estado !== "pendente") {
+          throw new ScheduleRequestError(409, "SCHEDULE_ALREADY_STARTED", "Só é possível editar agendamentos pendentes.");
+        }
+
+        const alvos = await assertValidTargets(tx, companyId, body.alvos!);
+        await assertNoScheduleConflicts(tx, {
+          companyId,
+          tipo: row.tipo as Tipo,
+          valorNovo: row.valorNovo,
+          filialIdNovo: row.filialIdNovo,
+          inicio: body.inicio!,
+          fim: body.fim!,
+          colaboradorIds: alvos.map(alvo => alvo.colaboradorId),
+          excludeMovementId: id,
+        });
+
         await tx.update(scheduledMovementsTable).set({
           inicio: body.inicio!,
           fim: body.fim!,
@@ -725,7 +885,7 @@ router.patch("/me/scheduled-movements/:id",
         await tx.delete(scheduledMovementTargetsTable)
           .where(eq(scheduledMovementTargetsTable.scheduledMovementId, id));
         await tx.insert(scheduledMovementTargetsTable).values(
-          body.alvos!.map(a => ({
+          alvos.map(a => ({
             scheduledMovementId: id,
             colaboradorId: a.colaboradorId,
             valorAnterior: a.valorAnterior ?? "",
@@ -739,6 +899,7 @@ router.patch("/me/scheduled-movements/:id",
       const fresh = list.find(a => a.id === id);
       res.json(fresh ?? null);
     } catch (err) {
+      if (sendScheduleError(res, err)) return;
       req.log.error({ err }, "Error updating scheduled movement");
       res.status(500).json({ error: "Erro interno" });
     }

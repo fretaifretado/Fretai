@@ -247,7 +247,8 @@ interface DashboardContextValue {
    * é capturado aqui (a partir do colaborador atual) e enviado ao servidor para
    * que o ciclo de aplicar/reverter sobreviva a recarregar a página ou abrir em
    * outro navegador. Retorna o agendamento já com o id atribuído pelo servidor,
-   * ou `null` em caso de falha.
+   * ou `null` quando não há autenticação. Erros da API são lançados para que
+   * a tela consiga informar duplicidades e conflitos ao usuário.
    */
   addAgendamento: (a: Omit<Agendamento, "id" | "estado" | "criadoEm">) => Promise<Agendamento | null>;
   cancelAgendamento: (id: number) => Promise<void>;
@@ -901,14 +902,20 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
           alvos: alvosComSnapshot,
         }),
       });
-      if (!res.ok) return null;
-      const created = (await res.json()) as ApiAgendamento | null;
+      const payload = await res.json().catch(() => null) as ApiAgendamento | { error?: string } | null;
+      if (!res.ok) {
+        const message = payload && "error" in payload && payload.error
+          ? payload.error
+          : "Não foi possível criar o agendamento.";
+        throw new Error(message);
+      }
+      const created = payload as ApiAgendamento | null;
       // Recarrega lista para já refletir transições imediatas (ex.: hoje em janela).
       await fetchAgendamentos();
       return created ? mapApiAgendamento(created) : null;
     } catch (err) {
       console.error("[dashboard] erro ao criar agendamento:", err);
-      return null;
+      throw err instanceof Error ? err : new Error("Não foi possível criar o agendamento.");
     }
   }
 

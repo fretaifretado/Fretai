@@ -4,7 +4,7 @@ import { auditLogsTable, loginLogsTable, employeeImportLogsTable, purchaseOrders
 import { desc, eq, and, like, ne, inArray } from "drizzle-orm";
 import { requireAdmin } from "../middlewares/auth";
 import ExcelJS from 'exceljs';
-import { getFinancialHistory } from "../services/financial-summary";
+import { getFinancialHistory, periodFromLabel, periodKey, periodLabel, type Period } from "../services/financial-summary";
 
 const router = Router();
 
@@ -173,7 +173,11 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
       : [];
 
     // Get employee names
-    const employeeIds = [...new Set(movementTargets.map(t => t.colaboradorId))];
+    const discountOrders = orders.filter(order => order.vales < 0);
+    const employeeIds = [...new Set([
+      ...movementTargets.map(t => t.colaboradorId),
+      ...discountOrders.flatMap(order => order.employeeId === null ? [] : [order.employeeId]),
+    ])];
     const employees = await db.select({
       id: employeesTable.id,
       name: employeesTable.name,
@@ -328,10 +332,9 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
     const movementsSheet = workbook.addWorksheet('Movimentações');
     movementsSheet.addRow(['Movimentações de Colaboradores']);
     movementsSheet.addRow([]);
-    movementsSheet.addRow(['Mês', 'Tipo', 'Data Início', 'Data Fim', 'Status', 'Colaboradores Afetados', 'Estado', 'Valor Crédito (R$)']);
+    movementsSheet.addRow(['Mês', 'Status / Origem', 'Data Início', 'Data Fim', 'Status Técnico', 'Colaboradores Afetados', 'Estado', 'Valor Crédito (R$)']);
 
-    // Group movements by month
-    const movementsByMonth = new Map<string, Array<{
+    type MovementReportRow = {
       tipo: string;
       inicio: string;
       fim: string;
@@ -339,28 +342,77 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
       estado: string;
       colaboradores: string[];
       valorCredito: number;
-    }>>();
+    };
+    const movementsByPeriod = new Map<string, MovementReportRow[]>();
+    const claimedDiscountOrderIds = new Set<number>();
+    const seenScheduleTargets = new Set<string>();
 
-    scheduledMovements.forEach(movement => {
-      if (movement.tipo !== 'status') return; // Only show status movements
-      
-      const inicioDate = new Date(movement.inicio);
-      const month = inicioDate.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+    function periodFromIsoDate(value: string): Period | null {
+      const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+      if (!match) return null;
+      const year = Number(match[1]);
+      const month = Number(match[2]);
+      if (month < 1 || month > 12) return null;
+      return { year, month };
+    }
+
+    function fullPeriodLabel(value: string): string {
+      const period = periodFromLabel(value);
+      if (!period) return value;
+      return new Date(Date.UTC(period.year, period.month - 1, 1)).toLocaleDateString('pt-BR', {
+        month: 'long',
+        year: 'numeric',
+        timeZone: 'UTC',
+      });
+    }
+
+    function formatIsoDate(value: string): string {
+      const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+      return match ? `${match[3]}/${match[2]}/${match[1]}` : value;
+    }
+
+    // Keep one target per identical schedule. Old duplicate records remain auditable,
+    // but no longer duplicate the same financial entry in the report.
+    [...scheduledMovements]
+      .sort((a, b) => a.id - b.id)
+      .forEach(movement => {
+      if (movement.tipo !== 'status') return;
+
+      const period = periodFromIsoDate(movement.inicio);
+      if (!period) return;
+      const periodName = periodLabel(period);
       const targets = movementTargets.filter(t => t.scheduledMovementId === movement.id);
-      const colaboradorNames = targets.map(t => employeeMap.get(t.colaboradorId) || 'Desconhecido');
-      
-      const targetIds = new Set(targets.map(t => t.colaboradorId));
+      const uniqueTargets = targets.filter(target => {
+        const key = [
+          movement.tipo,
+          movement.valorNovo,
+          movement.inicio,
+          movement.fim,
+          target.colaboradorId,
+        ].join('|');
+        if (seenScheduleTargets.has(key)) return false;
+        seenScheduleTargets.add(key);
+        return true;
+      });
+      if (uniqueTargets.length === 0) return;
 
-      // Calculate credit value for this movement from generated discount orders
-      const movementOrders = orders.filter(order => {
+      const colaboradorNames = uniqueTargets.map(t => employeeMap.get(t.colaboradorId) || 'Desconhecido');
+      const targetIds = new Set(uniqueTargets.map(t => t.colaboradorId));
+
+      // Each financial order can belong to at most one detail row.
+      const movementOrders = discountOrders.filter(order => {
+        const orderPeriod = periodFromLabel(order.periodo);
         return order.employeeId !== null &&
+          !claimedDiscountOrderIds.has(order.id) &&
           targetIds.has(order.employeeId) &&
           order.dataInicio === movement.inicio &&
-          order.vales < 0;
+          orderPeriod !== null &&
+          periodLabel(orderPeriod) === periodName;
       });
+      movementOrders.forEach(order => claimedDiscountOrderIds.add(order.id));
       const valorCredito = movementOrders.reduce((sum, order) => sum + Math.abs(parseFloat(String(order.total))), 0);
-      
-      const existing = movementsByMonth.get(month) || [];
+
+      const existing = movementsByPeriod.get(periodName) || [];
       existing.push({
         tipo: movement.tipo,
         inicio: movement.inicio,
@@ -370,41 +422,74 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
         colaboradores: colaboradorNames,
         valorCredito,
       });
-      movementsByMonth.set(month, existing);
+      movementsByPeriod.set(periodName, existing);
+    });
+
+    // Credits without a visible status schedule (for example, branch changes or
+    // historical records whose schedule was removed) are still listed so the
+    // detail always reconciles with the monthly financial ledger.
+    discountOrders.forEach(order => {
+      if (claimedDiscountOrderIds.has(order.id)) return;
+      const period = periodFromLabel(order.periodo);
+      if (!period) return;
+      const periodName = periodLabel(period);
+      const existing = movementsByPeriod.get(periodName) || [];
+      existing.push({
+        tipo: 'financeiro',
+        inicio: order.dataInicio,
+        fim: order.dataFim,
+        valorNovo: 'Crédito financeiro',
+        estado: 'financeiro',
+        colaboradores: [order.employeeId === null ? order.nome : (employeeMap.get(order.employeeId) || order.nome)],
+        valorCredito: Math.abs(parseFloat(String(order.total))),
+      });
+      claimedDiscountOrderIds.add(order.id);
+      movementsByPeriod.set(periodName, existing);
     });
 
     // Sort months by date
-    const sortedMonths = Array.from(movementsByMonth.entries()).sort((a, b) => {
-      const [monthNameA, yearA] = a[0].split(' de ');
-      const [monthNameB, yearB] = b[0].split(' de ');
-      const dateA = new Date(parseInt(yearA), getMonthNumber(monthNameA), 1);
-      const dateB = new Date(parseInt(yearB), getMonthNumber(monthNameB), 1);
-      return dateA.getTime() - dateB.getTime();
-    }).map(([month]) => month);
+    const sortedPeriods = Array.from(movementsByPeriod.keys()).sort((a, b) => {
+      const periodA = periodFromLabel(a);
+      const periodB = periodFromLabel(b);
+      if (!periodA || !periodB) return a.localeCompare(b);
+      return periodKey(periodA) - periodKey(periodB);
+    });
 
-    function getMonthNumber(monthName: string): number {
-      const months: Record<string, number> = {
-        'janeiro': 0, 'fevereiro': 1, 'março': 2, 'abril': 3, 'maio': 4, 'junho': 5,
-        'julho': 6, 'agosto': 7, 'setembro': 8, 'outubro': 9, 'novembro': 10, 'dezembro': 11
-      };
-      return months[monthName.toLowerCase()] || 0;
-    }
-
-    sortedMonths.forEach(month => {
-      const movements = movementsByMonth.get(month) || [];
+    sortedPeriods.forEach(periodName => {
+      const movements = movementsByPeriod.get(periodName) || [];
       movements.forEach(mov => {
         movementsSheet.addRow([
-          month.charAt(0).toUpperCase() + month.slice(1),
+          fullPeriodLabel(periodName).replace(/^./, char => char.toUpperCase()),
           mov.valorNovo,
-          new Date(mov.inicio).toLocaleDateString('pt-BR'),
-          new Date(mov.fim).toLocaleDateString('pt-BR'),
+          formatIsoDate(mov.inicio),
+          formatIsoDate(mov.fim),
           mov.estado,
           mov.colaboradores.length > 0 ? mov.colaboradores.slice(0, 3).join(', ') + (mov.colaboradores.length > 3 ? ` (+${mov.colaboradores.length - 3})` : '') : 'N/A',
-          mov.estado === 'ativo' ? 'Em andamento' : mov.estado === 'concluido' ? 'Concluído' : 'Pendente',
+          mov.estado === 'financeiro' ? 'Lançamento financeiro' : mov.estado === 'ativo' ? 'Em andamento' : mov.estado === 'concluido' ? 'Concluído' : 'Pendente',
           mov.valorCredito.toFixed(2)
         ]);
       });
     });
+
+    // Sheet 5: explicit reconciliation between the ledger and the detail above.
+    const reconciliationSheet = workbook.addWorksheet('Conciliação');
+    reconciliationSheet.addRow(['Conciliação de Créditos']);
+    reconciliationSheet.addRow([]);
+    reconciliationSheet.addRow(['Período', 'Crédito no Histórico (R$)', 'Crédito Detalhado (R$)', 'Diferença (R$)', 'Status']);
+    sortedMonthlyData.forEach(row => {
+      const detailedCredit = (movementsByPeriod.get(row.periodo) || [])
+        .reduce((sum, movement) => sum + movement.valorCredito, 0);
+      const difference = Math.round((detailedCredit - row.creditoGerado) * 100) / 100;
+      reconciliationSheet.addRow([
+        row.periodo,
+        row.creditoGerado.toFixed(2),
+        detailedCredit.toFixed(2),
+        difference.toFixed(2),
+        Math.abs(difference) < 0.01 ? 'OK' : 'Revisar',
+      ]);
+    });
+    reconciliationSheet.getRow(1).font = { bold: true, size: 14 };
+    reconciliationSheet.getRow(3).font = { bold: true };
 
     // Style movements sheet
     movementsSheet.getRow(1).font = { bold: true, size: 14 };
@@ -422,6 +507,9 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
     });
     movementsSheet.columns.forEach((column, index) => {
       column.width = index === 0 ? 20 : 25;
+    });
+    reconciliationSheet.columns.forEach((column, index) => {
+      column.width = index === 0 ? 15 : 24;
     });
 
     // Generate buffer
