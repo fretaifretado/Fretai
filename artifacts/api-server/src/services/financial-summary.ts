@@ -4,7 +4,7 @@ import { and, eq, ne } from "drizzle-orm";
 
 const MESES_CURTO = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 
-interface Period {
+export interface Period {
   year: number;
   month: number;
 }
@@ -153,11 +153,11 @@ function periodParam(period: Period): string {
   return `${period.year}-${String(period.month).padStart(2, "0")}`;
 }
 
-function periodKey(period: Period): number {
+export function periodKey(period: Period): number {
   return period.year * 12 + period.month;
 }
 
-function periodFromLabel(label: string): Period | null {
+export function periodFromLabel(label: string): Period | null {
   const match = label.match(/^([A-Za-zÀ-ÿ]{3})\/(\d{4})$/);
   if (!match) return null;
   const month = MESES_CURTO.findIndex(m => m.toLowerCase() === match[1]!.toLowerCase()) + 1;
@@ -241,53 +241,52 @@ export async function getFinancialSummary(companyId: number, period: Period): Pr
     }
   }
 
-  let carry = 0;
-  // Only apply credits from 2+ months ago (deferred by 2 months)
-  const eligibleKeys = Array.from(totalsByKey.keys()).filter(k => k <= targetKey - 2).sort((a, b) => a - b);
-  for (const key of eligibleKeys) {
-    const totals = totalsByKey.get(key)!;
-    const applied = Math.min(carry, totals.purchases);
-    carry = roundMoney(carry - applied + totals.discounts);
+  const creditMaturityDelayMonths = 2;
+  const creditByMaturityKey = new Map<number, number>();
+  const keys = Array.from(totalsByKey.keys());
+  const firstKey = Math.min(targetKey, ...keys);
+  let availableCredit = 0;
+  let creditoAplicado = 0;
+
+  for (let key = firstKey; key <= targetKey; key++) {
+    availableCredit = roundMoney(availableCredit + (creditByMaturityKey.get(key) ?? 0));
+    const totals = totalsByKey.get(key) ?? { purchases: 0, discounts: 0 };
+    const applied = roundMoney(Math.min(availableCredit, totals.purchases));
+    availableCredit = roundMoney(availableCredit - applied);
+
+    if (key === targetKey) {
+      creditoAplicado = applied;
+    }
+
+    if (totals.discounts > 0) {
+      const maturityKey = key + creditMaturityDelayMonths;
+      creditByMaturityKey.set(
+        maturityKey,
+        roundMoney((creditByMaturityKey.get(maturityKey) ?? 0) + totals.discounts),
+      );
+    }
   }
 
-  const creditoAplicado = roundMoney(Math.min(carry, compraDoMes));
-  const saldoAnteriorRestante = roundMoney(carry - creditoAplicado);
-  const saldoCredito = roundMoney(saldoAnteriorRestante + creditoGerado);
+  const pendingFutureCredit = Array.from(creditByMaturityKey.entries())
+    .filter(([key]) => key > targetKey)
+    .reduce((sum, [, value]) => roundMoney(sum + value), 0);
+  const saldoCredito = roundMoney(availableCredit + pendingFutureCredit);
   const valorNotaFiscal = roundMoney(Math.max(0, compraDoMes - creditoAplicado));
 
-  // Calculate pending credits (credits from last 2 months that haven't been applied yet)
   const creditoPendenteDetalhes: Array<{ mesAplicacao: string; valor: number; mesGeracao: string }> = [];
   let creditoPendente = 0;
 
-  // Credits from targetKey - 1 (last month) apply in targetKey + 1 (next month)
-  const lastMonthKey = targetKey - 1;
-  const lastMonthTotals = totalsByKey.get(lastMonthKey);
-  if (lastMonthTotals?.discounts) {
-    const nextMonthPeriod = periodFromKey(targetKey + 1);
-    const lastMonthPeriod = periodFromKey(lastMonthKey);
-    if (nextMonthPeriod && lastMonthPeriod) {
-      creditoPendente += lastMonthTotals.discounts;
-      creditoPendenteDetalhes.push({
-        mesAplicacao: periodLabel(nextMonthPeriod),
-        valor: roundMoney(lastMonthTotals.discounts),
-        mesGeracao: periodLabel(lastMonthPeriod),
-      });
-    }
-  }
-
-  // Credits from targetKey (current month) apply in targetKey + 2 (month after next)
-  const currentMonthTotals = totalsByKey.get(targetKey);
-  if (currentMonthTotals?.discounts) {
-    const afterNextMonthPeriod = periodFromKey(targetKey + 2);
-    const currentMonthPeriod = periodFromKey(targetKey);
-    if (afterNextMonthPeriod && currentMonthPeriod) {
-      creditoPendente += currentMonthTotals.discounts;
-      creditoPendenteDetalhes.push({
-        mesAplicacao: periodLabel(afterNextMonthPeriod),
-        valor: roundMoney(currentMonthTotals.discounts),
-        mesGeracao: periodLabel(currentMonthPeriod),
-      });
-    }
+  // Créditos gerados em um mês só entram para aplicação duas competências depois.
+  for (const [maturityKey, value] of Array.from(creditByMaturityKey.entries()).sort(([a], [b]) => a - b)) {
+    if (maturityKey <= targetKey || value <= 0) continue;
+    const generationPeriod = periodFromKey(maturityKey - creditMaturityDelayMonths);
+    const applicationPeriod = periodFromKey(maturityKey);
+    creditoPendente = roundMoney(creditoPendente + value);
+    creditoPendenteDetalhes.push({
+      mesAplicacao: periodLabel(applicationPeriod),
+      valor: roundMoney(value),
+      mesGeracao: periodLabel(generationPeriod),
+    });
   }
 
   return {
@@ -306,11 +305,12 @@ export async function getFinancialSummary(companyId: number, period: Period): Pr
   };
 }
 
-function periodFromKey(key: number): Period | null {
-  const year = Math.floor(key / 12);
-  const month = key % 12;
-  if (month === 0) return null; // Invalid month
-  return { year, month };
+export function periodFromKey(key: number): Period {
+  const zeroBased = key - 1;
+  return {
+    year: Math.floor(zeroBased / 12),
+    month: (zeroBased % 12) + 1,
+  };
 }
 
 export async function getFinancialSummaryByBranches(companyIds: number[], period: Period): Promise<Map<number, FinancialSummary>> {
@@ -322,6 +322,25 @@ export async function getFinancialSummaryByBranches(companyIds: number[], period
     })
   );
   return results;
+}
+
+export async function getFinancialHistory(companyId: number): Promise<FinancialSummary[]> {
+  const rows = await db
+    .select({ periodo: purchaseOrdersTable.periodo })
+    .from(purchaseOrdersTable)
+    .where(and(eq(purchaseOrdersTable.companyId, companyId), ne(purchaseOrdersTable.status, "Cancelado")));
+
+  const periods = new Map<number, Period>();
+  for (const row of rows) {
+    const period = periodFromLabel(row.periodo);
+    if (period) periods.set(periodKey(period), period);
+  }
+
+  const orderedPeriods = Array.from(periods.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([, period]) => period);
+
+  return Promise.all(orderedPeriods.map(period => getFinancialSummary(companyId, period)));
 }
 
 export async function createUnusedValeDiscountForEmployee(params: {

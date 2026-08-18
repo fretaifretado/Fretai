@@ -4,6 +4,7 @@ import { auditLogsTable, loginLogsTable, employeeImportLogsTable, purchaseOrders
 import { desc, eq, and, like, ne, inArray } from "drizzle-orm";
 import { requireAdmin } from "../middlewares/auth";
 import ExcelJS from 'exceljs';
+import { getFinancialHistory } from "../services/financial-summary";
 
 const router = Router();
 
@@ -149,9 +150,6 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
       ne(purchaseOrdersTable.status, "Cancelado")
     ));
 
-    // Get audit logs for employee movements
-    const auditLogs = await db.select().from(auditLogsTable).where(eq(auditLogsTable.companyId, companyId));
-
     // Get scheduled movements for employee status changes
     const scheduledMovements = await db.select({
       id: scheduledMovementsTable.id,
@@ -165,12 +163,14 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
       eq(scheduledMovementsTable.companyId, companyId)
     ).orderBy(desc(scheduledMovementsTable.inicio));
 
-    // Get movement targets to get employee info
-    const movementTargets = await db.select({
-      scheduledMovementId: scheduledMovementTargetsTable.scheduledMovementId,
-      colaboradorId: scheduledMovementTargetsTable.colaboradorId,
-      valorAnterior: scheduledMovementTargetsTable.valorAnterior,
-    }).from(scheduledMovementTargetsTable);
+    const movementIds = scheduledMovements.map(m => m.id);
+    const movementTargets = movementIds.length > 0
+      ? await db.select({
+          scheduledMovementId: scheduledMovementTargetsTable.scheduledMovementId,
+          colaboradorId: scheduledMovementTargetsTable.colaboradorId,
+          valorAnterior: scheduledMovementTargetsTable.valorAnterior,
+        }).from(scheduledMovementTargetsTable).where(inArray(scheduledMovementTargetsTable.scheduledMovementId, movementIds))
+      : [];
 
     // Get employee names
     const employeeIds = [...new Set(movementTargets.map(t => t.colaboradorId))];
@@ -183,55 +183,43 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
 
     const employeeMap = new Map(employees.map(e => [e.id, e.name]));
 
-    // Group by period for monthly history
-    const monthlyData = new Map<string, {
-      periodo: string;
-      valesComprados: number;
-      compraDoMes: number;
-      valesNaoUtilizados: number;
-      creditoGerado: number;
-    }>();
+    const sortedMonthlyData = (await getFinancialHistory(companyId)).map(summary => ({
+      periodo: summary.periodLabel,
+      valesComprados: summary.valesComprados,
+      compraDoMes: summary.compraDoMes,
+      valesNaoUtilizados: summary.valesNaoUtilizados,
+      creditoGerado: summary.creditoGerado,
+      creditoAplicado: summary.creditoAplicado,
+      creditoPendente: summary.creditoPendente,
+      saldoCredito: summary.saldoCredito,
+      valorNotaFiscal: summary.valorNotaFiscal,
+    }));
 
-    orders.forEach(order => {
-      const existing = monthlyData.get(order.periodo) || {
-        periodo: order.periodo,
-        valesComprados: 0,
-        compraDoMes: 0,
-        valesNaoUtilizados: 0,
-        creditoGerado: 0,
-      };
-
-      const total = parseFloat(String(order.total));
-      if (order.vales > 0) {
-        existing.valesComprados += order.vales;
-        existing.compraDoMes += total;
-      } else if (order.vales < 0) {
-        existing.valesNaoUtilizados += Math.abs(order.vales);
-        existing.creditoGerado += Math.abs(total);
-      }
-
-      monthlyData.set(order.periodo, existing);
-    });
-
-    // Sort by period
-    const sortedMonthlyData = Array.from(monthlyData.values()).sort((a, b) => {
-      const [aMonth, aYear] = a.periodo.split('/');
-      const [bMonth, bYear] = b.periodo.split('/');
-      const monthOrder = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
-      if (aYear !== bYear) return parseInt(aYear) - parseInt(bYear);
-      return monthOrder.indexOf(aMonth) - monthOrder.indexOf(bMonth);
-    });
+    type MonthlyRow = typeof sortedMonthlyData[number];
+    const emptyMonthlyRow: MonthlyRow = {
+      periodo: 'N/A',
+      valesComprados: 0,
+      compraDoMes: 0,
+      valesNaoUtilizados: 0,
+      creditoGerado: 0,
+      creditoAplicado: 0,
+      creditoPendente: 0,
+      saldoCredito: 0,
+      valorNotaFiscal: 0,
+    };
 
     // Calculate executive summary
-    const totalGasto = sortedMonthlyData.reduce((sum, row) => sum + row.compraDoMes, 0);
+    const totalGasto = sortedMonthlyData.reduce((sum, row) => sum + row.valorNotaFiscal, 0);
+    const totalComprasBrutas = sortedMonthlyData.reduce((sum, row) => sum + row.compraDoMes, 0);
     const totalEconomia = sortedMonthlyData.reduce((sum, row) => sum + row.creditoGerado, 0);
+    const totalCreditoAplicado = sortedMonthlyData.reduce((sum, row) => sum + row.creditoAplicado, 0);
     const totalValesComprados = sortedMonthlyData.reduce((sum, row) => sum + row.valesComprados, 0);
     const mediaMensalGasto = sortedMonthlyData.length > 0 ? totalGasto / sortedMonthlyData.length : 0;
     const mediaMensalEconomia = sortedMonthlyData.length > 0 ? totalEconomia / sortedMonthlyData.length : 0;
 
     // Find periods with highest spending and economy
-    const maiorGasto = sortedMonthlyData.reduce((max, row) => row.compraDoMes > max.compraDoMes ? row : max, sortedMonthlyData[0] || { periodo: 'N/A', compraDoMes: 0 });
-    const maiorEconomia = sortedMonthlyData.reduce((max, row) => row.creditoGerado > max.creditoGerado ? row : max, sortedMonthlyData[0] || { periodo: 'N/A', creditoGerado: 0 });
+    const maiorGasto = sortedMonthlyData.reduce((max, row) => row.valorNotaFiscal > max.valorNotaFiscal ? row : max, sortedMonthlyData[0] || emptyMonthlyRow);
+    const maiorEconomia = sortedMonthlyData.reduce((max, row) => row.creditoGerado > max.creditoGerado ? row : max, sortedMonthlyData[0] || emptyMonthlyRow);
 
     // Calculate period covered
     const firstPeriod = sortedMonthlyData[0]?.periodo || 'N/A';
@@ -272,12 +260,14 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
 
     // Executive summary
     summarySheet.addRow(['RESUMO EXECUTIVO']);
-    summarySheet.addRow(['Total Gasto Histórico', `R$ ${totalGasto.toFixed(2)}`]);
+    summarySheet.addRow(['Total Comprado Histórico', `R$ ${totalComprasBrutas.toFixed(2)}`]);
+    summarySheet.addRow(['Total Gasto Histórico (NF)', `R$ ${totalGasto.toFixed(2)}`]);
     summarySheet.addRow(['Economia Total Gerada', `R$ ${totalEconomia.toFixed(2)}`]);
+    summarySheet.addRow(['Crédito Total Aplicado', `R$ ${totalCreditoAplicado.toFixed(2)}`]);
     summarySheet.addRow(['Total de Vales Comprados', totalValesComprados]);
     summarySheet.addRow(['Média Mensal de Gastos', `R$ ${mediaMensalGasto.toFixed(2)}`]);
     summarySheet.addRow(['Média Mensal de Economia', `R$ ${mediaMensalEconomia.toFixed(2)}`]);
-    summarySheet.addRow(['Maior Período de Gasto', `${maiorGasto.periodo} (R$ ${maiorGasto.compraDoMes.toFixed(2)})`]);
+    summarySheet.addRow(['Maior Período de Gasto', `${maiorGasto.periodo} (R$ ${maiorGasto.valorNotaFiscal.toFixed(2)})`]);
     summarySheet.addRow(['Maior Período de Economia', `${maiorEconomia.periodo} (R$ ${maiorEconomia.creditoGerado.toFixed(2)})`]);
     summarySheet.addRow([]);
 
@@ -292,7 +282,7 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
     const monthlySheet = workbook.addWorksheet('Histórico Mensal');
     monthlySheet.addRow(['Histórico de Compras por Mês']);
     monthlySheet.addRow([]);
-    monthlySheet.addRow(['Período', 'Vales Comprados', 'Compra do Mês (R$)', 'Vales Não Utilizados', 'Crédito Gerado (R$)', 'Economia %']);
+    monthlySheet.addRow(['Período', 'Vales Comprados', 'Compra do Mês (R$)', 'Vales Não Utilizados', 'Crédito Gerado (R$)', 'Crédito Aplicado (R$)', 'Crédito Pendente (R$)', 'Valor Nota Fiscal (R$)', 'Economia %']);
 
     sortedMonthlyData.forEach(row => {
       const economiaPercent = row.compraDoMes > 0 ? ((row.creditoGerado / row.compraDoMes) * 100).toFixed(1) : '0.0';
@@ -302,6 +292,9 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
         row.compraDoMes.toFixed(2),
         row.valesNaoUtilizados,
         row.creditoGerado.toFixed(2),
+        row.creditoAplicado.toFixed(2),
+        row.creditoPendente.toFixed(2),
+        row.valorNotaFiscal.toFixed(2),
         `${economiaPercent}%`
       ]);
     });
@@ -314,21 +307,16 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
     const creditSheet = workbook.addWorksheet('Evolução de Créditos');
     creditSheet.addRow(['Evolução de Créditos Aplicados']);
     creditSheet.addRow([]);
-    creditSheet.addRow(['Período', 'Crédito Gerado (R$)', 'Crédito Acumulado (R$)', 'Saldo Restante (R$)']);
+    creditSheet.addRow(['Período', 'Crédito Gerado (R$)', 'Crédito Aplicado (R$)', 'Crédito Pendente (R$)', 'Saldo Crédito (R$)', 'Valor Nota Fiscal (R$)']);
 
-    let cumulativeCredit = 0;
-    let appliedCredit = 0;
     sortedMonthlyData.forEach(row => {
-      cumulativeCredit += row.creditoGerado;
-      // Simulate credit application with 2-month delay
-      appliedCredit += row.creditoGerado * 0.5; // Simplified calculation
-      const remaining = cumulativeCredit - appliedCredit;
-      
       creditSheet.addRow([
         row.periodo,
         row.creditoGerado.toFixed(2),
-        cumulativeCredit.toFixed(2),
-        remaining.toFixed(2)
+        row.creditoAplicado.toFixed(2),
+        row.creditoPendente.toFixed(2),
+        row.saldoCredito.toFixed(2),
+        row.valorNotaFiscal.toFixed(2),
       ]);
     });
 
@@ -361,24 +349,14 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
       const targets = movementTargets.filter(t => t.scheduledMovementId === movement.id);
       const colaboradorNames = targets.map(t => employeeMap.get(t.colaboradorId) || 'Desconhecido');
       
-      // Calculate credit value for this movement from purchase orders
+      const targetIds = new Set(targets.map(t => t.colaboradorId));
+
+      // Calculate credit value for this movement from generated discount orders
       const movementOrders = orders.filter(order => {
-        // Use the order's period instead of createdAt for more accurate filtering
-        const orderStartDate = new Date(order.dataInicio);
-        const orderEndDate = new Date(order.dataFim);
-        
-        // For permanent separation (desligado), only look at orders from the start month
-        // For temporary absence, look at orders within the absence period
-        const isPermanentSeparation = movement.valorNovo.toLowerCase().includes('desligado') || 
-                                      movement.valorNovo.toLowerCase().includes('demitido') ||
-                                      movement.valorNovo.toLowerCase().includes('desligamento');
-        const endDate = isPermanentSeparation 
-          ? new Date(inicioDate.getFullYear(), inicioDate.getMonth() + 1, 0) // End of start month
-          : new Date(movement.fim);
-        
-        // Check if order period is within the movement period (stricter overlap)
-        const orderWithinMovement = orderStartDate >= inicioDate && orderEndDate <= endDate;
-        return orderWithinMovement && order.vales < 0;
+        return order.employeeId !== null &&
+          targetIds.has(order.employeeId) &&
+          order.dataInicio === movement.inicio &&
+          order.vales < 0;
       });
       const valorCredito = movementOrders.reduce((sum, order) => sum + Math.abs(parseFloat(String(order.total))), 0);
       
