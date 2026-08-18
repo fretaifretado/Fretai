@@ -369,7 +369,9 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
         
         // For permanent separation (desligado), only look at orders from the start month
         // For temporary absence, look at orders within the absence period
-        const isPermanentSeparation = movement.valorNovo === 'Desligado';
+        const isPermanentSeparation = movement.valorNovo.toLowerCase().includes('desligado') || 
+                                      movement.valorNovo.toLowerCase().includes('demitido') ||
+                                      movement.valorNovo.toLowerCase().includes('desligamento');
         const endDate = isPermanentSeparation 
           ? new Date(inicioDate.getFullYear(), inicioDate.getMonth() + 1, 0) // End of start month
           : new Date(movement.fim);

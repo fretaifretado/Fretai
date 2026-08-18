@@ -382,17 +382,24 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
           .where(eq(scheduledMovementTargetsTable.scheduledMovementId, mv.id));
 
         for (const t of targets) {
-          // For temporary absences, only discount days within the absence period
-          // For permanent separation (Desligado), discount all remaining days
+          // For permanent separation (Desligado), do not generate credits - employee is leaving
+          // For temporary absences (Férias, Licença, Afastado, Home Office), generate credits for the absence period
           const isTemporaryAbsence = TEMPORARY_ABSENCE_STATUSES.includes(mv.valorNovo);
-          await insertUnusedValeDiscount(tx, {
-            companyId,
-            employeeId: t.colaboradorId,
-            effectiveDateIso: mv.inicio,
-            fimPeriodoIso: isTemporaryAbsence ? mv.fim : undefined,
-            fallbackName: isTemporaryAbsence ? "Colaborador ausente" : "Colaborador desligado",
-            discountTurno: "Desconto por status",
-          });
+          const isPermanentSeparation = mv.valorNovo.toLowerCase().includes('desligado') || 
+                                        mv.valorNovo.toLowerCase().includes('demitido') ||
+                                        mv.valorNovo.toLowerCase().includes('desligamento');
+          
+          // Only generate credits for temporary absences, not for permanent separation
+          if (isTemporaryAbsence) {
+            await insertUnusedValeDiscount(tx, {
+              companyId,
+              employeeId: t.colaboradorId,
+              effectiveDateIso: mv.inicio,
+              fimPeriodoIso: mv.fim,
+              fallbackName: "Colaborador ausente",
+              discountTurno: "Desconto por status",
+            });
+          }
 
           // Update employee's status if the movement is active (even if processing is delayed)
           // This ensures the status is correct even if the system processes a day late
@@ -407,12 +414,14 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
     // Verifica agendamentos de status inativo que já estão ativos mas não tiveram
     // os créditos gerados, e gera os créditos retroativamente
     const INACTIVE_STATUSES = ["Desligado", "Férias", "Licença", "Afastado", "Home Office"];
+    const TEMPORARY_ABSENCE_STATUSES = ["Férias", "Licença", "Afastado", "Home Office"];
     const activeStatusMovements = await tx
       .select({
         id: scheduledMovementsTable.id,
         tipo: scheduledMovementsTable.tipo,
         valorNovo: scheduledMovementsTable.valorNovo,
         inicio: scheduledMovementsTable.inicio,
+        fim: scheduledMovementsTable.fim,
       })
       .from(scheduledMovementsTable)
       .where(and(
@@ -452,13 +461,22 @@ async function advanceStatesForCompany(companyId: number): Promise<void> {
           continue;
         }
 
-        await insertUnusedValeDiscount(tx, {
-          companyId,
-          employeeId: t.colaboradorId,
-          effectiveDateIso: mv.inicio,
-          fallbackName: "Colaborador desligado",
-          discountTurno: "Desconto por status",
-        });
+        // Only generate credits for temporary absences, not for permanent separation
+        const isTemporaryAbsence = TEMPORARY_ABSENCE_STATUSES.includes(mv.valorNovo);
+        const isPermanentSeparation = mv.valorNovo.toLowerCase().includes('desligado') || 
+                                      mv.valorNovo.toLowerCase().includes('demitido') ||
+                                      mv.valorNovo.toLowerCase().includes('desligamento');
+        
+        if (isTemporaryAbsence) {
+          await insertUnusedValeDiscount(tx, {
+            companyId,
+            employeeId: t.colaboradorId,
+            effectiveDateIso: mv.inicio,
+            fimPeriodoIso: mv.fim,
+            fallbackName: "Colaborador ausente",
+            discountTurno: "Desconto por status",
+          });
+        }
 
         // Only update employee's status on the actual activation date
         if (mv.inicio === today) {
