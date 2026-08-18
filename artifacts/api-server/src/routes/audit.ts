@@ -363,14 +363,20 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
       
       // Calculate credit value for this movement from purchase orders
       const movementOrders = orders.filter(order => {
-        const orderDate = new Date(order.createdAt);
+        // Use the order's period instead of createdAt for more accurate filtering
+        const orderStartDate = new Date(order.dataInicio);
+        const orderEndDate = new Date(order.dataFim);
+        
         // For permanent separation (desligado), only look at orders from the start month
         // For temporary absence, look at orders within the absence period
         const isPermanentSeparation = movement.valorNovo === 'Desligado';
         const endDate = isPermanentSeparation 
           ? new Date(inicioDate.getFullYear(), inicioDate.getMonth() + 1, 0) // End of start month
           : new Date(movement.fim);
-        return orderDate >= inicioDate && orderDate <= endDate && order.vales < 0;
+        
+        // Check if order period overlaps with movement period
+        const overlaps = orderStartDate <= endDate && orderEndDate >= inicioDate;
+        return overlaps && order.vales < 0;
       });
       const valorCredito = movementOrders.reduce((sum, order) => sum + Math.abs(parseFloat(String(order.total))), 0);
       
