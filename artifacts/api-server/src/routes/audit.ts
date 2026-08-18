@@ -374,9 +374,9 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
           ? new Date(inicioDate.getFullYear(), inicioDate.getMonth() + 1, 0) // End of start month
           : new Date(movement.fim);
         
-        // Check if order period overlaps with movement period
-        const overlaps = orderStartDate <= endDate && orderEndDate >= inicioDate;
-        return overlaps && order.vales < 0;
+        // Check if order period is within the movement period (stricter overlap)
+        const orderWithinMovement = orderStartDate >= inicioDate && orderEndDate <= endDate;
+        return orderWithinMovement && order.vales < 0;
       });
       const valorCredito = movementOrders.reduce((sum, order) => sum + Math.abs(parseFloat(String(order.total))), 0);
       
