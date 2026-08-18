@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
-import { auditLogsTable, loginLogsTable, employeeImportLogsTable, purchaseOrdersTable, companiesTable } from "@workspace/db/schema";
+import { auditLogsTable, loginLogsTable, employeeImportLogsTable, purchaseOrdersTable, companiesTable, scheduledMovementsTable, scheduledMovementTargetsTable, employeesTable } from "@workspace/db/schema";
 import { desc, eq, and, like, ne } from "drizzle-orm";
 import { requireAdmin } from "../middlewares/auth";
 import ExcelJS from 'exceljs';
@@ -151,6 +151,37 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
 
     // Get audit logs for employee movements
     const auditLogs = await db.select().from(auditLogsTable).where(eq(auditLogsTable.companyId, companyId));
+
+    // Get scheduled movements for employee status changes
+    const scheduledMovements = await db.select({
+      id: scheduledMovementsTable.id,
+      tipo: scheduledMovementsTable.tipo,
+      valorNovo: scheduledMovementsTable.valorNovo,
+      inicio: scheduledMovementsTable.inicio,
+      fim: scheduledMovementsTable.fim,
+      estado: scheduledMovementsTable.estado,
+      createdAt: scheduledMovementsTable.createdAt,
+    }).from(scheduledMovementsTable).where(
+      eq(scheduledMovementsTable.companyId, companyId)
+    ).orderBy(desc(scheduledMovementsTable.inicio));
+
+    // Get movement targets to get employee info
+    const movementTargets = await db.select({
+      scheduledMovementId: scheduledMovementTargetsTable.scheduledMovementId,
+      colaboradorId: scheduledMovementTargetsTable.colaboradorId,
+      valorAnterior: scheduledMovementTargetsTable.valorAnterior,
+    }).from(scheduledMovementTargetsTable);
+
+    // Get employee names
+    const employeeIds = [...new Set(movementTargets.map(t => t.colaboradorId))];
+    const employees = await db.select({
+      id: employeesTable.id,
+      name: employeesTable.name,
+    }).from(employeesTable).where(
+      employeeIds.length > 0 ? eq(employeesTable.id, employeeIds[0]) : undefined
+    );
+
+    const employeeMap = new Map(employees.map(e => [e.id, e.name]));
 
     // Group by period for monthly history
     const monthlyData = new Map<string, {
@@ -309,18 +340,78 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
     const movementsSheet = workbook.addWorksheet('Movimentações');
     movementsSheet.addRow(['Movimentações de Colaboradores']);
     movementsSheet.addRow([]);
-    movementsSheet.addRow(['Data', 'Usuário', 'Ação', 'Tipo de Entidade', 'ID Entidade', 'Valor Anterior', 'Valor Novo']);
+    movementsSheet.addRow(['Mês', 'Tipo', 'Data Início', 'Data Fim', 'Status', 'Colaboradores Afetados', 'Estado', 'Valor Crédito (R$)']);
 
-    auditLogs.forEach(log => {
-      movementsSheet.addRow([
-        new Date(log.createdAt).toLocaleString('pt-BR'),
-        log.userEmail || 'Sistema',
-        log.action,
-        log.entityType,
-        log.entityId || 'N/A',
-        JSON.stringify(log.oldValue) || 'N/A',
-        JSON.stringify(log.newValue) || 'N/A'
-      ]);
+    // Group movements by month
+    const movementsByMonth = new Map<string, Array<{
+      tipo: string;
+      inicio: string;
+      fim: string;
+      valorNovo: string;
+      estado: string;
+      colaboradores: string[];
+      valorCredito: number;
+    }>>();
+
+    scheduledMovements.forEach(movement => {
+      if (movement.tipo !== 'status') return; // Only show status movements
+      
+      const inicioDate = new Date(movement.inicio);
+      const month = inicioDate.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+      const targets = movementTargets.filter(t => t.scheduledMovementId === movement.id);
+      const colaboradorNames = targets.map(t => employeeMap.get(t.colaboradorId) || 'Desconhecido');
+      
+      // Calculate credit value for this movement from purchase orders
+      const movementOrders = orders.filter(order => {
+        const orderDate = new Date(order.createdAt);
+        return orderDate >= inicioDate && orderDate <= new Date(movement.fim) && order.vales < 0;
+      });
+      const valorCredito = movementOrders.reduce((sum, order) => sum + Math.abs(parseFloat(String(order.total))), 0);
+      
+      const existing = movementsByMonth.get(month) || [];
+      existing.push({
+        tipo: movement.tipo,
+        inicio: movement.inicio,
+        fim: movement.fim,
+        valorNovo: movement.valorNovo,
+        estado: movement.estado,
+        colaboradores: colaboradorNames,
+        valorCredito,
+      });
+      movementsByMonth.set(month, existing);
+    });
+
+    // Sort months by date
+    const sortedMonths = Array.from(movementsByMonth.entries()).sort((a, b) => {
+      const [monthNameA, yearA] = a[0].split(' de ');
+      const [monthNameB, yearB] = b[0].split(' de ');
+      const dateA = new Date(parseInt(yearA), getMonthNumber(monthNameA), 1);
+      const dateB = new Date(parseInt(yearB), getMonthNumber(monthNameB), 1);
+      return dateA.getTime() - dateB.getTime();
+    }).map(([month]) => month);
+
+    function getMonthNumber(monthName: string): number {
+      const months: Record<string, number> = {
+        'janeiro': 0, 'fevereiro': 1, 'março': 2, 'abril': 3, 'maio': 4, 'junho': 5,
+        'julho': 6, 'agosto': 7, 'setembro': 8, 'outubro': 9, 'novembro': 10, 'dezembro': 11
+      };
+      return months[monthName.toLowerCase()] || 0;
+    }
+
+    sortedMonths.forEach(month => {
+      const movements = movementsByMonth.get(month) || [];
+      movements.forEach(mov => {
+        movementsSheet.addRow([
+          month.charAt(0).toUpperCase() + month.slice(1),
+          mov.valorNovo,
+          new Date(mov.inicio).toLocaleDateString('pt-BR'),
+          new Date(mov.fim).toLocaleDateString('pt-BR'),
+          mov.estado,
+          mov.colaboradores.length > 0 ? mov.colaboradores.slice(0, 3).join(', ') + (mov.colaboradores.length > 3 ? ` (+${mov.colaboradores.length - 3})` : '') : 'N/A',
+          mov.estado === 'ativo' ? 'Em andamento' : mov.estado === 'concluido' ? 'Concluído' : 'Pendente',
+          mov.valorCredito.toFixed(2)
+        ]);
+      });
     });
 
     // Style movements sheet
