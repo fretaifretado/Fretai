@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Download, Building2, Calendar, FileText, Loader2 } from "lucide-react";
+import { Download, Building2, Calendar, FileText, Loader2, Presentation } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
@@ -17,7 +17,7 @@ export default function FinancialReportsSection({ token }: FinancialReportsSecti
   const [selectedCompany, setSelectedCompany] = useState<string>("all");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [downloading, setDownloading] = useState(false);
+  const [downloading, setDownloading] = useState<"technical" | "client" | null>(null);
 
   const API_URL = import.meta.env.VITE_API_URL ?? "";
 
@@ -47,17 +47,18 @@ export default function FinancialReportsSection({ token }: FinancialReportsSecti
     }
   };
 
-  const handleDownload = async () => {
+  const handleDownload = async (format: "technical" | "client") => {
     if (selectedCompany === "all") {
       setError("Selecione uma empresa para gerar o relatório");
       return;
     }
 
-    setDownloading(true);
+    setDownloading(format);
     setError("");
 
     try {
-      const res = await fetch(`${API_URL}/api/admin/financial-report/${selectedCompany}`, {
+      const query = format === "client" ? "?format=client" : "";
+      const res = await fetch(`${API_URL}/api/admin/financial-report/${selectedCompany}${query}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
 
@@ -70,7 +71,9 @@ export default function FinancialReportsSection({ token }: FinancialReportsSecti
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `relatorio-financeiro.xlsx`;
+      a.download = format === "client"
+        ? "relatorio-financeiro-apresentacao.xlsx"
+        : "relatorio-financeiro-tecnico.xlsx";
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
@@ -78,7 +81,7 @@ export default function FinancialReportsSection({ token }: FinancialReportsSecti
     } catch {
       setError("Erro ao baixar relatório");
     } finally {
-      setDownloading(false);
+      setDownloading(null);
     }
   };
 
@@ -119,7 +122,7 @@ export default function FinancialReportsSection({ token }: FinancialReportsSecti
               Tipo de Relatório
             </label>
             <div className="flex items-center h-10 px-3 border rounded-lg bg-muted/30 text-sm text-muted-foreground">
-              Histórico Financeiro Completo
+              Técnico e apresentação
             </div>
           </div>
 
@@ -134,13 +137,31 @@ export default function FinancialReportsSection({ token }: FinancialReportsSecti
           </div>
         </div>
 
-        <div className="mt-6 flex items-center gap-3">
+        <div className="mt-6 flex flex-wrap items-center gap-3">
           <Button
-            onClick={handleDownload}
-            disabled={downloading || selectedCompany === "all" || loading}
+            onClick={() => handleDownload("client")}
+            disabled={downloading !== null || selectedCompany === "all" || loading}
             className="bg-accent hover:bg-accent/90 text-white"
           >
-            {downloading ? (
+            {downloading === "client" ? (
+              <>
+                <Loader2 size={16} className="mr-2 animate-spin" />
+                Gerando...
+              </>
+            ) : (
+              <>
+                <Presentation size={16} className="mr-2" />
+                Baixar para apresentação
+              </>
+            )}
+          </Button>
+
+          <Button
+            onClick={() => handleDownload("technical")}
+            disabled={downloading !== null || selectedCompany === "all" || loading}
+            variant="outline"
+          >
+            {downloading === "technical" ? (
               <>
                 <Loader2 size={16} className="mr-2 animate-spin" />
                 Gerando...
@@ -148,7 +169,7 @@ export default function FinancialReportsSection({ token }: FinancialReportsSecti
             ) : (
               <>
                 <Download size={16} className="mr-2" />
-                Baixar Relatório XLSX
+                Baixar relatório técnico
               </>
             )}
           </Button>
@@ -163,10 +184,9 @@ export default function FinancialReportsSection({ token }: FinancialReportsSecti
         <div className="mt-6 p-4 bg-muted/50 rounded-lg border">
           <h3 className="font-medium text-foreground mb-2">Informações do Relatório</h3>
           <ul className="text-sm text-muted-foreground space-y-1">
-            <li>• Histórico de compras por mês</li>
-            <li>• Vales comprados e não utilizados</li>
-            <li>• Créditos gerados por período</li>
-            <li>• Evolução acumulada de créditos aplicados</li>
+            <li>• Apresentação: linguagem comercial, explicações e conferência simplificada</li>
+            <li>• Técnico: movimentações, estados internos e conciliação para auditoria</li>
+            <li>• Os dois formatos utilizam exatamente os mesmos valores financeiros</li>
           </ul>
         </div>
       </div>
