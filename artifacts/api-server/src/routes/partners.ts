@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs";
 import { db } from "@workspace/db";
 import { partnersTable, vehiclesTable, driversTable, usersTable } from "@workspace/db/schema";
 import { eq, desc } from "drizzle-orm";
-import { requireAdmin, requireAuth, getAuth } from "../middlewares/auth";
+import { canAccessPartner, requireAdmin, requireAuth, getAuth } from "../middlewares/auth";
 import { logAudit } from "../services/audit";
 
 const router = Router();
@@ -150,6 +150,7 @@ router.get("/partners/:id/vehicles", requireAuth("platform_admin", "parceiro_mas
   const id = parseInt(req.params.id as string, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   try {
+    if (!canAccessPartner(getAuth(req), id)) { res.status(403).json({ error: "Acesso negado" }); return; }
     const vehicles = await db.select().from(vehiclesTable).where(eq(vehiclesTable.partnerId, id)).orderBy(vehiclesTable.plate);
     res.json(vehicles.map(v => ({ ...v, createdAt: v.createdAt.toISOString(), updatedAt: v.updatedAt.toISOString() })));
   } catch (err) {
@@ -167,6 +168,7 @@ router.post("/partners/:id/vehicles", requireAuth("platform_admin", "parceiro_ma
     res.status(400).json({ error: "Tipo, capacidade e placa são obrigatórios" }); return;
   }
   try {
+    if (!canAccessPartner(getAuth(req), partnerId)) { res.status(403).json({ error: "Acesso negado" }); return; }
     const [vehicle] = await db.insert(vehiclesTable).values({
       partnerId,
       type: type as "van" | "micro_onibus" | "onibus",
@@ -189,6 +191,7 @@ router.get("/partners/:id/drivers", requireAuth("platform_admin", "parceiro_mast
   const id = parseInt(req.params.id as string, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   try {
+    if (!canAccessPartner(getAuth(req), id)) { res.status(403).json({ error: "Acesso negado" }); return; }
     const drivers = await db.select().from(driversTable).where(eq(driversTable.partnerId, id)).orderBy(driversTable.name);
     res.json(drivers.map(d => ({ ...d, createdAt: d.createdAt.toISOString(), updatedAt: d.updatedAt.toISOString() })));
   } catch (err) {
@@ -212,6 +215,7 @@ router.post("/partners/:id/drivers", requireAuth("platform_admin", "parceiro_mas
   const passwordHash = await bcrypt.hash(initialPassword, 12);
 
   try {
+    if (!canAccessPartner(getAuth(req), partnerId)) { res.status(403).json({ error: "Acesso negado" }); return; }
     const [userRow] = await db.insert(usersTable).values({
       email: email.trim().toLowerCase(),
       passwordHash,

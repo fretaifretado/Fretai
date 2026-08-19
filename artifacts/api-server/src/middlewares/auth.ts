@@ -1,10 +1,13 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { db } from "@workspace/db";
-import { usersTable } from "@workspace/db/schema";
+import { companiesTable, employeesTable, usersTable } from "@workspace/db/schema";
 import { eq } from "drizzle-orm";
 
-const SECRET = process.env.SESSION_SECRET ?? "fallback-secret-change-me";
+const SECRET = process.env.SESSION_SECRET
+  ?? (process.env.NODE_ENV === "production"
+    ? (() => { throw new Error("SESSION_SECRET é obrigatório em produção"); })()
+    : "fallback-secret-change-me");
 
 export interface AuthPayload {
   sub: number | string;
@@ -62,4 +65,29 @@ export function requireAuth(...roles: string[]) {
 
 export function getAuth(req: Request): AuthPayload {
   return (req as Request & { auth: AuthPayload }).auth;
+}
+
+export async function canAccessCompany(auth: AuthPayload, companyId: number): Promise<boolean> {
+  if (auth.role === "platform_admin") return true;
+  if (auth.entityType !== "company" || !Number.isInteger(auth.entityId)) return false;
+  if (auth.entityId === companyId) return true;
+
+  const [company] = await db.select({ parentCompanyId: companiesTable.parentCompanyId })
+    .from(companiesTable)
+    .where(eq(companiesTable.id, companyId))
+    .limit(1);
+  return company?.parentCompanyId === auth.entityId;
+}
+
+export async function canAccessEmployee(auth: AuthPayload, employeeId: number): Promise<boolean> {
+  const [employee] = await db.select({ companyId: employeesTable.companyId })
+    .from(employeesTable)
+    .where(eq(employeesTable.id, employeeId))
+    .limit(1);
+  return Boolean(employee && await canAccessCompany(auth, employee.companyId));
+}
+
+export function canAccessPartner(auth: AuthPayload, partnerId: number): boolean {
+  return auth.role === "platform_admin"
+    || (auth.role === "parceiro_master" && auth.entityType === "partner" && auth.entityId === partnerId);
 }

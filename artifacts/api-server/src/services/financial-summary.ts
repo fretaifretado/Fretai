@@ -1,6 +1,7 @@
 import { db } from "@workspace/db";
-import { companyShiftsTable, employeesTable, purchaseOrdersTable } from "@workspace/db/schema";
+import { companiesTable, companyHolidaysTable, companyShiftsTable, employeesTable, purchaseOrdersTable } from "@workspace/db/schema";
 import { and, eq, ne } from "drizzle-orm";
+import { buildHolidaySet } from "./holiday-calendar";
 
 const MESES_CURTO = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 
@@ -183,7 +184,7 @@ function isWorkingDay(wd: number, tipoEscala: string, escala?: string | null): b
   return true;
 }
 
-function countWorkDays(from: Date, to: Date, tipoEscala: string, anchor?: Date | null, escala?: string | null): number {
+function countWorkDays(from: Date, to: Date, tipoEscala: string, anchor?: Date | null, escala?: string | null, holidays = new Set<string>()): number {
   if (from > to) return 0;
   let count = 0;
   const cur = startOfDay(from);
@@ -192,15 +193,17 @@ function countWorkDays(from: Date, to: Date, tipoEscala: string, anchor?: Date |
     const period = tipoEscala === "12x36" ? 2 : 3;
     const anchorTime = startOfDay(anchor).getTime();
     while (cur <= end) {
+      const dateIso = toIsoDate(cur);
       const diff = Math.round((cur.getTime() - anchorTime) / 86400000);
-      if (diff >= 0 && diff % period === 0) count++;
+      if (!holidays.has(dateIso) && diff >= 0 && diff % period === 0) count++;
       cur.setDate(cur.getDate() + 1);
     }
     return count;
   }
   while (cur <= end) {
+    const dateIso = toIsoDate(cur);
     const wd = cur.getDay();
-    if (isWorkingDay(wd, tipoEscala, escala)) count++;
+    if (!holidays.has(dateIso) && isWorkingDay(wd, tipoEscala, escala)) count++;
     cur.setDate(cur.getDate() + 1);
   }
   return count;
@@ -377,18 +380,26 @@ export async function createUnusedValeDiscountForEmployee(params: {
     ));
     if (existingDiscount.length > 0 && currentPeriodOrders.some(o => o.vales < 0)) return { created: false, vales: 0, total: 0 };
 
-    const [orders, shifts] = await Promise.all([
+    const [company] = await tx.select({ parentCompanyId: companiesTable.parentCompanyId })
+      .from(companiesTable).where(eq(companiesTable.id, params.companyId)).limit(1);
+    const calendarCompanyId = company?.parentCompanyId ?? params.companyId;
+    const [orders, shifts, customHolidays] = await Promise.all([
       tx.select().from(purchaseOrdersTable).where(and(
         eq(purchaseOrdersTable.companyId, params.companyId),
         eq(purchaseOrdersTable.employeeId, params.employeeId),
         ne(purchaseOrdersTable.status, "Cancelado"),
       )),
-      tx.select().from(companyShiftsTable).where(eq(companyShiftsTable.companyId, params.companyId)),
+      tx.select().from(companyShiftsTable).where(eq(companyShiftsTable.companyId, calendarCompanyId)),
+      tx.select({ date: companyHolidaysTable.date }).from(companyHolidaysTable).where(eq(companyHolidaysTable.companyId, calendarCompanyId)),
     ]);
 
     let discountVales = 0;
     let discountTotal = 0;
     const anchor = parseDate(employee.operationStart ?? employee.admissionDate);
+    const holidays = buildHolidaySet(
+      [effectiveDate.getFullYear() - 1, effectiveDate.getFullYear(), effectiveDate.getFullYear() + 1],
+      customHolidays.map(holiday => holiday.date),
+    );
 
     for (const order of orders.filter(o => o.vales > 0)) {
       const inicio = parseDate(order.dataInicio);
@@ -400,7 +411,7 @@ export async function createUnusedValeDiscountForEmployee(params: {
       const tipoEscala = inferTipoEscala(order.turno, turno);
       let remainingDays = 0;
       if (fim && inicio) {
-        remainingDays = countWorkDays(from, fim, tipoEscala, anchor, turno?.escala);
+        remainingDays = countWorkDays(from, fim, tipoEscala, anchor, turno?.escala, holidays);
       }
 
       const unusedVales = Math.min(order.vales, Math.max(0, remainingDays * 2));
@@ -414,7 +425,7 @@ export async function createUnusedValeDiscountForEmployee(params: {
 
     const valorUnit = roundMoney(discountTotal / discountVales);
     const total = roundMoney(discountTotal);
-    await tx.insert(purchaseOrdersTable).values({
+    const [inserted] = await tx.insert(purchaseOrdersTable).values({
       companyId: params.companyId,
       employeeId: params.employeeId,
       nome: employee.name,
@@ -428,8 +439,9 @@ export async function createUnusedValeDiscountForEmployee(params: {
       total: String(-total),
       status: "Aprovado",
       proRata: false,
-    });
+      sourceKey: `status:${params.companyId}:${params.employeeId}:${today}`,
+    }).onConflictDoNothing().returning({ id: purchaseOrdersTable.id });
 
-    return { created: true, vales: discountVales, total };
+    return { created: Boolean(inserted), vales: inserted ? discountVales : 0, total: inserted ? total : 0 };
   });
 }

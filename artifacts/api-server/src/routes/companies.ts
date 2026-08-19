@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs";
 import { db } from "@workspace/db";
 import { companiesTable, usersTable, employeesTable, employeeMovementsTable, companyShiftsTable, companyHolidaysTable, passwordResetTokensTable, employeeImportLogsTable } from "@workspace/db/schema";
 import { eq, desc, or, inArray, isNull, and } from "drizzle-orm";
-import { requireAdmin, requireAuth, getAuth } from "../middlewares/auth";
+import { canAccessCompany, canAccessEmployee, requireAdmin, requireAuth, getAuth } from "../middlewares/auth";
 import { logAudit } from "../services/audit";
 import { createUnusedValeDiscountForEmployee } from "../services/financial-summary";
 
@@ -247,6 +247,7 @@ router.get("/companies/:id/employees", requireAuth("platform_admin", "cliente_ma
   const id = parseInt(req.params.id as string, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   try {
+    if (!await canAccessCompany(getAuth(req), id)) { res.status(403).json({ error: "Acesso negado" }); return; }
     const filiais = await db.select({ id: companiesTable.id }).from(companiesTable).where(eq(companiesTable.parentCompanyId, id));
     const filialIds = filiais.map(f => f.id);
     const allIds = [id, ...filialIds];
@@ -289,6 +290,7 @@ router.post("/companies/:id/employees/batch", requireAuth("platform_admin", "cli
   const skipped: string[] = [];
 
   try {
+    if (!await canAccessCompany(auth, companyId)) { res.status(403).json({ error: "Acesso negado" }); return; }
     // Processa em batches de 100 para não estourar a query
     const BATCH = 100;
     for (let i = 0; i < body.employees.length; i += BATCH) {
@@ -330,21 +332,22 @@ router.post("/companies/:id/employees/batch", requireAuth("platform_admin", "cli
         const rows = await db.insert(employeesTable)
           .values(values)
           .onConflictDoNothing() // ignora CPF duplicado
-          .returning({ id: employeesTable.id });
-        
-        // Log successful inserts - since onConflictDoNothing doesn't return which ones were actually inserted,
-        // we'll log all as attempted. In production, you might want better tracking.
+          .returning({ id: employeesTable.id, cpf: employeesTable.cpf });
+
+        const insertedByCpf = new Map(rows.map(row => [row.cpf, row.id]));
         for (const v of values) {
+          const employeeId = insertedByCpf.get(v.cpf);
           await db.insert(employeeImportLogsTable).values({
             companyId,
             userId: auth.sub as number,
             userEmail: auth.email,
-            employeeId: null,
+            employeeId: employeeId ?? null,
             name: v.name,
             cpf: v.cpf,
-            status: "inserted",
-            reason: null,
+            status: employeeId ? "inserted" : "skipped",
+            reason: employeeId ? null : "CPF já cadastrado nesta empresa",
           });
+          if (!employeeId) skipped.push(v.name);
         }
         
         inserted.push(...rows.map(r => r.id));
@@ -408,6 +411,7 @@ router.post("/companies/:id/employees", requireAuth("platform_admin", "cliente_m
   const cleanedCpf = cleanCpf(cpf);
   if (cleanedCpf.length !== 11) { res.status(400).json({ error: "CPF inválido" }); return; }
   try {
+    if (!await canAccessCompany(getAuth(req), companyId)) { res.status(403).json({ error: "Acesso negado" }); return; }
     const [employee] = await db.insert(employeesTable).values({
       companyId,
       name: name.trim(),
@@ -449,7 +453,8 @@ router.post("/companies/:id/employees", requireAuth("platform_admin", "cliente_m
 /* ── Funcionários: editar ── */
 router.put("/companies/:companyId/employees/:id", requireAuth("platform_admin", "cliente_master", "cliente_subadmin"), async (req, res) => {
   const id = parseInt(req.params.id as string, 10);
-  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  const companyId = parseInt(req.params.companyId as string, 10);
+  if (isNaN(id) || isNaN(companyId)) { res.status(400).json({ error: "ID inválido" }); return; }
   const body = req.body as Record<string, string | undefined>;
   const updates: Record<string, unknown> = { updatedAt: new Date() };
   if (body.name) updates.name = body.name.trim();
@@ -475,10 +480,11 @@ router.put("/companies/:companyId/employees/:id", requireAuth("platform_admin", 
   if (body.codigo !== undefined) updates.codigo = body.codigo?.trim() ?? null;
   if (body.grupoId !== undefined) updates.grupoId = body.grupoId ? parseInt(body.grupoId, 10) : null;
   try {
-    const [employee] = await db.update(employeesTable).set(updates).where(eq(employeesTable.id, id)).returning();
+    if (!await canAccessCompany(getAuth(req), companyId)) { res.status(403).json({ error: "Acesso negado" }); return; }
+    const [employee] = await db.update(employeesTable).set(updates)
+      .where(and(eq(employeesTable.id, id), eq(employeesTable.companyId, companyId))).returning();
     if (!employee) { res.status(404).json({ error: "Funcionário não encontrado" }); return; }
     const authUpd = getAuth(req);
-    const companyIdUpd = parseInt(req.params.companyId as string, 10);
     const action = body.status !== undefined && Object.keys(updates).filter(k => k !== "updatedAt").length === 1
       ? "update_employee_status"
       : body.address !== undefined || body.phone !== undefined || body.cep !== undefined
@@ -487,7 +493,7 @@ router.put("/companies/:companyId/employees/:id", requireAuth("platform_admin", 
     await logAudit({
       userId: authUpd.sub as number,
       userEmail: authUpd.email,
-      companyId: isNaN(companyIdUpd) ? undefined : companyIdUpd,
+      companyId,
       action,
       entityType: "employee",
       entityId: id,
@@ -518,10 +524,15 @@ router.put("/companies/:companyId/employees/:id", requireAuth("platform_admin", 
 router.delete("/companies/:companyId/employees/:id", requireAuth("platform_admin", "cliente_master", "cliente_subadmin"), async (req, res) => {
   const id = parseInt(req.params.id as string, 10);
   const companyIdDel = parseInt(req.params.companyId as string, 10);
-  if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
+  if (isNaN(id) || isNaN(companyIdDel)) { res.status(400).json({ error: "ID inválido" }); return; }
   try {
+    if (!await canAccessCompany(getAuth(req), companyIdDel)) { res.status(403).json({ error: "Acesso negado" }); return; }
+    const [ownedEmployee] = await db.select({ id: employeesTable.id }).from(employeesTable)
+      .where(and(eq(employeesTable.id, id), eq(employeesTable.companyId, companyIdDel))).limit(1);
+    if (!ownedEmployee) { res.status(404).json({ error: "Funcionário não encontrado" }); return; }
     await db.delete(employeeMovementsTable).where(eq(employeeMovementsTable.employeeId, id));
-    const [deleted] = await db.delete(employeesTable).where(eq(employeesTable.id, id)).returning();
+    const [deleted] = await db.delete(employeesTable)
+      .where(and(eq(employeesTable.id, id), eq(employeesTable.companyId, companyIdDel))).returning();
     if (!deleted) { res.status(404).json({ error: "Funcionário não encontrado" }); return; }
     const authDel = getAuth(req);
     await logAudit({
@@ -605,6 +616,7 @@ router.get("/employees/:id/movements", requireAuth("platform_admin", "cliente_ma
   const id = parseInt(req.params.id as string, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   try {
+    if (!await canAccessEmployee(getAuth(req), id)) { res.status(403).json({ error: "Acesso negado" }); return; }
     const movements = await db.select().from(employeeMovementsTable)
       .where(eq(employeeMovementsTable.employeeId, id))
       .orderBy(desc(employeeMovementsTable.createdAt));
@@ -623,6 +635,7 @@ router.post("/employees/:id/movements", requireAuth("platform_admin", "cliente_m
   if (!type || !startDate) { res.status(400).json({ error: "Tipo e data de início são obrigatórios" }); return; }
   const auth = getAuth(req);
   try {
+    if (!await canAccessEmployee(auth, employeeId)) { res.status(403).json({ error: "Acesso negado" }); return; }
     const [movement] = await db.insert(employeeMovementsTable).values({
       employeeId,
       type: type as "ferias" | "afastamento" | "licenca" | "demissao" | "troca_rota",
@@ -645,6 +658,7 @@ router.get("/companies/:id/shifts", requireAuth("platform_admin", "cliente_maste
   const id = parseInt(req.params.id as string, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   try {
+    if (!await canAccessCompany(getAuth(req), id)) { res.status(403).json({ error: "Acesso negado" }); return; }
     const shifts = await db.select().from(companyShiftsTable)
       .where(eq(companyShiftsTable.companyId, id))
       .orderBy(companyShiftsTable.createdAt);
@@ -716,7 +730,7 @@ router.put("/me/shifts/:id", requireAuth("cliente_master", "cliente_subadmin"), 
   try {
     const [shift] = await db.update(companyShiftsTable)
       .set(updates)
-      .where(eq(companyShiftsTable.id, id))
+      .where(and(eq(companyShiftsTable.id, id), eq(companyShiftsTable.companyId, entityId)))
       .returning();
     if (!shift) { res.status(404).json({ error: "Turno não encontrado" }); return; }
     await logAudit({ userId: auth.sub as number, userEmail: auth.email, companyId: entityId, action: "update_shift", entityType: "shift", entityId: id, newValue: { nome, entrada, saida, tipoEscala } });
@@ -736,7 +750,7 @@ router.delete("/me/shifts/:id", requireAuth("cliente_master", "cliente_subadmin"
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   try {
     const [deleted] = await db.delete(companyShiftsTable)
-      .where(eq(companyShiftsTable.id, id))
+      .where(and(eq(companyShiftsTable.id, id), eq(companyShiftsTable.companyId, entityId)))
       .returning();
     if (!deleted) { res.status(404).json({ error: "Turno não encontrado" }); return; }
     await logAudit({ userId: auth.sub as number, userEmail: auth.email, companyId: entityId, action: "delete_shift", entityType: "shift", entityId: id, newValue: { nome: deleted.nome } });
@@ -1054,7 +1068,7 @@ router.delete("/me/holidays/:id", requireAuth("cliente_master", "cliente_subadmi
   try {
     await db
       .delete(companyHolidaysTable)
-      .where(eq(companyHolidaysTable.id, id));
+      .where(and(eq(companyHolidaysTable.id, id), eq(companyHolidaysTable.companyId, companyId)));
     res.json({ deleted: true });
   } catch (err) {
     req.log.error({ err }, "Error deleting holiday");

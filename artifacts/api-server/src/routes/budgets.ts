@@ -6,7 +6,7 @@ import {
   vehicleTypesTable, partnersTable,
 } from "@workspace/db/schema";
 import { sql, eq, desc, inArray } from "drizzle-orm";
-import { requireAdmin } from "../middlewares/auth";
+import { canAccessCompany, getAuth, requireAdmin, requireAuth } from "../middlewares/auth";
 
 const router = Router();
 
@@ -1280,11 +1280,12 @@ router.post("/admin/budgets/:id/publish", requireAdmin, async (req, res) => {
 });
 
 /* ─── List published scheduled routes for a company ─────────────────────── */
-router.get("/companies/:companyId/scheduled-routes", async (req, res) => {
+router.get("/companies/:companyId/scheduled-routes", requireAuth("platform_admin", "cliente_master", "cliente_subadmin"), async (req, res) => {
   const companyId = parseInt(String(req.params.companyId), 10);
   if (isNaN(companyId)) { res.status(400).json({ error: "ID inválido" }); return; }
 
   try {
+    if (!await canAccessCompany(getAuth(req), companyId)) { res.status(403).json({ error: "Acesso negado" }); return; }
     // Use raw SQL to avoid referencing columns not in Drizzle schema (startDate)
     const budgetsRaw = await db.execute(
       sql`SELECT id, name, status,

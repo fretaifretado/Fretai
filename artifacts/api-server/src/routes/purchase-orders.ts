@@ -4,6 +4,7 @@ import { purchaseOrdersTable, companiesTable } from "@workspace/db/schema";
 import { eq, desc } from "drizzle-orm";
 import { requireAuth, getAuth } from "../middlewares/auth";
 import { getFinancialSummary, parsePeriodParam, getFinancialSummaryByBranches } from "../services/financial-summary";
+import { processAutomaticPurchasesForCompany } from "../services/purchase-automation";
 
 const router = Router();
 
@@ -204,123 +205,23 @@ router.post(
       return;
     }
 
-    const body = req.body as {
-      companyId: number;
-      items: {
-        employeeId: number | null;
-        nome: string;
-        turno: string;
-        periodo: string;
-        dataInicio: string;
-        dataFim: string;
-        dias: number;
-        vales: number;
-        valorUnit: number;
-        total: number;
-        proRata: boolean;
-      }[];
-    };
+    const body = req.body as { companyId?: number };
 
-    if (!body.companyId || !Array.isArray(body.items) || body.items.length === 0) {
-      res.status(400).json({ error: "companyId e items são obrigatórios" });
+    if (!Number.isInteger(body.companyId) || (body.companyId ?? 0) <= 0) {
+      res.status(400).json({ error: "companyId é obrigatório" });
       return;
-    }
-
-    if (body.items.length > 5000) {
-      res.status(400).json({ error: "Número máximo de itens por lote é 5000" });
-      return;
-    }
-
-    for (const item of body.items) {
-      if (!item.nome || typeof item.nome !== "string" || item.nome.trim() === "") {
-        res.status(400).json({ error: "Cada item deve ter um nome válido" });
-        return;
-      }
-      if (!Number.isFinite(item.dias) || item.dias < 0 || item.dias > 366) {
-        res.status(400).json({ error: "Valor de dias inválido" });
-        return;
-      }
-      if (!Number.isFinite(item.vales) || item.vales < 0 || item.vales > 1000) {
-        res.status(400).json({ error: "Valor de vales inválido" });
-        return;
-      }
-      if (!Number.isFinite(item.valorUnit) || item.valorUnit < 0 || item.valorUnit > 100000) {
-        res.status(400).json({ error: "Valor unitário inválido" });
-        return;
-      }
-      if (!Number.isFinite(item.total) || item.total < 0) {
-        res.status(400).json({ error: "Total inválido" });
-        return;
-      }
     }
 
     try {
       const allowed = await getAllowedCompanyIds(entityId);
-      if (!allowed.has(body.companyId)) {
+      if (!allowed.has(body.companyId!)) {
         res.status(403).json({ error: "Acesso negado a esta empresa" });
         return;
       }
-
-      const existing = await db
-        .select({
-          id: purchaseOrdersTable.id,
-          employeeId: purchaseOrdersTable.employeeId,
-          periodo: purchaseOrdersTable.periodo,
-          dataInicio: purchaseOrdersTable.dataInicio,
-          dataFim: purchaseOrdersTable.dataFim,
-          dias: purchaseOrdersTable.dias,
-          vales: purchaseOrdersTable.vales,
-          valorUnit: purchaseOrdersTable.valorUnit,
-          total: purchaseOrdersTable.total,
-          status: purchaseOrdersTable.status,
-        })
-        .from(purchaseOrdersTable)
-        .where(eq(purchaseOrdersTable.companyId, body.companyId));
-
-      const existingByKey = new Map(
-        existing
-          .filter(o => o.employeeId !== null && o.vales > 0 && o.status !== "Cancelado")
-          .map(o => [`${o.employeeId}:${o.periodo}`, o]),
-      );
-
-      // Purchase orders devem ser fixas - não atualizar existentes
-      // Apenas criar novas se não existirem
-      const itemsToInsert = body.items.filter(item =>
-        item.employeeId === null || !existingByKey.has(`${item.employeeId}:${item.periodo}`),
-      );
-
-      if (itemsToInsert.length === 0) {
-        req.log.info(
-          { userId: auth.sub, companyId: body.companyId, count: 0, skipped: body.items.length },
-          "Purchase orders already existed",
-        );
-        res.status(201).json([]);
-        return;
-      }
-
-      const inserted = await db
-        .insert(purchaseOrdersTable)
-        .values(
-          itemsToInsert.map(item => ({
-            companyId: body.companyId,
-            employeeId: item.employeeId ?? null,
-            nome: item.nome,
-            turno: item.turno,
-            periodo: item.periodo,
-            dataInicio: item.dataInicio,
-            dataFim: item.dataFim,
-            dias: item.dias,
-            vales: item.vales,
-            valorUnit: String(item.valorUnit),
-            total: String(item.total),
-            status: "Aprovado" as const,
-            proRata: item.proRata,
-          })),
-        )
-        .returning();
+      const inserted = await processAutomaticPurchasesForCompany(body.companyId!);
 
       req.log.info(
-        { userId: auth.sub, companyId: body.companyId, inserted: inserted.length, skipped: body.items.length - itemsToInsert.length },
+        { userId: auth.sub, companyId: body.companyId, inserted: inserted.length },
         "Purchase orders saved",
       );
 

@@ -161,9 +161,11 @@ export default function Login() {
     try {
       const res = await fetch(apiUrl("/api/auth/change-password"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${pendingToken}`,
+        },
         body: JSON.stringify({
-          userId: pendingUserId,
           currentPassword: form.getValues("password").trim(),
           newPassword: values.newPassword.trim(),
         }),

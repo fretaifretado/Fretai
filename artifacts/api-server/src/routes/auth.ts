@@ -4,13 +4,19 @@ import crypto from "crypto";
 import { db } from "@workspace/db";
 import { usersTable, passwordResetTokensTable } from "@workspace/db/schema";
 import { eq, and, gt } from "drizzle-orm";
-import { signAdminToken, signToken } from "../middlewares/auth";
+import { getAuth, requireAuth, signAdminToken, signToken } from "../middlewares/auth";
 import { logLogin, logAudit } from "../services/audit";
 
 const router = Router();
 
-const ADMIN_USERNAME = process.env.ADMIN_USERNAME ?? "admin";
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "Fretai@2027";
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME
+  ?? (process.env.NODE_ENV === "production"
+    ? (() => { throw new Error("ADMIN_USERNAME é obrigatório em produção"); })()
+    : "admin");
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD
+  ?? (process.env.NODE_ENV === "production"
+    ? (() => { throw new Error("ADMIN_PASSWORD é obrigatório em produção"); })()
+    : "Fretai@2027");
 const MAX_FAILED = 5;
 const LOCK_MINUTES = 15;
 
@@ -85,11 +91,13 @@ router.post("/auth/login", async (req, res) => {
 });
 
 /* ── Troca de senha ── */
-router.post("/auth/change-password", async (req, res) => {
-  const { userId, currentPassword, newPassword } = req.body as {
-    userId?: number; currentPassword?: string; newPassword?: string;
+router.post("/auth/change-password", requireAuth(), async (req, res) => {
+  const { currentPassword, newPassword } = req.body as {
+    currentPassword?: string; newPassword?: string;
   };
-  if (!userId || !currentPassword || !newPassword) {
+  const auth = getAuth(req);
+  const userId = typeof auth.sub === "number" ? auth.sub : Number(auth.sub);
+  if (!Number.isInteger(userId) || userId <= 0 || !currentPassword || !newPassword) {
     res.status(400).json({ error: "Campos obrigatórios ausentes" }); return;
   }
   if (newPassword.trim().length < 6) {

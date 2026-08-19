@@ -1,4 +1,5 @@
-import { pgTable, text, serial, timestamp, integer, bigint, numeric, boolean, pgEnum } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, bigint, numeric, boolean, pgEnum, uniqueIndex } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { companiesTable } from "./companies";
@@ -24,8 +25,16 @@ export const purchaseOrdersTable = pgTable("purchase_orders", {
   total: numeric("total", { precision: 10, scale: 2 }).notNull(),
   status: purchaseOrderStatusEnum("status").notNull().default("Processando"),
   proRata: boolean("pro_rata").notNull().default(false),
+  sourceKey: text("source_key"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, table => ({
+  sourceKeyUnique: uniqueIndex("purchase_orders_source_key_uidx")
+    .on(table.sourceKey)
+    .where(sql`${table.sourceKey} IS NOT NULL`),
+  employeePeriodPositiveUnique: uniqueIndex("purchase_orders_employee_period_positive_uidx")
+    .on(table.companyId, table.employeeId, table.periodo)
+    .where(sql`${table.employeeId} IS NOT NULL AND ${table.vales} > 0 AND ${table.status} <> 'Cancelado'`),
+}));
 
 export const insertPurchaseOrderSchema = createInsertSchema(purchaseOrdersTable).omit({
   id: true,

@@ -1,5 +1,4 @@
 import { createContext, useContext, useState, useEffect, useRef, type ReactNode } from "react";
-import { usePurchaseOrderAutomation } from "./purchaseAutomation";
  
 export type Status = "Ativo" | "Home Office" | "Férias" | "Licença" | "Afastado" | "Desligado" | "Admissão";
 
@@ -995,15 +994,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const colaboradoresDaFilial = filialAtiva
     ? colaboradores.filter(c => c.filialId === filialAtiva.id)
     : colaboradores;
-
-  usePurchaseOrderAutomation({
-    colaboradores,
-    empresas,
-    empresaAtiva,
-    filiais,
-    turnos,
-    enabled: !!jwtToken && localStorage.getItem("jwt_role") !== "platform_admin",
-  });
 
   return (
     <DashboardContext.Provider value={{

@@ -6,11 +6,14 @@ import {
   purchaseOrdersTable,
   employeesTable,
   companyShiftsTable,
+  companyHolidaysTable,
+  companiesTable,
 } from "@workspace/db/schema";
 import { and, eq, lt, lte, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import { requireAuth, getAuth } from "../middlewares/auth";
 import { logAudit } from "../services/audit";
 import { periodLabelFromDate } from "../services/financial-summary";
+import { buildHolidaySet } from "../services/holiday-calendar";
  
 const router = Router();
  
@@ -44,6 +47,7 @@ async function lockCompanySchedules(tx: DbTransaction, companyId: number): Promi
 async function assertValidTargets(
   tx: DbTransaction,
   companyId: number,
+  tipo: Tipo,
   alvos: AlvoBody[],
 ): Promise<AlvoBody[]> {
   const ids = alvos.map(alvo => alvo.colaboradorId);
@@ -54,17 +58,34 @@ async function assertValidTargets(
     throw new ScheduleRequestError(400, "DUPLICATE_TARGETS", "A seleção contém o mesmo colaborador mais de uma vez.");
   }
 
+  const branches = await tx.select({ id: companiesTable.id })
+    .from(companiesTable)
+    .where(eq(companiesTable.parentCompanyId, companyId));
+  const allowedCompanyIds = [companyId, ...branches.map(branch => branch.id)];
   const employees = await tx
-    .select({ id: employeesTable.id })
+    .select({
+      id: employeesTable.id,
+      companyId: employeesTable.companyId,
+      route: employeesTable.route,
+      status: employeesTable.status,
+    })
     .from(employeesTable)
     .where(and(
-      eq(employeesTable.companyId, companyId),
+      inArray(employeesTable.companyId, allowedCompanyIds),
       inArray(employeesTable.id, ids),
     ));
   if (employees.length !== ids.length) {
     throw new ScheduleRequestError(400, "INVALID_TARGETS", "Um ou mais colaboradores não pertencem à empresa.");
   }
-  return alvos;
+  const byId = new Map(employees.map(employee => [employee.id, employee]));
+  return alvos.map(alvo => {
+    const employee = byId.get(alvo.colaboradorId)!;
+    return {
+      colaboradorId: employee.id,
+      valorAnterior: tipo === "turno" ? employee.route ?? "" : tipo === "status" ? employee.status ?? "" : "",
+      filialIdAnterior: employee.companyId,
+    };
+  });
 }
 
 async function assertNoScheduleConflicts(
@@ -139,6 +160,21 @@ async function assertNoScheduleConflicts(
     `${overlappingIds.length} colaborador${overlappingIds.length === 1 ? " possui" : "es possuem"} outro agendamento de ${params.tipo} no período selecionado.`,
     overlappingIds,
   );
+}
+
+async function assertValidDestinationCompany(
+  tx: DbTransaction,
+  rootCompanyId: number,
+  destinationCompanyId: number | null,
+): Promise<void> {
+  if (destinationCompanyId === null) return;
+  const [destination] = await tx.select({ id: companiesTable.id, parentCompanyId: companiesTable.parentCompanyId })
+    .from(companiesTable)
+    .where(eq(companiesTable.id, destinationCompanyId))
+    .limit(1);
+  if (!destination || (destination.id !== rootCompanyId && destination.parentCompanyId !== rootCompanyId)) {
+    throw new ScheduleRequestError(400, "INVALID_DESTINATION", "A filial de destino não pertence à empresa.");
+  }
 }
 
 function sendScheduleError(res: Response, err: unknown): boolean {
@@ -250,7 +286,7 @@ function isWorkingDay(wd: number, tipoEscala: string, escala?: string | null): b
   return true;
 }
 
-function countWorkDays(from: Date, to: Date, tipoEscala: string, anchor?: Date | null, escala?: string | null): number {
+function countWorkDays(from: Date, to: Date, tipoEscala: string, anchor?: Date | null, escala?: string | null, holidays = new Set<string>()): number {
   if (from > to) return 0;
   let count = 0;
   const cur = startOfDay(from);
@@ -259,15 +295,17 @@ function countWorkDays(from: Date, to: Date, tipoEscala: string, anchor?: Date |
     const period = tipoEscala === "12x36" ? 2 : 3;
     const anchorTime = startOfDay(anchor).getTime();
     while (cur <= end) {
+      const dateIso = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, "0")}-${String(cur.getDate()).padStart(2, "0")}`;
       const diff = Math.round((cur.getTime() - anchorTime) / 86400000);
-      if (diff >= 0 && diff % period === 0) count++;
+      if (!holidays.has(dateIso) && diff >= 0 && diff % period === 0) count++;
       cur.setDate(cur.getDate() + 1);
     }
     return count;
   }
   while (cur <= end) {
+    const dateIso = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, "0")}-${String(cur.getDate()).padStart(2, "0")}`;
     const wd = cur.getDay();
-    if (isWorkingDay(wd, tipoEscala, escala)) count++;
+    if (!holidays.has(dateIso) && isWorkingDay(wd, tipoEscala, escala)) count++;
     cur.setDate(cur.getDate() + 1);
   }
   return count;
@@ -282,6 +320,7 @@ async function insertUnusedValeDiscount(
     fallbackName: string;
     discountTurno: string;
     fimPeriodoIso?: string; // Optional end date for temporary absences
+    sourceKey: string;
   },
 ): Promise<{ vales: number; total: number }> {
   const effectiveDate = parseDate(params.effectiveDateIso);
@@ -302,7 +341,10 @@ async function insertUnusedValeDiscount(
     .limit(1);
   if (existingDiscount.length > 0) return { vales: 0, total: 0 };
 
-  const [employeeRow, activeOrders, shifts] = await Promise.all([
+  const [company] = await tx.select({ parentCompanyId: companiesTable.parentCompanyId })
+    .from(companiesTable).where(eq(companiesTable.id, params.companyId)).limit(1);
+  const calendarCompanyId = company?.parentCompanyId ?? params.companyId;
+  const [employeeRow, activeOrders, shifts, customHolidays] = await Promise.all([
     tx
       .select({
         name: employeesTable.name,
@@ -320,12 +362,17 @@ async function insertUnusedValeDiscount(
         eq(purchaseOrdersTable.employeeId, params.employeeId),
         ne(purchaseOrdersTable.status, "Cancelado"),
       )),
-    tx.select().from(companyShiftsTable).where(eq(companyShiftsTable.companyId, params.companyId)),
+    tx.select().from(companyShiftsTable).where(eq(companyShiftsTable.companyId, calendarCompanyId)),
+    tx.select({ date: companyHolidaysTable.date }).from(companyHolidaysTable).where(eq(companyHolidaysTable.companyId, calendarCompanyId)),
   ]);
 
   let discountVales = 0;
   let discountTotal = 0;
   const anchor = parseDate(employeeRow[0]?.operationStart ?? employeeRow[0]?.admissionDate);
+  const holidays = buildHolidaySet(
+    [effectiveDate.getFullYear() - 1, effectiveDate.getFullYear(), effectiveDate.getFullYear() + 1],
+    customHolidays.map(holiday => holiday.date),
+  );
 
   for (const order of activeOrders.filter(o => o.vales > 0)) {
     const inicio = parseDate(order.dataInicio);
@@ -340,7 +387,7 @@ async function insertUnusedValeDiscount(
     // If fimPeriodo is provided (temporary absence), only discount days within that period
     // Otherwise (permanent separation), discount all remaining days
     const orderEnd = fimPeriodo ? (fim ? (fimPeriodo < fim ? fimPeriodo : fim) : fimPeriodo) : (fim || effectiveDate);
-    const remainingDays = inicio ? countWorkDays(from, orderEnd, tipoEscala, anchor, turno?.escala) : 0;
+    const remainingDays = inicio ? countWorkDays(from, orderEnd, tipoEscala, anchor, turno?.escala, holidays) : 0;
     const unusedVales = Math.min(order.vales, Math.max(0, remainingDays * 2));
     if (unusedVales <= 0) continue;
 
@@ -367,274 +414,154 @@ async function insertUnusedValeDiscount(
     total: String(-total),
     status: "Aprovado",
     proRata: false,
-  });
+    sourceKey: params.sourceKey,
+  }).onConflictDoNothing();
 
   return { vales: discountVales, total };
 }
  
-/**
- * Idempotently advances scheduled-movement states for a company AND records
- * the apply/revert effect on each target inside the same transaction.
- *
- *  - pendente whose window has fully passed (today > fim) → concluido directly,
- *    and targets get both applied_at and reverted_at set (skipped window:
- *    no net change should be visible to clients).
- *  - pendente whose start has arrived (inicio <= today <= fim) → ativo,
- *    and targets get applied_at set.
- *  - ativo whose end has passed (today > fim) → concluido, and targets
- *    get reverted_at set.
- *
- * Idempotent: reapplying never overwrites an existing applied_at/reverted_at
- * (we use COALESCE / "where applied_at IS NULL" guards), and the state
- * transitions are gated on the prior state.
- */
-async function advanceStatesForCompany(companyId: number): Promise<void> {
+const INACTIVE_STATUSES = new Set(["desligado", "demitido", "desligamento", "férias", "ferias", "licença", "licenca", "afastado", "home office"]);
+const TEMPORARY_STATUSES = new Set(["férias", "ferias", "licença", "licenca", "afastado", "home office"]);
+const PERMANENT_END = "9999-12-31";
+
+async function applyMovement(tx: DbTransaction, movementId: number): Promise<void> {
+  const [movement] = await tx.select().from(scheduledMovementsTable)
+    .where(eq(scheduledMovementsTable.id, movementId)).limit(1);
+  if (!movement) return;
+
+  const targets = await tx.select().from(scheduledMovementTargetsTable)
+    .where(eq(scheduledMovementTargetsTable.scheduledMovementId, movementId));
+
+  for (const target of targets) {
+    if (movement.tipo === "turno") {
+      await tx.update(employeesTable)
+        .set({ route: movement.valorNovo, updatedAt: new Date() })
+        .where(eq(employeesTable.id, target.colaboradorId));
+    } else if (movement.tipo === "status") {
+      const statusKey = movement.valorNovo.trim().toLowerCase();
+      if (INACTIVE_STATUSES.has(statusKey)) {
+        const [employee] = await tx.select({ companyId: employeesTable.companyId })
+          .from(employeesTable).where(eq(employeesTable.id, target.colaboradorId)).limit(1);
+        if (employee) {
+          await insertUnusedValeDiscount(tx, {
+            companyId: employee.companyId,
+            employeeId: target.colaboradorId,
+            effectiveDateIso: movement.inicio,
+            fimPeriodoIso: TEMPORARY_STATUSES.has(statusKey) ? movement.fim : undefined,
+            fallbackName: "Colaborador com status alterado",
+            discountTurno: "Desconto por status",
+            sourceKey: `schedule:${movement.id}:employee:${target.colaboradorId}:discount`,
+          });
+        }
+      }
+      await tx.update(employeesTable)
+        .set({ status: movement.valorNovo, updatedAt: new Date() })
+        .where(eq(employeesTable.id, target.colaboradorId));
+    } else if (movement.tipo === "filial" && movement.filialIdNovo) {
+      const [employee] = await tx.select({ companyId: employeesTable.companyId })
+        .from(employeesTable).where(eq(employeesTable.id, target.colaboradorId)).limit(1);
+      if (employee) {
+        await insertUnusedValeDiscount(tx, {
+          companyId: target.filialIdAnterior ?? employee.companyId,
+          employeeId: target.colaboradorId,
+          effectiveDateIso: movement.inicio,
+          fallbackName: "Colaborador transferido",
+          discountTurno: "Desconto por transferência",
+          sourceKey: `schedule:${movement.id}:employee:${target.colaboradorId}:discount`,
+        });
+      }
+      await tx.update(employeesTable)
+        .set({ companyId: movement.filialIdNovo, updatedAt: new Date() })
+        .where(eq(employeesTable.id, target.colaboradorId));
+    }
+  }
+
+  await tx.update(scheduledMovementTargetsTable)
+    .set({ appliedAt: sql`COALESCE(applied_at, NOW())` })
+    .where(eq(scheduledMovementTargetsTable.scheduledMovementId, movementId));
+}
+
+async function revertMovement(tx: DbTransaction, movementId: number): Promise<void> {
+  const [movement] = await tx.select().from(scheduledMovementsTable)
+    .where(eq(scheduledMovementsTable.id, movementId)).limit(1);
+  if (!movement) return;
+  const targets = await tx.select().from(scheduledMovementTargetsTable)
+    .where(and(
+      eq(scheduledMovementTargetsTable.scheduledMovementId, movementId),
+      isNull(scheduledMovementTargetsTable.revertedAt),
+    ));
+
+  for (const target of targets) {
+    if (movement.tipo === "turno") {
+      await tx.update(employeesTable)
+        .set({ route: target.valorAnterior || null, updatedAt: new Date() })
+        .where(eq(employeesTable.id, target.colaboradorId));
+    } else if (movement.tipo === "status") {
+      await tx.update(employeesTable)
+        .set({ status: target.valorAnterior || "Ativo", updatedAt: new Date() })
+        .where(eq(employeesTable.id, target.colaboradorId));
+    } else if (movement.tipo === "filial" && target.filialIdAnterior) {
+      await tx.update(employeesTable)
+        .set({ companyId: target.filialIdAnterior, updatedAt: new Date() })
+        .where(eq(employeesTable.id, target.colaboradorId));
+    }
+  }
+
+  await tx.update(scheduledMovementTargetsTable)
+    .set({ revertedAt: sql`COALESCE(reverted_at, NOW())` })
+    .where(eq(scheduledMovementTargetsTable.scheduledMovementId, movementId));
+}
+
+export async function advanceStatesForCompany(companyId: number): Promise<void> {
   const today = todayIso();
   await db.transaction(async tx => {
-    // 1) pendente that already passed → concluido (skipped window).
-    //    Capture the affected ids so we can also stamp their targets.
-    const skippedRows = await tx.update(scheduledMovementsTable)
-      .set({ estado: "concluido", updatedAt: new Date() })
-      .where(and(
-        eq(scheduledMovementsTable.companyId, companyId),
-        eq(scheduledMovementsTable.estado, "pendente"),
-        lt(scheduledMovementsTable.fim, today),
-      ))
-      .returning({ id: scheduledMovementsTable.id });
-    if (skippedRows.length > 0) {
-      const ids = skippedRows.map(r => r.id);
-      await tx.update(scheduledMovementTargetsTable)
-        .set({ appliedAt: sql`COALESCE(applied_at, NOW())`, revertedAt: sql`COALESCE(reverted_at, NOW())` })
-        .where(inArray(scheduledMovementTargetsTable.scheduledMovementId, ids));
-    }
- 
-    // 2) pendente whose start has arrived → ativo (apply effect on targets).
-    const activatedRows = await tx.update(scheduledMovementsTable)
-      .set({ estado: "ativo", updatedAt: new Date() })
+    await lockCompanySchedules(tx, companyId);
+    const due = await tx.select({ id: scheduledMovementsTable.id })
+      .from(scheduledMovementsTable)
       .where(and(
         eq(scheduledMovementsTable.companyId, companyId),
         eq(scheduledMovementsTable.estado, "pendente"),
         lte(scheduledMovementsTable.inicio, today),
-        gte(scheduledMovementsTable.fim, today),
-      ))
-      .returning({ id: scheduledMovementsTable.id });
-    if (activatedRows.length > 0) {
-      const ids = activatedRows.map(r => r.id);
-      await tx.update(scheduledMovementTargetsTable)
-        .set({ appliedAt: sql`NOW()` })
-        .where(and(
-          inArray(scheduledMovementTargetsTable.scheduledMovementId, ids),
-          isNull(scheduledMovementTargetsTable.appliedAt),
-        ));
- 
-      // ── Transferência de filial: cancelar vales e zerar créditos ──────────
-      // Quando um agendamento de tipo "filial" é ativado, o colaborador
-      // muda de empresa. Precisamos:
-      // 1) Cancelar todos os pedidos de compra ativos/aprovados dele na empresa antiga
-      // 2) Registrar um pedido de desconto (vales não utilizados)
-      // 3) Atualizar o companyId do colaborador na tabela employees
-      const filialMovements = await tx
-        .select({
-          id: scheduledMovementsTable.id,
-          tipo: scheduledMovementsTable.tipo,
-          filialIdNovo: scheduledMovementsTable.filialIdNovo,
-          inicio: scheduledMovementsTable.inicio,
-        })
-        .from(scheduledMovementsTable)
-        .where(and(
-          inArray(scheduledMovementsTable.id, ids),
-          eq(scheduledMovementsTable.tipo, "filial"),
-        ));
- 
-      for (const mv of filialMovements) {
-        if (!mv.filialIdNovo) continue;
- 
-        // Get all targets (colaboradores) of this movement
-        const targets = await tx
-          .select({
-            colaboradorId: scheduledMovementTargetsTable.colaboradorId,
-            filialIdAnterior: scheduledMovementTargetsTable.filialIdAnterior,
-          })
-          .from(scheduledMovementTargetsTable)
-          .where(eq(scheduledMovementTargetsTable.scheduledMovementId, mv.id));
- 
-        for (const t of targets) {
-          const oldCompanyId = t.filialIdAnterior ?? companyId;
-          await insertUnusedValeDiscount(tx, {
-            companyId: oldCompanyId,
-            employeeId: t.colaboradorId,
-            effectiveDateIso: mv.inicio,
-            fallbackName: "Colaborador transferido",
-            discountTurno: "Desconto por transferência",
-          });
- 
-          // 4) Update employee's companyId to the new filial
-          await tx.update(employeesTable)
-            .set({ companyId: mv.filialIdNovo, updatedAt: new Date() })
-            .where(eq(employeesTable.id, t.colaboradorId));
-        }
-      }
+      ));
 
-      // ── Mudança de status inativo: cancelar vales e gerar crédito ──────────
-      // Quando um agendamento de tipo "status" é ativado para um status inativo
-      // (Desligado, Férias, Licença, Afastado, Home Office), precisamos:
-      // 1) Para Desligado: descontar TODOS os vales restantes (separação permanente)
-      // 2) Para Férias/Licença/Afastado/Home Office: descontar apenas vales do período (ausência temporária)
-      // 3) Atualizar o status do colaborador na tabela employees
-      const INACTIVE_STATUSES = ["Desligado", "Férias", "Licença", "Afastado", "Home Office"];
-      const TEMPORARY_ABSENCE_STATUSES = ["Férias", "Licença", "Afastado", "Home Office"];
-      const statusMovements = await tx
-        .select({
-          id: scheduledMovementsTable.id,
-          tipo: scheduledMovementsTable.tipo,
-          valorNovo: scheduledMovementsTable.valorNovo,
-          inicio: scheduledMovementsTable.inicio,
-          fim: scheduledMovementsTable.fim,
-        })
-        .from(scheduledMovementsTable)
-        .where(and(
-          inArray(scheduledMovementsTable.id, ids),
-          eq(scheduledMovementsTable.tipo, "status"),
-        ));
-
-      for (const mv of statusMovements) {
-        if (!INACTIVE_STATUSES.includes(mv.valorNovo)) continue;
-
-        // Get all targets (colaboradores) of this movement
-        const targets = await tx
-          .select({
-            colaboradorId: scheduledMovementTargetsTable.colaboradorId,
-            valorAnterior: scheduledMovementTargetsTable.valorAnterior,
-          })
-          .from(scheduledMovementTargetsTable)
-          .where(eq(scheduledMovementTargetsTable.scheduledMovementId, mv.id));
-
-        for (const t of targets) {
-          // For permanent separation (Desligado), do not generate credits - employee is leaving
-          // For temporary absences (Férias, Licença, Afastado, Home Office), generate credits for the absence period
-          const isTemporaryAbsence = TEMPORARY_ABSENCE_STATUSES.includes(mv.valorNovo);
-          const isPermanentSeparation = mv.valorNovo.toLowerCase().includes('desligado') || 
-                                        mv.valorNovo.toLowerCase().includes('demitido') ||
-                                        mv.valorNovo.toLowerCase().includes('desligamento');
-          
-          // Only generate credits for temporary absences, not for permanent separation
-          if (isTemporaryAbsence) {
-            await insertUnusedValeDiscount(tx, {
-              companyId,
-              employeeId: t.colaboradorId,
-              effectiveDateIso: mv.inicio,
-              fimPeriodoIso: mv.fim,
-              fallbackName: "Colaborador ausente",
-              discountTurno: "Desconto por status",
-            });
-          }
-
-          // Update employee's status if the movement is active (even if processing is delayed)
-          // This ensures the status is correct even if the system processes a day late
-          await tx.update(employeesTable)
-            .set({ status: mv.valorNovo, updatedAt: new Date() })
-            .where(eq(employeesTable.id, t.colaboradorId));
-        }
-      }
+    for (const movement of due) {
+      await applyMovement(tx, movement.id);
+      await tx.update(scheduledMovementsTable)
+        .set({ estado: "ativo", updatedAt: new Date() })
+        .where(and(eq(scheduledMovementsTable.id, movement.id), eq(scheduledMovementsTable.estado, "pendente")));
     }
 
-    // ── Processar agendamentos ativos sem créditos gerados (retroativo) ──────────
-    // Verifica agendamentos de status inativo que já estão ativos mas não tiveram
-    // os créditos gerados, e gera os créditos retroativamente
-    const INACTIVE_STATUSES = ["Desligado", "Férias", "Licença", "Afastado", "Home Office"];
-    const TEMPORARY_ABSENCE_STATUSES = ["Férias", "Licença", "Afastado", "Home Office"];
-    const activeStatusMovements = await tx
-      .select({
-        id: scheduledMovementsTable.id,
-        tipo: scheduledMovementsTable.tipo,
-        valorNovo: scheduledMovementsTable.valorNovo,
-        inicio: scheduledMovementsTable.inicio,
-        fim: scheduledMovementsTable.fim,
-      })
+    // Reaplica movimentos ativos para reparar dados antigos cujo estado mudou apenas no frontend.
+    const active = await tx.select({ id: scheduledMovementsTable.id })
       .from(scheduledMovementsTable)
       .where(and(
         eq(scheduledMovementsTable.companyId, companyId),
         eq(scheduledMovementsTable.estado, "ativo"),
-        eq(scheduledMovementsTable.tipo, "status"),
       ));
+    for (const movement of active) await applyMovement(tx, movement.id);
 
-    for (const mv of activeStatusMovements) {
-      if (!INACTIVE_STATUSES.includes(mv.valorNovo)) continue;
-
-      // Get all targets (colaboradores) of this movement
-      const targets = await tx
-        .select({
-          colaboradorId: scheduledMovementTargetsTable.colaboradorId,
-          appliedAt: scheduledMovementTargetsTable.appliedAt,
-        })
-        .from(scheduledMovementTargetsTable)
-        .where(eq(scheduledMovementTargetsTable.scheduledMovementId, mv.id));
-
-      for (const t of targets) {
-        // Check if a discount entry already exists for this employee on the movement start date
-        const existingDiscount = await tx
-          .select()
-          .from(purchaseOrdersTable)
-          .where(and(
-            eq(purchaseOrdersTable.companyId, companyId),
-            eq(purchaseOrdersTable.employeeId, t.colaboradorId),
-            eq(purchaseOrdersTable.dataInicio, mv.inicio),
-            eq(purchaseOrdersTable.dataFim, mv.inicio),
-            lt(purchaseOrdersTable.vales, 0), // negative = discount
-          ))
-          .limit(1);
-
-        if (existingDiscount.length > 0) {
-          // Credit already generated, skip
-          continue;
-        }
-
-        // Only generate credits for temporary absences, not for permanent separation
-        const isTemporaryAbsence = TEMPORARY_ABSENCE_STATUSES.includes(mv.valorNovo);
-        const isPermanentSeparation = mv.valorNovo.toLowerCase().includes('desligado') || 
-                                      mv.valorNovo.toLowerCase().includes('demitido') ||
-                                      mv.valorNovo.toLowerCase().includes('desligamento');
-        
-        if (isTemporaryAbsence) {
-          await insertUnusedValeDiscount(tx, {
-            companyId,
-            employeeId: t.colaboradorId,
-            effectiveDateIso: mv.inicio,
-            fimPeriodoIso: mv.fim,
-            fallbackName: "Colaborador ausente",
-            discountTurno: "Desconto por status",
-          });
-        }
-
-        // Only update employee's status on the actual activation date
-        if (mv.inicio === today) {
-          await tx.update(employeesTable)
-            .set({ status: mv.valorNovo, updatedAt: new Date() })
-            .where(eq(employeesTable.id, t.colaboradorId));
-        }
-      }
-    }
- 
-    // 3) ativo whose end has passed → concluido (revert effect on targets).
-    // For status movements without end date (e.g., desligado), transition to concluido the day after start date
-    const completedRows = await tx.update(scheduledMovementsTable)
-      .set({ estado: "concluido", updatedAt: new Date() })
+    const completed = await tx.select({ id: scheduledMovementsTable.id })
+      .from(scheduledMovementsTable)
       .where(and(
         eq(scheduledMovementsTable.companyId, companyId),
         eq(scheduledMovementsTable.estado, "ativo"),
-        sql`(${scheduledMovementsTable.fim} < ${today} OR (${scheduledMovementsTable.fim} = '9999-12-31' AND ${scheduledMovementsTable.inicio} < ${today}))`,
-      ))
-      .returning({ id: scheduledMovementsTable.id });
-    if (completedRows.length > 0) {
-      const ids = completedRows.map(r => r.id);
-      await tx.update(scheduledMovementTargetsTable)
-        .set({ revertedAt: sql`NOW()` })
-        .where(and(
-          inArray(scheduledMovementTargetsTable.scheduledMovementId, ids),
-          isNull(scheduledMovementTargetsTable.revertedAt),
-        ));
+        ne(scheduledMovementsTable.fim, PERMANENT_END),
+        lt(scheduledMovementsTable.fim, today),
+      ));
+    for (const movement of completed) {
+      await revertMovement(tx, movement.id);
+      await tx.update(scheduledMovementsTable)
+        .set({ estado: "concluido", updatedAt: new Date() })
+        .where(and(eq(scheduledMovementsTable.id, movement.id), eq(scheduledMovementsTable.estado, "ativo")));
     }
   });
+}
+
+export async function advanceAllScheduledMovements(): Promise<void> {
+  const companies = await db.selectDistinct({ companyId: scheduledMovementsTable.companyId })
+    .from(scheduledMovementsTable)
+    .where(ne(scheduledMovementsTable.estado, "concluido"));
+  for (const company of companies) await advanceStatesForCompany(company.companyId);
 }
  
 interface AgendamentoApi {
@@ -768,7 +695,8 @@ router.post("/me/scheduled-movements",
       await advanceStatesForCompany(companyId);
       const created = await db.transaction(async tx => {
         await lockCompanySchedules(tx, companyId);
-        const alvos = await assertValidTargets(tx, companyId, body.alvos!);
+        const alvos = await assertValidTargets(tx, companyId, body.tipo as Tipo, body.alvos!);
+        await assertValidDestinationCompany(tx, companyId, filialIdNovo);
         await assertNoScheduleConflicts(tx, {
           companyId,
           tipo: body.tipo as Tipo,
@@ -865,7 +793,7 @@ router.patch("/me/scheduled-movements/:id",
           throw new ScheduleRequestError(409, "SCHEDULE_ALREADY_STARTED", "Só é possível editar agendamentos pendentes.");
         }
 
-        const alvos = await assertValidTargets(tx, companyId, body.alvos!);
+        const alvos = await assertValidTargets(tx, companyId, row.tipo as Tipo, body.alvos!);
         await assertNoScheduleConflicts(tx, {
           companyId,
           tipo: row.tipo as Tipo,
@@ -948,15 +876,11 @@ router.delete("/me/scheduled-movements/:id",
       }
       if (row.estado === "ativo") {
         await db.transaction(async tx => {
+          await lockCompanySchedules(tx, companyId);
+          await revertMovement(tx, id);
           await tx.update(scheduledMovementsTable)
             .set({ estado: "concluido", updatedAt: new Date() })
-            .where(eq(scheduledMovementsTable.id, id));
-          await tx.update(scheduledMovementTargetsTable)
-            .set({ revertedAt: sql`NOW()` })
-            .where(and(
-              eq(scheduledMovementTargetsTable.scheduledMovementId, id),
-              isNull(scheduledMovementTargetsTable.revertedAt),
-            ));
+            .where(and(eq(scheduledMovementsTable.id, id), eq(scheduledMovementsTable.companyId, companyId)));
         });
         await logAudit({
           userId: typeof auth.sub === "number" ? auth.sub : 0,
