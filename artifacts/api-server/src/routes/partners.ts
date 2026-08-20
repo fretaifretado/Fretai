@@ -37,28 +37,33 @@ router.post("/admin/partners", requireAdmin, async (req, res) => {
   const passwordHash = await bcrypt.hash(initialPassword, 12);
 
   try {
-    const [masterUser] = await db.insert(usersTable).values({
-      email: masterEmail.trim().toLowerCase(),
-      passwordHash,
-      role: "parceiro_master",
-      entityType: "partner",
-      forcePasswordChange: true,
-      isActive: true,
-    }).returning();
+    const { masterUser, partner } = await db.transaction(async tx => {
+      const [createdMaster] = await tx.insert(usersTable).values({
+        email: masterEmail.trim().toLowerCase(),
+        passwordHash,
+        role: "parceiro_master",
+        entityType: "partner",
+        forcePasswordChange: true,
+        isActive: true,
+      }).returning();
+      if (!createdMaster) throw new Error("Erro ao criar usuário master do parceiro");
 
-    const [partner] = await db.insert(partnersTable).values({
-      name: name.trim(),
-      cnpj: cleanedCnpj,
-      address: address.trim(),
-      garageAddress: garageAddress?.trim() ?? null,
-      garageLat: garageLat ? parseFloat(garageLat) : null,
-      garageLng: garageLng ? parseFloat(garageLng) : null,
-      phone: phone.trim(),
-      email: email.trim().toLowerCase(),
-      masterUserId: masterUser.id,
-    }).returning();
+      const [createdPartner] = await tx.insert(partnersTable).values({
+        name: name.trim(),
+        cnpj: cleanedCnpj,
+        address: address.trim(),
+        garageAddress: garageAddress?.trim() ?? null,
+        garageLat: garageLat ? parseFloat(garageLat) : null,
+        garageLng: garageLng ? parseFloat(garageLng) : null,
+        phone: phone.trim(),
+        email: email.trim().toLowerCase(),
+        masterUserId: createdMaster.id,
+      }).returning();
+      if (!createdPartner) throw new Error("Erro ao criar parceiro");
 
-    await db.update(usersTable).set({ entityId: partner.id }).where(eq(usersTable.id, masterUser.id));
+      await tx.update(usersTable).set({ entityId: createdPartner.id }).where(eq(usersTable.id, createdMaster.id));
+      return { masterUser: createdMaster, partner: createdPartner };
+    });
 
     const auth = getAuth(req);
     await logAudit({ userId: 0, userEmail: auth.email, action: "create_partner", entityType: "partner", entityId: partner.id });

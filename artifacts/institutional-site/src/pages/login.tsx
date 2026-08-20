@@ -30,13 +30,18 @@ const changeSchema = z.object({
 type ChangeForm = z.infer<typeof changeSchema>;
 
 export default function Login() {
+  const initialResetToken = new URLSearchParams(window.location.search).get("resetToken");
   const [, setLocation] = useLocation();
   const [showPassword, setShowPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
-  const [screen, setScreen] = useState<"login" | "forgot" | "forgot-success" | "change-password">("login");
+  const [screen, setScreen] = useState<"login" | "forgot" | "forgot-success" | "change-password" | "reset-password">(
+    initialResetToken ? "reset-password" : "login",
+  );
+  const [resetToken, setResetToken] = useState(initialResetToken);
   const [forgotLoading, setForgotLoading] = useState(false);
   const [changeLoading, setChangeLoading] = useState(false);
   const [pendingUserId, setPendingUserId] = useState<number | null>(null);
@@ -64,6 +69,7 @@ export default function Login() {
   async function onSubmit(values: LoginForm) {
     setLoading(true);
     setError("");
+    setSuccess("");
     const emailTrimmed = values.email.trim();
     const passwordTrimmed = values.password.trim();
 
@@ -198,6 +204,30 @@ export default function Login() {
     }
   }
 
+  async function onResetPassword(values: ChangeForm) {
+    if (!resetToken) { setError("Link de recuperação inválido."); return; }
+    setChangeLoading(true);
+    setError("");
+    try {
+      const res = await fetch(apiUrl("/api/auth/reset-password"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: resetToken, newPassword: values.newPassword.trim() }),
+      });
+      const data = await res.json() as { message?: string; error?: string };
+      if (!res.ok) { setError(data.error ?? "Não foi possível redefinir a senha."); return; }
+      window.history.replaceState({}, "", window.location.pathname);
+      setResetToken(null);
+      changeForm.reset();
+      setSuccess("Senha redefinida. Entre com sua nova senha.");
+      setScreen("login");
+    } catch {
+      setError("Erro de conexão. Tente novamente.");
+    } finally {
+      setChangeLoading(false);
+    }
+  }
+
   return (
     <div className="min-h-screen bg-primary flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-gradient-to-br from-primary via-primary to-secondary/80 opacity-90" />
@@ -231,6 +261,12 @@ export default function Login() {
             <>
               <h1 className="text-2xl font-bold text-white mb-1">Crie sua senha</h1>
               <p className="text-primary-foreground/60 text-sm">Por segurança, defina uma nova senha para continuar</p>
+            </>
+          )}
+          {screen === "reset-password" && (
+            <>
+              <h1 className="text-2xl font-bold text-white mb-1">Redefinir senha</h1>
+              <p className="text-primary-foreground/60 text-sm">Defina uma nova senha para sua conta</p>
             </>
           )}
         </div>
@@ -282,6 +318,11 @@ export default function Login() {
                     </FormItem>
                   )}
                 />
+                {success && (
+                  <div className="flex items-center gap-2 text-emerald-700 text-sm bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                    <CheckCircle size={15} /><span>{success}</span>
+                  </div>
+                )}
                 {error && (
                   <div className="flex items-center gap-2 text-destructive text-sm bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
                     <AlertCircle size={15} /><span>{error}</span>
@@ -300,12 +341,14 @@ export default function Login() {
           )}
 
           {/* Troca de senha obrigatória */}
-          {screen === "change-password" && (
+          {(screen === "change-password" || screen === "reset-password") && (
             <Form {...changeForm}>
-              <form onSubmit={changeForm.handleSubmit(onChangePassword)} className="space-y-5">
-                <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm text-amber-700 mb-2">
-                  Este é seu primeiro acesso. Defina uma senha pessoal para continuar.
-                </div>
+              <form onSubmit={changeForm.handleSubmit(screen === "reset-password" ? onResetPassword : onChangePassword)} className="space-y-5">
+                {screen === "change-password" && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm text-amber-700 mb-2">
+                    Este é seu primeiro acesso. Defina uma senha pessoal para continuar.
+                  </div>
+                )}
                 <FormField
                   control={changeForm.control}
                   name="newPassword"
@@ -360,8 +403,13 @@ export default function Login() {
                   </div>
                 )}
                 <Button type="submit" className="w-full h-11 bg-accent hover:bg-accent/90 text-white font-semibold" disabled={changeLoading}>
-                  {changeLoading ? "Salvando..." : "Definir senha e entrar"}
+                  {changeLoading ? "Salvando..." : screen === "reset-password" ? "Redefinir senha" : "Definir senha e entrar"}
                 </Button>
+                {screen === "reset-password" && (
+                  <button type="button" onClick={() => setScreen("login")} className="w-full text-sm text-muted-foreground hover:text-foreground transition-colors">
+                    Voltar para o login
+                  </button>
+                )}
               </form>
             </Form>
           )}

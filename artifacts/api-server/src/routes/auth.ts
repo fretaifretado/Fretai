@@ -6,6 +6,7 @@ import { usersTable, passwordResetTokensTable } from "@workspace/db/schema";
 import { eq, and, gt } from "drizzle-orm";
 import { getAuth, requireAuth, signAdminToken, signToken } from "../middlewares/auth";
 import { logLogin, logAudit } from "../services/audit";
+import { sendPasswordResetEmail } from "../services/password-reset-email";
 
 const router = Router();
 
@@ -19,6 +20,12 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD
     : "Fretai@2027");
 const MAX_FAILED = 5;
 const LOCK_MINUTES = 15;
+const RESET_REQUEST_INTERVAL_MS = 60_000;
+const recentResetRequests = new Map<string, number>();
+
+function hashResetToken(token: string): string {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
 
 /* ── Platform admin login (env-based) ── */
 router.post("/auth/admin/login", (req, res) => {
@@ -124,15 +131,37 @@ router.post("/auth/forgot-password", async (req, res) => {
   const email = ((req.body as { email?: string }).email ?? "").trim().toLowerCase();
   if (!email) { res.status(400).json({ error: "E-mail é obrigatório" }); return; }
   res.json({ message: "Se o e-mail estiver cadastrado, você receberá as instruções em breve." });
+  const requestKey = hashResetToken(`${req.ip ?? "unknown"}:${email}`);
+  const lastRequest = recentResetRequests.get(requestKey) ?? 0;
+  if (Date.now() - lastRequest < RESET_REQUEST_INTERVAL_MS) return;
+  recentResetRequests.set(requestKey, Date.now());
+  if (recentResetRequests.size > 10_000) {
+    const cutoff = Date.now() - RESET_REQUEST_INTERVAL_MS;
+    for (const [key, requestedAt] of recentResetRequests) {
+      if (requestedAt < cutoff) recentResetRequests.delete(key);
+    }
+  }
   try {
     const [user] = await db.select().from(usersTable).where(eq(usersTable.email, email));
     if (!user) return;
-    const token = crypto.randomBytes(32).toString("hex");
+    const rawToken = crypto.randomBytes(32).toString("hex");
+    const tokenHash = hashResetToken(rawToken);
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
-    await db.insert(passwordResetTokensTable).values({ userId: user.id, token, expiresAt });
-    console.info(`[Password Reset] Token gerado para ${email}. Token: ${token}`);
+    await db.delete(passwordResetTokensTable).where(and(
+      eq(passwordResetTokensTable.userId, user.id),
+      eq(passwordResetTokensTable.used, false),
+    ));
+    const [reset] = await db.insert(passwordResetTokensTable)
+      .values({ userId: user.id, token: tokenHash, expiresAt })
+      .returning({ id: passwordResetTokensTable.id });
+    try {
+      await sendPasswordResetEmail(user.email, rawToken);
+    } catch (err) {
+      if (reset) await db.delete(passwordResetTokensTable).where(eq(passwordResetTokensTable.id, reset.id));
+      throw err;
+    }
   } catch (err) {
-    console.error("Forgot password error:", err);
+    req.log.error({ err }, "Password reset request failed");
   }
 });
 
@@ -146,17 +175,33 @@ router.post("/auth/reset-password", async (req, res) => {
     res.status(400).json({ error: "A senha deve ter ao menos 6 caracteres" }); return;
   }
   try {
-    const [reset] = await db.select().from(passwordResetTokensTable)
-      .where(and(
-        eq(passwordResetTokensTable.token, token),
-        eq(passwordResetTokensTable.used, false),
-        gt(passwordResetTokensTable.expiresAt, new Date()),
-      ));
-    if (!reset) { res.status(400).json({ error: "Token inválido ou expirado" }); return; }
+    const tokenHash = hashResetToken(token);
     const hash = await bcrypt.hash(newPassword.trim(), 12);
-    await db.update(usersTable).set({ passwordHash: hash, forcePasswordChange: false, updatedAt: new Date() })
-      .where(eq(usersTable.id, reset.userId));
-    await db.update(passwordResetTokensTable).set({ used: true }).where(eq(passwordResetTokensTable.id, reset.id));
+    const changedUser = await db.transaction(async tx => {
+      const [reset] = await tx.update(passwordResetTokensTable)
+        .set({ used: true })
+        .where(and(
+          eq(passwordResetTokensTable.token, tokenHash),
+          eq(passwordResetTokensTable.used, false),
+          gt(passwordResetTokensTable.expiresAt, new Date()),
+        ))
+        .returning({ userId: passwordResetTokensTable.userId });
+      if (!reset) return null;
+      const [user] = await tx.update(usersTable)
+        .set({ passwordHash: hash, forcePasswordChange: false, updatedAt: new Date() })
+        .where(eq(usersTable.id, reset.userId))
+        .returning({ id: usersTable.id, email: usersTable.email });
+      if (!user) throw new Error("Usuário do token de recuperação não encontrado");
+      return user;
+    });
+    if (!changedUser) { res.status(400).json({ error: "Token inválido ou expirado" }); return; }
+    await logAudit({
+      userId: changedUser.id,
+      userEmail: changedUser.email,
+      action: "reset_password",
+      entityType: "user",
+      entityId: changedUser.id,
+    });
     res.json({ message: "Senha redefinida com sucesso" });
   } catch (err) {
     req.log.error({ err }, "Reset password error");

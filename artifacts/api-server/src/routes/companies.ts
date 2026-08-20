@@ -71,32 +71,33 @@ router.post("/admin/companies", requireAdmin, async (req, res) => {
 
     const initialPassword = cleanedCpf.slice(0, 6);
     const passwordHash = await bcrypt.hash(initialPassword, 12);
-    const [masterUser] = await db.insert(usersTable).values({
-      name: masterName.trim(),
-      cpf: cleanedCpf,
-      email: masterEmailLower,
-      passwordHash,
-      role: "cliente_master",
-      entityType: "company",
-      forcePasswordChange: true,
-      isActive: true,
-    }).returning();
+    const { masterUser, company } = await db.transaction(async tx => {
+      const [createdMaster] = await tx.insert(usersTable).values({
+        name: masterName.trim(),
+        cpf: cleanedCpf,
+        email: masterEmailLower,
+        passwordHash,
+        role: "cliente_master",
+        entityType: "company",
+        forcePasswordChange: true,
+        isActive: true,
+      }).returning();
+      if (!createdMaster) throw new Error("Erro ao criar usuário master");
 
-    if (!masterUser) throw new Error("Erro ao criar usuário master");
+      const [createdCompany] = await tx.insert(companiesTable).values({
+        name: name.trim(),
+        cnpj: cleanedCnpj,
+        address: address.trim(),
+        phone: phone.trim(),
+        email: email.trim().toLowerCase(),
+        masterUserId: createdMaster.id,
+        valeValue: valeValue ?? "8.50",
+      }).returning();
+      if (!createdCompany) throw new Error("Erro ao criar empresa");
 
-    const [company] = await db.insert(companiesTable).values({
-      name: name.trim(),
-      cnpj: cleanedCnpj,
-      address: address.trim(),
-      phone: phone.trim(),
-      email: email.trim().toLowerCase(),
-      masterUserId: masterUser.id,
-      valeValue: valeValue ?? "8.50",
-    }).returning();
-
-    if (!company) throw new Error("Erro ao criar empresa");
-
-    await db.update(usersTable).set({ entityId: company.id }).where(eq(usersTable.id, masterUser.id));
+      await tx.update(usersTable).set({ entityId: createdCompany.id }).where(eq(usersTable.id, createdMaster.id));
+      return { masterUser: createdMaster, company: createdCompany };
+    });
 
     const auth = getAuth(req);
     await logAudit({ userId: 0, userEmail: auth.email, action: "create_company", entityType: "company", entityId: company.id, newValue: { name, cnpj: cleanedCnpj } });
