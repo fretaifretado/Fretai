@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, Shuffle, AlertTriangle,
   CalendarClock, Radio, Calendar, CreditCard, FileText, CalendarDays,
   Clock, ChevronDown, LogOut, Settings, Bell, Menu, X, Building2,
-  Pencil, Check, UserCog,
+  Pencil, Check, UserCog, BarChart2,
 } from "lucide-react";
 import { useDashboard } from "./context";
 import { ProfileSettingsModal } from "./ProfileSettingsModal";
@@ -37,6 +37,7 @@ const NAV: NavSection[] = [
     items: [
       { icon: CreditCard, label: "Compras",        path: "/painel/compras" },
       { icon: FileText,   label: "Notas fiscais", path: "/painel/notas-fiscais" },
+      { icon: BarChart2,  label: "Relatórios",     path: "/painel/relatorios" },
     ],
   },
   {

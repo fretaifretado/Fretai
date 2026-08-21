@@ -1,8 +1,8 @@
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { db } from "@workspace/db";
 import { auditLogsTable, loginLogsTable, employeeImportLogsTable, purchaseOrdersTable, companiesTable, scheduledMovementsTable, scheduledMovementTargetsTable, employeesTable } from "@workspace/db/schema";
 import { desc, eq, and, like, ne, inArray } from "drizzle-orm";
-import { requireAdmin } from "../middlewares/auth";
+import { canAccessCompany, getAuth, requireAdmin, requireAuth } from "../middlewares/auth";
 import ExcelJS from 'exceljs';
 import { getFinancialHistory, periodFromLabel, periodKey, periodLabel, type Period } from "../services/financial-summary";
 
@@ -128,9 +128,13 @@ router.get("/admin/employee-import-logs/export", requireAdmin, async (req, res) 
   }
 });
 
-router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) => {
+async function sendFinancialReport(
+  req: Request,
+  res: Response,
+  forceClientReport = false,
+): Promise<void> {
   try {
-    const isClientReport = req.query.format === 'client';
+    const isClientReport = forceClientReport || req.query.format === 'client';
     const companyIdParam = req.params.companyId;
     const companyId = parseInt(Array.isArray(companyIdParam) ? companyIdParam[0] : companyIdParam);
     if (!companyId) {
@@ -231,7 +235,7 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
     const lastPeriod = sortedMonthlyData[sortedMonthlyData.length - 1]?.periodo || 'N/A';
 
     // Get user who generated report
-    const userEmail = (req as any).user?.email || 'admin';
+    const userEmail = getAuth(req).email;
 
     // Create Excel workbook with multiple sheets
     const workbook = new ExcelJS.Workbook();
@@ -723,6 +727,34 @@ router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) 
     req.log.error({ err }, "Error generating financial report");
     res.status(500).json({ error: "Erro interno" });
   }
+}
+
+router.get("/admin/financial-report/:companyId", requireAdmin, async (req, res) => {
+  await sendFinancialReport(req, res);
 });
+
+router.get(
+  "/me/financial-report/:companyId",
+  requireAuth("cliente_master", "cliente_subadmin"),
+  async (req, res) => {
+    const companyId = Number.parseInt(String(req.params.companyId), 10);
+    if (!Number.isSafeInteger(companyId) || companyId <= 0) {
+      res.status(400).json({ error: "Empresa inválida" });
+      return;
+    }
+
+    try {
+      const auth = getAuth(req);
+      if (!await canAccessCompany(auth, companyId)) {
+        res.status(403).json({ error: "Acesso negado a esta empresa" });
+        return;
+      }
+      await sendFinancialReport(req, res, true);
+    } catch (err) {
+      req.log.error({ err }, "Error authorizing company financial report");
+      res.status(500).json({ error: "Erro interno" });
+    }
+  },
+);
 
 export default router;

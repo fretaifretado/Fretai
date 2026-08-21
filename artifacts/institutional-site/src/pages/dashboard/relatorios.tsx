@@ -3,8 +3,9 @@ import DashboardLayout from "./layout";
 import { useDashboard } from "./context";
 import {
   BarChart2, CheckCircle2, XCircle, DollarSign, TrendingDown, FileSpreadsheet,
-  RefreshCw,
+  Download, Loader2, RefreshCw,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "";
 
@@ -82,12 +83,20 @@ function ReportCard({ icon: Icon, label, value, sub, color, bg, loading }: CardP
 }
 
 export default function RelatoriosPage() {
-  const { colaboradores, empresaAtiva, filialAtiva, turnos } = useDashboard();
+  const {
+    colaboradores,
+    empresaAtiva,
+    activeCompanyId,
+    nomeEmpresaAtiva,
+    turnos,
+  } = useDashboard();
 
   const [pedidos, setPedidos] = useState<PedidoApi[]>([]);
   const [loading, setLoading] = useState(true);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
 
-  const companyId = filialAtiva?.id ?? null;
+  const companyId = activeCompanyId;
   const valeDiario = parseFloat(empresaAtiva.valeValue ?? "8.50");
   const nextPeriodo = useMemo(() => calcNextPeriodo(), []);
 
@@ -115,6 +124,41 @@ export default function RelatoriosPage() {
       setLoading(false);
     }
   }, [companyId, fetchPedidos]);
+
+  const handleDownload = useCallback(async () => {
+    if (!companyId || downloading) return;
+    setDownloading(true);
+    setDownloadError("");
+    try {
+      const res = await fetch(`${API_URL}/api/me/financial-report/${companyId}`, {
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null) as { error?: string } | null;
+        throw new Error(payload?.error ?? "Não foi possível gerar o relatório.");
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const companySlug = (nomeEmpresaAtiva || "empresa")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-zA-Z0-9]+/g, "-")
+        .replace(/^-|-$/g, "")
+        .toLowerCase();
+      link.href = url;
+      link.download = `relatorio-financeiro-${companySlug || "empresa"}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : "Não foi possível baixar o relatório.");
+    } finally {
+      setDownloading(false);
+    }
+  }, [companyId, downloading, nomeEmpresaAtiva]);
 
   /* ── Métricas calculadas ── */
 
@@ -231,15 +275,31 @@ export default function RelatoriosPage() {
               Resumo financeiro e de utilização de vale-transporte.
             </p>
           </div>
-          <button
-            onClick={() => companyId && void fetchPedidos(companyId)}
-            className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors mt-1"
-            title="Atualizar dados"
-          >
-            <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
-            Atualizar
-          </button>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <button
+              onClick={() => companyId && void fetchPedidos(companyId)}
+              className="flex items-center gap-1.5 px-2 py-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              title="Atualizar dados"
+            >
+              <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
+              Atualizar
+            </button>
+            <Button
+              onClick={() => void handleDownload()}
+              disabled={!companyId || downloading}
+              className="gap-2 bg-accent text-white hover:bg-accent/90"
+            >
+              {downloading ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+              {downloading ? "Gerando..." : "Baixar relatório"}
+            </Button>
+          </div>
         </div>
+
+        {downloadError && (
+          <div className="mb-5 rounded-md border border-destructive/20 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            {downloadError}
+          </div>
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
           {cards.map(card => (
