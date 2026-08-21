@@ -5,6 +5,7 @@ import {
   Users, TrendingUp, CalendarDays, ChevronLeft, ChevronRight,
   ArrowUpRight, Info, BarChart2, TrendingDown, DollarSign, Calendar,
   Building2, Filter, CheckCircle2, XCircle, FileSpreadsheet, Clock,
+  Download, Loader2,
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -207,6 +208,8 @@ export default function DashboardPage() {
   /* ── relatórios state ── */
   const [periodo, setPeriodo] = useState<Periodo>("mensal");
   const [filtroUnidade, setFiltroUnidade] = useState<"global" | number>("global");
+  const [downloadingReport, setDownloadingReport] = useState(false);
+  const [downloadReportError, setDownloadReportError] = useState("");
 
   const { meses } = PERIODO_CONFIG[periodo];
   const diasPeriodo = meses * 30;
@@ -319,6 +322,43 @@ export default function DashboardPage() {
     ? `${empresaAtiva.nome} — Visão Global`
     : filiaisEmpresa.find(f => f.id === filtroUnidade)?.nome ?? "";
 
+  const handleDownloadReport = useCallback(async () => {
+    const reportCompanyId = filtroUnidade === "global" ? companyId : filtroUnidade;
+    if (!reportCompanyId || downloadingReport) return;
+
+    setDownloadingReport(true);
+    setDownloadReportError("");
+    try {
+      const res = await fetch(`${API_URL}/api/me/financial-report/${reportCompanyId}`, {
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null) as { error?: string } | null;
+        throw new Error(payload?.error ?? "Não foi possível gerar o relatório.");
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const reportName = (nomeUnidade || "empresa")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-zA-Z0-9]+/g, "-")
+        .replace(/^-|-$/g, "")
+        .toLowerCase();
+      link.href = url;
+      link.download = `relatorio-financeiro-${reportName || "empresa"}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setDownloadReportError(err instanceof Error ? err.message : "Não foi possível baixar o relatório.");
+    } finally {
+      setDownloadingReport(false);
+    }
+  }, [companyId, downloadingReport, filtroUnidade, nomeUnidade]);
+
   const descricaoValesNaoUtilizados = financialSummary.valesNaoUtilizados > 0
     ? `${financialSummary.valesNaoUtilizados.toLocaleString("pt-BR")} vale(s) não utilizado(s) no mês`
     : "Nenhum desconto registrado no período";
@@ -409,7 +449,7 @@ export default function DashboardPage() {
             </p>
 
             {/* Filtros */}
-            <div className="flex flex-wrap gap-3 mb-8 p-4 bg-muted/30 rounded-xl border">
+            <div className="flex flex-wrap items-center gap-3 mb-8 p-4 bg-muted/30 rounded-xl border">
               <div className="flex items-center gap-2">
                 <Filter size={14} className="text-muted-foreground" />
                 <span className="text-sm font-medium text-foreground">Filtros:</span>
@@ -443,7 +483,20 @@ export default function DashboardPage() {
                   ))}
                 </div>
               </div>
+              <button
+                type="button"
+                onClick={() => void handleDownloadReport()}
+                disabled={downloadingReport || !companyId}
+                className="ml-auto inline-flex min-h-9 items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {downloadingReport ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+                {downloadingReport ? "Gerando..." : "Baixar relatório"}
+              </button>
             </div>
+
+            {downloadReportError && (
+              <p className="-mt-5 mb-6 text-right text-xs text-destructive">{downloadReportError}</p>
+            )}
 
             {/* Report Cards — 6 Cards conforme especificação */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">

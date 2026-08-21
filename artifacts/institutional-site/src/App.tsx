@@ -35,7 +35,6 @@ import UsuariosPage         from "@/pages/dashboard/usuarios";
 import GruposPage           from "@/pages/dashboard/grupos";
 import FiliaisPage          from "@/pages/dashboard/filiais";
 import DemoGateway          from "@/pages/dashboard/demo";
-import RelatoriosPage       from "@/pages/dashboard/relatorios";
 
 const queryClient = new QueryClient();
 
@@ -65,7 +64,6 @@ function Router() {
         <DashboardProvider>
           <Switch>
             <Route path="/painel"                    component={DashboardPage} />
-            <Route path="/painel/relatorios"         component={RelatoriosPage} />
             <Route path="/painel/colaboradores"      component={ColaboradoresPage} />
             <Route path="/painel/movimentacao"       component={MovimentacaoPage} />
             <Route path="/painel/pendencias"         component={PendenciasPage} />
