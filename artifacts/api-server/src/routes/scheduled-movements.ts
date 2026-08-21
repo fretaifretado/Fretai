@@ -162,6 +162,40 @@ async function assertNoScheduleConflicts(
   );
 }
 
+function normalizeComparableValue(value: string | null | undefined): string {
+  return (value ?? "").trim().toLocaleLowerCase("pt-BR");
+}
+
+function assertTargetsChangeValue(
+  tipo: Tipo,
+  valorNovo: string,
+  filialIdNovo: number | null,
+  alvos: AlvoBody[],
+): void {
+  const normalizedNewValue = normalizeComparableValue(valorNovo);
+  const unchangedIds = alvos
+    .filter(alvo => tipo === "filial"
+      ? alvo.filialIdAnterior === filialIdNovo
+      : normalizeComparableValue(alvo.valorAnterior) === normalizedNewValue)
+    .map(alvo => alvo.colaboradorId);
+
+  if (unchangedIds.length === 0) return;
+
+  const destinationLabel = tipo === "status"
+    ? `o status ${valorNovo}`
+    : tipo === "turno"
+      ? `o turno ${valorNovo}`
+      : "a filial selecionada";
+  throw new ScheduleRequestError(
+    409,
+    "NO_CHANGE",
+    unchangedIds.length === 1
+      ? `O colaborador selecionado já possui ${destinationLabel}.`
+      : `${unchangedIds.length} colaboradores selecionados já possuem ${destinationLabel}.`,
+    unchangedIds,
+  );
+}
+
 async function assertValidDestinationCompany(
   tx: DbTransaction,
   rootCompanyId: number,
@@ -706,6 +740,7 @@ router.post("/me/scheduled-movements",
           fim: body.fim!,
           colaboradorIds: alvos.map(alvo => alvo.colaboradorId),
         });
+        assertTargetsChangeValue(body.tipo as Tipo, valorNovo, filialIdNovo, alvos);
 
         const [row] = await tx.insert(scheduledMovementsTable).values({
           companyId,
@@ -804,6 +839,7 @@ router.patch("/me/scheduled-movements/:id",
           colaboradorIds: alvos.map(alvo => alvo.colaboradorId),
           excludeMovementId: id,
         });
+        assertTargetsChangeValue(row.tipo as Tipo, row.valorNovo, row.filialIdNovo, alvos);
 
         await tx.update(scheduledMovementsTable).set({
           inicio: body.inicio!,
