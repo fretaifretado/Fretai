@@ -456,7 +456,12 @@ async function insertUnusedValeDiscount(
  
 const INACTIVE_STATUSES = new Set(["desligado", "demitido", "desligamento", "férias", "ferias", "licença", "licenca", "afastado", "home office"]);
 const TEMPORARY_STATUSES = new Set(["férias", "ferias", "licença", "licenca", "afastado", "home office"]);
+const TERMINAL_STATUSES = new Set(["desligado", "demitido", "desligamento"]);
 const PERMANENT_END = "9999-12-31";
+
+function isTerminalStatusMovement(movement: { tipo: string; valorNovo: string }): boolean {
+  return movement.tipo === "status" && TERMINAL_STATUSES.has(movement.valorNovo.trim().toLowerCase());
+}
 
 async function applyMovement(tx: DbTransaction, movementId: number): Promise<void> {
   const [movement] = await tx.select().from(scheduledMovementsTable)
@@ -550,7 +555,11 @@ export async function advanceStatesForCompany(companyId: number): Promise<void> 
   const today = todayIso();
   await db.transaction(async tx => {
     await lockCompanySchedules(tx, companyId);
-    const due = await tx.select({ id: scheduledMovementsTable.id })
+    const due = await tx.select({
+      id: scheduledMovementsTable.id,
+      tipo: scheduledMovementsTable.tipo,
+      valorNovo: scheduledMovementsTable.valorNovo,
+    })
       .from(scheduledMovementsTable)
       .where(and(
         eq(scheduledMovementsTable.companyId, companyId),
@@ -561,18 +570,36 @@ export async function advanceStatesForCompany(companyId: number): Promise<void> 
     for (const movement of due) {
       await applyMovement(tx, movement.id);
       await tx.update(scheduledMovementsTable)
-        .set({ estado: "ativo", updatedAt: new Date() })
+        .set({
+          estado: isTerminalStatusMovement(movement) ? "concluido" : "ativo",
+          updatedAt: new Date(),
+        })
         .where(and(eq(scheduledMovementsTable.id, movement.id), eq(scheduledMovementsTable.estado, "pendente")));
     }
 
     // Reaplica movimentos ativos para reparar dados antigos cujo estado mudou apenas no frontend.
-    const active = await tx.select({ id: scheduledMovementsTable.id })
+    // Desligamentos antigos são finalizados sem reversão após a reaplicação idempotente.
+    const active = await tx.select({
+      id: scheduledMovementsTable.id,
+      tipo: scheduledMovementsTable.tipo,
+      valorNovo: scheduledMovementsTable.valorNovo,
+    })
       .from(scheduledMovementsTable)
       .where(and(
         eq(scheduledMovementsTable.companyId, companyId),
         eq(scheduledMovementsTable.estado, "ativo"),
       ));
-    for (const movement of active) await applyMovement(tx, movement.id);
+    for (const movement of active) {
+      await applyMovement(tx, movement.id);
+      if (isTerminalStatusMovement(movement)) {
+        await tx.update(scheduledMovementsTable)
+          .set({ estado: "concluido", updatedAt: new Date() })
+          .where(and(
+            eq(scheduledMovementsTable.id, movement.id),
+            eq(scheduledMovementsTable.estado, "ativo"),
+          ));
+      }
+    }
 
     const completed = await tx.select({ id: scheduledMovementsTable.id })
       .from(scheduledMovementsTable)
