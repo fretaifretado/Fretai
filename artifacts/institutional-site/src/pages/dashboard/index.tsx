@@ -102,7 +102,6 @@ function StatCard({ label, value, sub, trend }: { label: string; value: number |
 }
 
 const VALE_DIARIO = 8.50;
-const STATUS_INATIVOS = ["Férias", "Licença", "Afastado", "Desligado", "Home Office"] as const;
 const STATUS_COLORS: Record<string, string> = {
   "Ativo":     "#22c55e",
   "Home Office": "#94a3b8",
@@ -126,10 +125,68 @@ function fmt(v: number) {
   return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
 
-const MESES_CURTO = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
-
 function monthParam(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function periodParamsForRange(months: number, end = new Date()): string[] {
+  return Array.from({ length: months }, (_, index) => {
+    const date = new Date(end.getFullYear(), end.getMonth() - (months - 1 - index), 1);
+    return monthParam(date);
+  });
+}
+
+function periodLabelFromParam(period: string): string {
+  const [year, month] = period.split("-").map(Number);
+  if (!year || !month) return period;
+  return `${MONTH_LABELS[month - 1]}/${year}`;
+}
+
+function aggregateFinancialSummaries(
+  summaries: FinancialSummary[],
+  companyIds: number[],
+  periods: string[],
+): FinancialSummary {
+  const selectedIds = new Set(companyIds);
+  const selectedPeriods = new Set(periods);
+  const rows = summaries.filter(row => selectedIds.has(row.companyId) && selectedPeriods.has(row.period));
+  const latestPeriod = periods.at(-1) ?? "";
+  const latestRows = rows.filter(row => row.period === latestPeriod);
+  const pendingDetails = new Map<string, { mesAplicacao: string; valor: number; mesGeracao: string }>();
+
+  for (const detail of latestRows.flatMap(row => row.creditoPendenteDetalhes)) {
+    const key = `${detail.mesGeracao}|${detail.mesAplicacao}`;
+    const current = pendingDetails.get(key);
+    pendingDetails.set(key, {
+      ...detail,
+      valor: (current?.valor ?? 0) + detail.valor,
+    });
+  }
+
+  const sum = (field: keyof Pick<FinancialSummary,
+    "valesComprados" | "compraDoMes" | "valesNaoUtilizados" | "creditoGerado" | "creditoAplicado" | "valorNotaFiscal"
+  >) => rows.reduce((total, row) => total + row[field], 0);
+  const latestSum = (field: "saldoCredito" | "creditoPendente") =>
+    latestRows.reduce((total, row) => total + row[field], 0);
+  const firstPeriod = periods[0] ?? "";
+  const periodLabel = periods.length <= 1
+    ? periodLabelFromParam(latestPeriod)
+    : `${periodLabelFromParam(firstPeriod)} a ${periodLabelFromParam(latestPeriod)}`;
+
+  return {
+    companyId: companyIds.length === 1 ? companyIds[0]! : 0,
+    period: latestPeriod,
+    periodLabel,
+    valesComprados: sum("valesComprados"),
+    compraDoMes: sum("compraDoMes"),
+    valesNaoUtilizados: sum("valesNaoUtilizados"),
+    creditoGerado: sum("creditoGerado"),
+    creditoAplicado: sum("creditoAplicado"),
+    saldoCredito: latestSum("saldoCredito"),
+    valorNotaFiscal: sum("valorNotaFiscal"),
+    creditoPendente: latestSum("creditoPendente"),
+    creditoPendenteDetalhes: Array.from(pendingDetails.values()),
+  };
 }
 
 export default function DashboardPage() {
@@ -147,45 +204,6 @@ export default function DashboardPage() {
   const [financialSummary, setFinancialSummary] = useState<FinancialSummary>(EMPTY_FINANCIAL_SUMMARY);
   const [loadingFinancialSummary, setLoadingFinancialSummary] = useState(false);
   const [financialSummariesByBranch, setFinancialSummariesByBranch] = useState<Map<number, FinancialSummary>>(new Map());
-
-  const fetchFinancialSummary = useCallback(async (cid: number, period: string) => {
-    setLoadingFinancialSummary(true);
-    try {
-      const res = await fetch(`${API_URL}/api/me/financial-summary?companyId=${cid}&period=${period}`, { headers: getAuthHeaders() });
-      if (res.ok) setFinancialSummary(await res.json() as FinancialSummary);
-      else setFinancialSummary(EMPTY_FINANCIAL_SUMMARY);
-    } catch {
-      setFinancialSummary(EMPTY_FINANCIAL_SUMMARY);
-    } finally {
-      setLoadingFinancialSummary(false);
-    }
-  }, []);
-
-  const fetchFinancialSummariesByBranches = useCallback(async (companyIds: number[], period: string) => {
-    try {
-      const res = await fetch(`${API_URL}/api/me/financial-summary-by-branches?companyIds=${companyIds.join(",")}&period=${period}`, { headers: getAuthHeaders() });
-      if (res.ok) {
-        const data = await res.json() as Array<{ companyId: number } & FinancialSummary>;
-        const summariesMap = new Map<number, FinancialSummary>();
-        data.forEach(item => summariesMap.set(item.companyId, item));
-        setFinancialSummariesByBranch(summariesMap);
-      }
-    } catch {
-      setFinancialSummariesByBranch(new Map());
-    }
-  }, []);
-
-  useEffect(() => {
-    if (companyId) void fetchFinancialSummary(companyId, financialPeriod);
-    else setFinancialSummary(EMPTY_FINANCIAL_SUMMARY);
-  }, [companyId, fetchFinancialSummary, financialPeriod]);
-
-  useEffect(() => {
-    if (!companyId) return;
-    const onUpdated = () => { void fetchFinancialSummary(companyId, financialPeriod); };
-    window.addEventListener("purchase-orders:updated", onUpdated);
-    return () => window.removeEventListener("purchase-orders:updated", onUpdated);
-  }, [companyId, fetchFinancialSummary, financialPeriod]);
 
   /* ── rotas agendadas para cards de passageiros ── */
   const [scheduledBudgets, setScheduledBudgets] = useState<PublishedBudget[]>([]);
@@ -212,7 +230,6 @@ export default function DashboardPage() {
   const [downloadReportError, setDownloadReportError] = useState("");
 
   const { meses } = PERIODO_CONFIG[periodo];
-  const diasPeriodo = meses * 30;
 
   function fmtDate(d: Date) {
     return d.toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "short" });
@@ -250,6 +267,58 @@ export default function DashboardPage() {
 
   useEffect(() => { setFiltroUnidade("global"); }, [empresaAtiva.id]);
 
+  const selectedFinancialCompanyIds = useMemo(() => {
+    if (filtroUnidade !== "global") return [filtroUnidade];
+    const ids = filiaisEmpresa.map(f => f.id);
+    return ids.length > 0 ? ids : (companyId ? [companyId] : []);
+  }, [companyId, filiaisEmpresa, filtroUnidade]);
+  const financialPeriods = useMemo(
+    () => periodParamsForRange(meses, today),
+    [financialPeriod, meses],
+  );
+
+  const fetchFinancialData = useCallback(async (companyIds: number[], periods: string[]) => {
+    if (companyIds.length === 0 || periods.length === 0) {
+      setFinancialSummary(EMPTY_FINANCIAL_SUMMARY);
+      setFinancialSummariesByBranch(new Map());
+      return;
+    }
+
+    setLoadingFinancialSummary(true);
+    try {
+      const params = new URLSearchParams({
+        companyIds: companyIds.join(","),
+        periods: periods.join(","),
+      });
+      const res = await fetch(`${API_URL}/api/me/financial-summary-by-branches?${params}`, {
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) throw new Error("Não foi possível carregar os dados financeiros");
+
+      const data = await res.json() as FinancialSummary[];
+      setFinancialSummary(aggregateFinancialSummaries(data, companyIds, periods));
+      setFinancialSummariesByBranch(new Map(companyIds.map(id => [
+        id,
+        aggregateFinancialSummaries(data, [id], periods),
+      ])));
+    } catch {
+      setFinancialSummary(EMPTY_FINANCIAL_SUMMARY);
+      setFinancialSummariesByBranch(new Map());
+    } finally {
+      setLoadingFinancialSummary(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchFinancialData(selectedFinancialCompanyIds, financialPeriods);
+  }, [fetchFinancialData, financialPeriods, selectedFinancialCompanyIds]);
+
+  useEffect(() => {
+    const onUpdated = () => { void fetchFinancialData(selectedFinancialCompanyIds, financialPeriods); };
+    window.addEventListener("purchase-orders:updated", onUpdated);
+    return () => window.removeEventListener("purchase-orders:updated", onUpdated);
+  }, [fetchFinancialData, financialPeriods, selectedFinancialCompanyIds]);
+
   const colaboradoresEmpresa = useMemo(() => {
     const filialIds = new Set(filiaisEmpresa.map(f => f.id));
     return todosColaboradores.filter(c => c.filialId !== null && filialIds.has(c.filialId));
@@ -259,10 +328,6 @@ export default function DashboardPage() {
     if (filtroUnidade === "global") return colaboradoresEmpresa;
     return colaboradoresEmpresa.filter(c => c.filialId === filtroUnidade);
   }, [colaboradoresEmpresa, filtroUnidade]);
-
-  const valeDiario = parseFloat(empresaAtiva.valeValue ?? "8.50");
-  const ativosRel   = colaboradoresFiltrados.filter(c => c.status === "Ativo" && !isFutureDate(c.inicioOperacao)).length;
-  const inativosRel = colaboradoresFiltrados.filter(c => STATUS_INATIVOS.includes(c.status as never)).length;
 
   // Usa o status efetivo: colaboradores com data de início futura aparecem como "Admissão"
   const statusDist = Object.entries(
@@ -274,47 +339,13 @@ export default function DashboardPage() {
   ).map(([name, value]) => ({ name, value }))
    .sort((a, b) => b.value - a.value);
 
-  const economiaMotivos = [
-    { motivo: "Férias",    count: colaboradoresFiltrados.filter(c => c.status === "Férias").length,    color: "#3b82f6" },
-    { motivo: "Licença",   count: colaboradoresFiltrados.filter(c => c.status === "Licença").length,   color: "#f59e0b" },
-    { motivo: "Afastado",  count: colaboradoresFiltrados.filter(c => c.status === "Afastado").length,  color: "#f97316" },
-    { motivo: "Desligado", count: colaboradoresFiltrados.filter(c => c.status === "Desligado").length, color: "#ef4444" },
-  ].filter(e => e.count > 0).map(e => ({
-    ...e,
-    economia: e.count * (valeDiario * 2) * diasPeriodo,
-    label: fmt(e.count * (valeDiario * 2) * diasPeriodo),
-  }));
-
-  const totalEconomia = economiaMotivos.reduce((a, e) => a + e.economia, 0);
-
-  const utilizacaoPorFilial = filiaisEmpresa.map(f => {
-    const total  = colaboradoresEmpresa.filter(c => c.filialId === f.id).length;
-    const usando = colaboradoresEmpresa.filter(c => c.filialId === f.id && c.status === "Ativo").length;
-    // Use creditoAplicado from financialSummary for the active branch, otherwise use theoretical calculation
-    const economia = (filialAtiva?.id === f.id) 
-      ? financialSummary.creditoAplicado 
-      : (total - usando) * (valeDiario * 2) * diasPeriodo;
+  const utilizacaoPorFilial = filiaisEmpresa
+    .filter(f => filtroUnidade === "global" || f.id === filtroUnidade)
+    .map(f => {
+    const economia = financialSummariesByBranch.get(f.id)?.creditoGerado ?? 0;
     return {
       name: f.nome.replace("Filial ", "").replace("Matriz — ", ""),
-      usando,
-      naoUsa: total - usando,
       economia,
-    };
-  });
-
-  const hoje = new Date();
-  const dadosMensais = Array.from({ length: Math.min(meses, 12) }, (_, i) => {
-    const d = new Date(hoje);
-    d.setMonth(d.getMonth() - (Math.min(meses, 12) - 1 - i));
-    const diasNoMes = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
-    const varAleatorio = 1 + (Math.sin(i * 1.3) * 0.05);
-    const ativosN   = Math.round(ativosRel * varAleatorio);
-    const inativosN = Math.round(inativosRel * (1 / varAleatorio));
-    return {
-      mes: MONTH_LABELS[d.getMonth()],
-      utilizaram: ativosN,
-      naoUtilizaram: inativosN,
-      economia: inativosN * (valeDiario * 2) * diasNoMes,
     };
   });
 
@@ -323,13 +354,17 @@ export default function DashboardPage() {
     : filiaisEmpresa.find(f => f.id === filtroUnidade)?.nome ?? "";
 
   const handleDownloadReport = useCallback(async () => {
-    const reportCompanyId = filtroUnidade === "global" ? companyId : filtroUnidade;
+    const reportCompanyId = filtroUnidade === "global" ? empresaAtiva.id : filtroUnidade;
     if (!reportCompanyId || downloadingReport) return;
 
     setDownloadingReport(true);
     setDownloadReportError("");
     try {
-      const res = await fetch(`${API_URL}/api/me/financial-report/${reportCompanyId}`, {
+      const params = new URLSearchParams({
+        companyIds: selectedFinancialCompanyIds.join(","),
+        periods: financialPeriods.join(","),
+      });
+      const res = await fetch(`${API_URL}/api/me/financial-report/${reportCompanyId}?${params}`, {
         headers: getAuthHeaders(),
       });
       if (!res.ok) {
@@ -357,10 +392,10 @@ export default function DashboardPage() {
     } finally {
       setDownloadingReport(false);
     }
-  }, [companyId, downloadingReport, filtroUnidade, nomeUnidade]);
+  }, [downloadingReport, empresaAtiva.id, filtroUnidade, financialPeriods, nomeUnidade, selectedFinancialCompanyIds]);
 
   const descricaoValesNaoUtilizados = financialSummary.valesNaoUtilizados > 0
-    ? `${financialSummary.valesNaoUtilizados.toLocaleString("pt-BR")} vale(s) não utilizado(s) no mês`
+    ? `${financialSummary.valesNaoUtilizados.toLocaleString("pt-BR")} vale(s) não utilizado(s) no período`
     : "Nenhum desconto registrado no período";
 
   return (
@@ -527,17 +562,17 @@ export default function DashboardPage() {
                   <p className="text-[10px] font-bold uppercase tracking-wider">Crédito Gerado</p>
                 </div>
                 <p className="text-3xl font-bold text-blue-700">{fmt(financialSummary.creditoGerado)}</p>
-                <p className="text-[10px] text-muted-foreground">Descontos reais gerados neste mês</p>
+                <p className="text-[10px] text-muted-foreground">Descontos reais gerados no período</p>
               </div>
 
               {/* Card 4: Compra do Mês */}
               <div className="bg-indigo-50/50 border border-indigo-100 rounded-xl p-5 shadow-sm flex flex-col gap-1">
                 <div className="flex items-center gap-2 text-indigo-600 mb-1">
                   <TrendingUp size={14} />
-                  <p className="text-[10px] font-bold uppercase tracking-wider">Compra do Mês</p>
+                  <p className="text-[10px] font-bold uppercase tracking-wider">Compras do Período</p>
                 </div>
                 <p className="text-3xl font-bold text-indigo-700">{fmt(financialSummary.compraDoMes)}</p>
-                <p className="text-[10px] text-muted-foreground">Valor real das compras da competência</p>
+                <p className="text-[10px] text-muted-foreground">Valor real das compras no período</p>
               </div>
 
               {/* Card 5: Crédito Aplicado */}
@@ -557,7 +592,7 @@ export default function DashboardPage() {
                   <p className="text-[10px] font-bold uppercase tracking-wider">Valor da Nota Fiscal</p>
                 </div>
                 <p className="text-3xl font-bold text-rose-700">{fmt(financialSummary.valorNotaFiscal)}</p>
-                <p className="text-[10px] text-muted-foreground">Compra do mês - Crédito aplicado</p>
+                <p className="text-[10px] text-muted-foreground">Compras do período - Crédito aplicado</p>
               </div>
 
               {/* Card 7: Crédito Pendente */}

@@ -47,3 +47,8 @@ Thumbs.db
 
 .cache/
 .local/
+
+# Local secrets and environment-specific configuration
+**/.env
+**/.env.*
+!**/.env.example

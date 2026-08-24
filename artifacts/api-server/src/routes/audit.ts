@@ -4,7 +4,16 @@ import { auditLogsTable, loginLogsTable, employeeImportLogsTable, purchaseOrders
 import { desc, eq, and, like, ne, inArray } from "drizzle-orm";
 import { canAccessCompany, getAuth, requireAdmin, requireAuth } from "../middlewares/auth";
 import ExcelJS from 'exceljs';
-import { getFinancialHistory, periodFromLabel, periodKey, periodLabel, type Period } from "../services/financial-summary";
+import {
+  getFinancialHistory,
+  getFinancialSummaryByBranches,
+  periodFromKey,
+  periodFromLabel,
+  periodKey,
+  periodLabel,
+  parsePeriodParam,
+  type Period,
+} from "../services/financial-summary";
 
 const router = Router();
 
@@ -132,6 +141,7 @@ async function sendFinancialReport(
   req: Request,
   res: Response,
   forceClientReport = false,
+  requestedCompanyIds?: number[],
 ): Promise<void> {
   try {
     const isClientReport = forceClientReport || req.query.format === 'client';
@@ -141,6 +151,41 @@ async function sendFinancialReport(
       res.status(400).json({ error: "Company ID required" });
       return;
     }
+    const companyIds = requestedCompanyIds?.length ? [...new Set(requestedCompanyIds)] : [companyId];
+    const periodsParam = [...new Set(req.query.periods === undefined
+      ? []
+      : String(req.query.periods).split(",").map(value => value.trim()).filter(Boolean)
+    )];
+    if (periodsParam.length > 12) {
+      res.status(400).json({ error: "No máximo 12 competências por relatório" });
+      return;
+    }
+    let requestedPeriods: Period[] | null = null;
+    try {
+      requestedPeriods = periodsParam.length > 0
+        ? periodsParam.map(value => parsePeriodParam(value))
+        : null;
+    } catch {
+      res.status(400).json({ error: "Competência inválida" });
+      return;
+    }
+    const monthsParam = req.query.months === undefined ? null : Number(req.query.months);
+    if (monthsParam !== null && ![1, 3, 6, 12].includes(monthsParam)) {
+      res.status(400).json({ error: "Período inválido" });
+      return;
+    }
+    const currentPeriod = { year: new Date().getFullYear(), month: new Date().getMonth() + 1 };
+    const fallbackPeriods = monthsParam === null
+      ? null
+      : Array.from({ length: monthsParam }, (_, index) =>
+          periodFromKey(periodKey(currentPeriod) - monthsParam + 1 + index),
+        );
+    const filteredPeriods = requestedPeriods ?? fallbackPeriods;
+    const allowedPeriodKeys = filteredPeriods === null
+      ? null
+      : new Set(filteredPeriods.map(periodKey));
+    const isPeriodAllowed = (period: Period | null) =>
+      period !== null && (allowedPeriodKeys === null || allowedPeriodKeys.has(periodKey(period)));
 
     // Get company info
     const [company] = await db.select().from(companiesTable).where(eq(companiesTable.id, companyId)).limit(1);
@@ -150,13 +195,16 @@ async function sendFinancialReport(
     }
 
     // Get all purchase orders for this company (excluding cancelled)
-    const orders = await db.select().from(purchaseOrdersTable).where(and(
-      eq(purchaseOrdersTable.companyId, companyId),
+    const allOrders = await db.select().from(purchaseOrdersTable).where(and(
+      companyIds.length === 1
+        ? eq(purchaseOrdersTable.companyId, companyIds[0]!)
+        : inArray(purchaseOrdersTable.companyId, companyIds),
       ne(purchaseOrdersTable.status, "Cancelado")
     ));
+    const orders = allOrders.filter(order => isPeriodAllowed(periodFromLabel(order.periodo)));
 
     // Get scheduled movements for employee status changes
-    const scheduledMovements = await db.select({
+    const allScheduledMovements = await db.select({
       id: scheduledMovementsTable.id,
       tipo: scheduledMovementsTable.tipo,
       valorNovo: scheduledMovementsTable.valorNovo,
@@ -165,8 +213,14 @@ async function sendFinancialReport(
       estado: scheduledMovementsTable.estado,
       createdAt: scheduledMovementsTable.createdAt,
     }).from(scheduledMovementsTable).where(
-      eq(scheduledMovementsTable.companyId, companyId)
+      companyIds.length === 1
+        ? eq(scheduledMovementsTable.companyId, companyIds[0]!)
+        : inArray(scheduledMovementsTable.companyId, companyIds)
     ).orderBy(desc(scheduledMovementsTable.inicio));
+    const scheduledMovements = allScheduledMovements.filter(movement => {
+      const match = /^(\d{4})-(\d{2})-\d{2}$/.exec(movement.inicio);
+      return isPeriodAllowed(match ? { year: Number(match[1]), month: Number(match[2]) } : null);
+    });
 
     const movementIds = scheduledMovements.map(m => m.id);
     const movementTargets = movementIds.length > 0
@@ -192,17 +246,53 @@ async function sendFinancialReport(
 
     const employeeMap = new Map(employees.map(e => [e.id, e.name]));
 
-    const sortedMonthlyData = (await getFinancialHistory(companyId)).map(summary => ({
-      periodo: summary.periodLabel,
-      valesComprados: summary.valesComprados,
-      compraDoMes: summary.compraDoMes,
-      valesNaoUtilizados: summary.valesNaoUtilizados,
-      creditoGerado: summary.creditoGerado,
-      creditoAplicado: summary.creditoAplicado,
-      creditoPendente: summary.creditoPendente,
-      saldoCredito: summary.saldoCredito,
-      valorNotaFiscal: summary.valorNotaFiscal,
-    }));
+    const financialSummaries = filteredPeriods === null
+      ? (await Promise.all(companyIds.map(id => getFinancialHistory(id)))).flat()
+      : (await Promise.all(
+          filteredPeriods.map(period => getFinancialSummaryByBranches(companyIds, period)),
+        )).flatMap(summaries => Array.from(summaries.values()));
+    const monthlyDataByKey = new Map<number, {
+      periodo: string;
+      valesComprados: number;
+      compraDoMes: number;
+      valesNaoUtilizados: number;
+      creditoGerado: number;
+      creditoAplicado: number;
+      creditoPendente: number;
+      saldoCredito: number;
+      valorNotaFiscal: number;
+    }>();
+    for (const summary of financialSummaries) {
+      const period = periodFromLabel(summary.periodLabel);
+      if (!isPeriodAllowed(period)) continue;
+      const key = periodKey(period!);
+      const current = monthlyDataByKey.get(key) ?? {
+        periodo: summary.periodLabel,
+        valesComprados: 0,
+        compraDoMes: 0,
+        valesNaoUtilizados: 0,
+        creditoGerado: 0,
+        creditoAplicado: 0,
+        creditoPendente: 0,
+        saldoCredito: 0,
+        valorNotaFiscal: 0,
+      };
+      current.valesComprados += summary.valesComprados;
+      current.compraDoMes += summary.compraDoMes;
+      current.valesNaoUtilizados += summary.valesNaoUtilizados;
+      current.creditoGerado += summary.creditoGerado;
+      current.creditoAplicado += summary.creditoAplicado;
+      current.creditoPendente += summary.creditoPendente;
+      current.saldoCredito += summary.saldoCredito;
+      current.valorNotaFiscal += summary.valorNotaFiscal;
+      monthlyDataByKey.set(key, current);
+    }
+    const sortedMonthlyData = Array.from(monthlyDataByKey.entries())
+      .sort(([a], [b]) => a - b)
+      .map(([, row]) => row);
+    const displayCompanyName = companyIds.length > 1
+      ? `${company.name} - Visão Global`
+      : company.name;
 
     type MonthlyRow = typeof sortedMonthlyData[number];
     const emptyMonthlyRow: MonthlyRow = {
@@ -251,7 +341,7 @@ async function sendFinancialReport(
     ]);
     summarySheet.addRow([]);
     const companyHeaderRow = summarySheet.addRow(['DADOS DA EMPRESA']);
-    summarySheet.addRow(['Nome', company.name]);
+    summarySheet.addRow(['Nome', displayCompanyName]);
     if (!isClientReport) summarySheet.addRow(['ID', company.id]);
     summarySheet.addRow(['CNPJ', company.cnpj]);
     summarySheet.addRow(['Endereço', company.address]);
@@ -717,7 +807,7 @@ async function sendFinancialReport(
     const buffer = await workbook.xlsx.writeBuffer();
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    const reportSlug = company.name.replace(/\s+/g, '-');
+    const reportSlug = displayCompanyName.replace(/\s+/g, '-');
     const fileName = isClientReport
       ? `relatorio-financeiro-apresentacao-${reportSlug}.xlsx`
       : `relatorio-financeiro-completo-${reportSlug}.xlsx`;
@@ -745,11 +835,25 @@ router.get(
 
     try {
       const auth = getAuth(req);
-      if (!await canAccessCompany(auth, companyId)) {
-        res.status(403).json({ error: "Acesso negado a esta empresa" });
+      const companyIdsParam = String(req.query.companyIds ?? companyId);
+      const requestedCompanyIds = [...new Set(companyIdsParam
+        .split(",")
+        .map(value => Number.parseInt(value.trim(), 10)))];
+      if (
+        requestedCompanyIds.length === 0 ||
+        requestedCompanyIds.length > 100 ||
+        requestedCompanyIds.some(id => !Number.isSafeInteger(id) || id <= 0) ||
+        !requestedCompanyIds.includes(companyId)
+      ) {
+        res.status(400).json({ error: "Lista de empresas inválida" });
         return;
       }
-      await sendFinancialReport(req, res, true);
+      const accessChecks = await Promise.all(requestedCompanyIds.map(id => canAccessCompany(auth, id)));
+      if (accessChecks.some(allowed => !allowed)) {
+        res.status(403).json({ error: "Acesso negado a uma ou mais empresas" });
+        return;
+      }
+      await sendFinancialReport(req, res, true, requestedCompanyIds);
     } catch (err) {
       req.log.error({ err }, "Error authorizing company financial report");
       res.status(500).json({ error: "Erro interno" });

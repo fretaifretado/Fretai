@@ -142,14 +142,19 @@ router.get(
   async (req, res) => {
     const companyIdsParam = req.query.companyIds as string;
     const periodParam = req.query.period as string | undefined;
+    const periodsParam = req.query.periods as string | undefined;
 
     if (!companyIdsParam) {
       res.status(400).json({ error: "companyIds é obrigatório" });
       return;
     }
 
-    const companyIds = companyIdsParam.split(",").map(id => parseInt(id.trim(), 10));
-    if (companyIds.some(isNaN)) {
+    const companyIds = [...new Set(companyIdsParam.split(",").map(id => parseInt(id.trim(), 10)))];
+    if (
+      companyIds.length === 0 ||
+      companyIds.length > 100 ||
+      companyIds.some(id => !Number.isSafeInteger(id) || id <= 0)
+    ) {
       res.status(400).json({ error: "companyIds inválido" });
       return;
     }
@@ -169,21 +174,23 @@ router.get(
         return;
       }
 
-      const period = periodParam ? parsePeriodParam(periodParam) : { year: new Date().getFullYear(), month: new Date().getMonth() + 1 };
-      const summaries = await getFinancialSummaryByBranches(companyIds, period);
+      const periodValues = [...new Set(periodsParam
+        ? periodsParam.split(",").map(value => value.trim()).filter(Boolean)
+        : [periodParam ?? ""]
+      )];
+      if (periodValues.length > 12) {
+        res.status(400).json({ error: "No máximo 12 competências por consulta" });
+        return;
+      }
 
-      const result = Array.from(summaries.entries()).map(([companyId, summary]) => ({
-        companyId,
-        period: summary.period,
-        periodLabel: summary.periodLabel,
-        valesComprados: summary.valesComprados,
-        compraDoMes: summary.compraDoMes,
-        valesNaoUtilizados: summary.valesNaoUtilizados,
-        creditoGerado: summary.creditoGerado,
-        creditoAplicado: summary.creditoAplicado,
-        saldoCredito: summary.saldoCredito,
-        valorNotaFiscal: summary.valorNotaFiscal,
-      }));
+      const periods = periodValues.map(value => parsePeriodParam(value || undefined));
+      const summariesByPeriod = await Promise.all(
+        periods.map(period => getFinancialSummaryByBranches(companyIds, period)),
+      );
+
+      const result = summariesByPeriod.flatMap(summaries =>
+        Array.from(summaries.values()),
+      );
 
       res.json(result);
     } catch (err) {

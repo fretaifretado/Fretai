@@ -469,7 +469,10 @@ async function applyMovement(tx: DbTransaction, movementId: number): Promise<voi
   if (!movement) return;
 
   const targets = await tx.select().from(scheduledMovementTargetsTable)
-    .where(eq(scheduledMovementTargetsTable.scheduledMovementId, movementId));
+    .where(and(
+      eq(scheduledMovementTargetsTable.scheduledMovementId, movementId),
+      isNull(scheduledMovementTargetsTable.appliedAt),
+    ));
 
   for (const target of targets) {
     if (movement.tipo === "turno") {
@@ -516,8 +519,11 @@ async function applyMovement(tx: DbTransaction, movementId: number): Promise<voi
   }
 
   await tx.update(scheduledMovementTargetsTable)
-    .set({ appliedAt: sql`COALESCE(applied_at, NOW())` })
-    .where(eq(scheduledMovementTargetsTable.scheduledMovementId, movementId));
+    .set({ appliedAt: new Date() })
+    .where(and(
+      eq(scheduledMovementTargetsTable.scheduledMovementId, movementId),
+      isNull(scheduledMovementTargetsTable.appliedAt),
+    ));
 }
 
 async function revertMovement(tx: DbTransaction, movementId: number): Promise<void> {
@@ -534,15 +540,24 @@ async function revertMovement(tx: DbTransaction, movementId: number): Promise<vo
     if (movement.tipo === "turno") {
       await tx.update(employeesTable)
         .set({ route: target.valorAnterior || null, updatedAt: new Date() })
-        .where(eq(employeesTable.id, target.colaboradorId));
+        .where(and(
+          eq(employeesTable.id, target.colaboradorId),
+          eq(employeesTable.route, movement.valorNovo),
+        ));
     } else if (movement.tipo === "status") {
       await tx.update(employeesTable)
         .set({ status: target.valorAnterior || "Ativo", updatedAt: new Date() })
-        .where(eq(employeesTable.id, target.colaboradorId));
+        .where(and(
+          eq(employeesTable.id, target.colaboradorId),
+          eq(employeesTable.status, movement.valorNovo),
+        ));
     } else if (movement.tipo === "filial" && target.filialIdAnterior) {
       await tx.update(employeesTable)
         .set({ companyId: target.filialIdAnterior, updatedAt: new Date() })
-        .where(eq(employeesTable.id, target.colaboradorId));
+        .where(and(
+          eq(employeesTable.id, target.colaboradorId),
+          eq(employeesTable.companyId, movement.filialIdNovo!),
+        ));
     }
   }
 
@@ -577,8 +592,8 @@ export async function advanceStatesForCompany(companyId: number): Promise<void> 
         .where(and(eq(scheduledMovementsTable.id, movement.id), eq(scheduledMovementsTable.estado, "pendente")));
     }
 
-    // Reaplica movimentos ativos para reparar dados antigos cujo estado mudou apenas no frontend.
-    // Desligamentos antigos são finalizados sem reversão após a reaplicação idempotente.
+    // Aplica somente alvos legados ainda não marcados como processados.
+    // Alvos já aplicados nunca sobrescrevem alterações feitas posteriormente.
     const active = await tx.select({
       id: scheduledMovementsTable.id,
       tipo: scheduledMovementsTable.tipo,
