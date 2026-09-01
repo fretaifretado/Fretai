@@ -45,6 +45,27 @@ export type Driver = {
   isActive: boolean;
 };
 
+export type CollaboratorHome = {
+  employee: {
+    id: number;
+    name: string;
+    companyName: string;
+    homeAddress: string;
+    shift: string | null;
+  };
+  vouchers: { balance: number };
+  journey: {
+    date: string;
+    time: string | null;
+    direction: "ida" | "volta";
+    pickupAddress: string;
+    dropoffAddress: string;
+    vehicleCode: string | null;
+    vehicleType: string | null;
+    routeName: string;
+  } | null;
+};
+
 export function toMobileRole(role: ApiRole): MobileRole | null {
   if (role === "parceiro_master") return "partner";
   if (role === "motorista") return "driver";

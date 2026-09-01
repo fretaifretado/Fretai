@@ -1,5 +1,5 @@
 import Constants from "expo-constants";
-import type { Driver, MobileIdentity, Session, Vehicle } from "../types";
+import type { CollaboratorHome, Driver, MobileIdentity, Session, Vehicle } from "../types";
 
 const configuredUrl =
   process.env.EXPO_PUBLIC_API_URL ??
@@ -47,6 +47,10 @@ export async function changePassword(token: string, currentPassword: string, new
 
 export function getMobileIdentity(token: string) {
   return apiRequest<MobileIdentity>("/api/mobile/me", {}, token);
+}
+
+export function getCollaboratorHome(token: string) {
+  return apiRequest<CollaboratorHome>("/api/mobile/collaborator/home", {}, token);
 }
 
 export function getPartnerVehicles(token: string, partnerId: number) {

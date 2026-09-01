@@ -346,6 +346,59 @@ export async function getFinancialHistory(companyId: number): Promise<FinancialS
   return Promise.all(orderedPeriods.map(period => getFinancialSummary(companyId, period)));
 }
 
+export async function getEmployeeValeBalance(
+  companyId: number,
+  employeeId: number,
+  effectiveDate = new Date(),
+): Promise<number> {
+  const today = startOfDay(effectiveDate);
+  const [employee] = await db.select().from(employeesTable)
+    .where(and(eq(employeesTable.id, employeeId), eq(employeesTable.companyId, companyId)))
+    .limit(1);
+  if (!employee) return 0;
+
+  const [company] = await db.select({ parentCompanyId: companiesTable.parentCompanyId })
+    .from(companiesTable).where(eq(companiesTable.id, companyId)).limit(1);
+  const calendarCompanyId = company?.parentCompanyId ?? companyId;
+  const [orders, shifts, customHolidays] = await Promise.all([
+    db.select().from(purchaseOrdersTable).where(and(
+      eq(purchaseOrdersTable.companyId, companyId),
+      eq(purchaseOrdersTable.employeeId, employeeId),
+      ne(purchaseOrdersTable.status, "Cancelado"),
+    )),
+    db.select().from(companyShiftsTable).where(eq(companyShiftsTable.companyId, calendarCompanyId)),
+    db.select({ date: companyHolidaysTable.date }).from(companyHolidaysTable)
+      .where(eq(companyHolidaysTable.companyId, calendarCompanyId)),
+  ]);
+
+  const anchor = parseDate(employee.operationStart ?? employee.admissionDate);
+  const holidays = buildHolidaySet(
+    [today.getFullYear() - 1, today.getFullYear(), today.getFullYear() + 1],
+    customHolidays.map(holiday => holiday.date),
+  );
+  let remaining = 0;
+  const activePeriods = new Set<string>();
+
+  for (const order of orders.filter(row => row.vales > 0)) {
+    const start = parseDate(order.dataInicio);
+    const end = parseDate(order.dataFim);
+    if (!start || !end || today > end) continue;
+    activePeriods.add(order.periodo);
+
+    const turno = shifts.find(shift => normalizeTurnoKey(shift.nome) === normalizeTurnoKey(order.turno));
+    const tipoEscala = inferTipoEscala(order.turno, turno);
+    const consumedDays = today < start
+      ? 0
+      : countWorkDays(start, today < end ? today : end, tipoEscala, anchor, turno?.escala, holidays);
+    remaining += Math.max(0, order.vales - consumedDays * 2);
+  }
+
+  const removed = orders
+    .filter(order => order.vales < 0 && activePeriods.has(order.periodo))
+    .reduce((total, order) => total + Math.abs(order.vales), 0);
+  return Math.max(0, remaining - removed);
+}
+
 export async function createUnusedValeDiscountForEmployee(params: {
   companyId: number;
   employeeId: number;
