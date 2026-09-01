@@ -2,7 +2,7 @@ import { Router } from "express";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { db } from "@workspace/db";
-import { usersTable, passwordResetTokensTable } from "@workspace/db/schema";
+import { usersTable, passwordResetTokensTable, employeesTable } from "@workspace/db/schema";
 import { eq, and, gt } from "drizzle-orm";
 import { getAuth, requireAuth, signAdminToken, signToken } from "../middlewares/auth";
 import { logLogin, logAudit } from "../services/audit";
@@ -44,22 +44,81 @@ router.post("/auth/admin/login", (req, res) => {
 
 /* ── User login (DB-based, com bcrypt + rate limiting) ── */
 router.post("/auth/login", async (req, res) => {
-  const email = ((req.body as { email?: string }).email ?? "").trim().toLowerCase();
+  const body = req.body as { identifier?: string; email?: string; password?: string };
+  const identifier = (body.identifier ?? body.email ?? "").trim();
+  const email = identifier.toLowerCase();
+  const cpf = identifier.replace(/\D/g, "");
+  const isCpfLogin = !identifier.includes("@") && cpf.length === 11;
   const password = ((req.body as { password?: string }).password ?? "").trim();
   const ip = String((req as { ip?: string }).ip ?? "unknown");
   const userAgent = req.headers["user-agent"] ?? "unknown";
 
-  if (!email || !password) {
-    res.status(400).json({ error: "E-mail e senha são obrigatórios" }); return;
+  if (!identifier || !password) {
+    res.status(400).json({ error: "CPF ou e-mail e senha são obrigatórios" }); return;
   }
 
   try {
-    const [user] = await db.select().from(usersTable).where(eq(usersTable.email, email));
+    let [user] = await db.select().from(usersTable).where(
+      isCpfLogin ? eq(usersTable.cpf, cpf) : eq(usersTable.email, email),
+    );
+
+    // Colaboradores antigos ainda não possuem linha em users. A conta é
+    // provisionada no primeiro acesso, preservando o cadastro original.
+    if (!user && isCpfLogin) {
+      const employees = await db.select().from(employeesTable)
+        .where(eq(employeesTable.cpf, cpf))
+        .limit(2);
+      const employee = employees.length === 1 ? employees[0] : undefined;
+      const isDismissed = employee?.status?.trim().toLowerCase() === "desligado";
+
+      if (employee && !isDismissed && password.replace(/\D/g, "") === cpf) {
+        const passwordHash = await bcrypt.hash(cpf, 12);
+        try {
+          [user] = await db.insert(usersTable).values({
+            name: employee.name,
+            cpf,
+            email: `colaborador.${employee.id}@login.fretai`,
+            passwordHash,
+            role: "colaborador",
+            entityId: employee.id,
+            entityType: "employee",
+            forcePasswordChange: true,
+            isActive: true,
+          }).returning();
+        } catch (provisionError) {
+          const pgError = provisionError as { code?: string };
+          if (pgError.code !== "23505") throw provisionError;
+          [user] = await db.select().from(usersTable).where(eq(usersTable.cpf, cpf));
+        }
+      }
+    }
 
     if (!user) {
       await logLogin({ email, success: false, ip, userAgent });
       res.status(401).json({ error: "Credenciais inválidas" }); return;
     }
+
+    if (user.role === "colaborador") {
+      const employeeId = user.entityType === "employee" ? user.entityId : null;
+      const [employee] = employeeId
+        ? await db.select({ status: employeesTable.status }).from(employeesTable)
+          .where(eq(employeesTable.id, employeeId)).limit(1)
+        : [];
+      const collaboratorCanAccess = Boolean(employee && employee.status?.trim().toLowerCase() !== "desligado");
+      if (!collaboratorCanAccess) {
+        if (user.isActive) {
+          await db.update(usersTable).set({ isActive: false, updatedAt: new Date() })
+            .where(eq(usersTable.id, user.id));
+        }
+        res.status(401).json({ error: "Conta de colaborador inativa" }); return;
+      }
+      if (!user.isActive) {
+        await db.update(usersTable).set({ isActive: true, updatedAt: new Date() })
+          .where(eq(usersTable.id, user.id));
+        user = { ...user, isActive: true };
+      }
+    }
+
     if (!user.isActive) {
       res.status(401).json({ error: "Conta desativada" }); return;
     }
@@ -68,7 +127,8 @@ router.post("/auth/login", async (req, res) => {
       res.status(429).json({ error: `Conta bloqueada. Tente novamente em ${mins} minuto(s).` }); return;
     }
 
-    const valid = await bcrypt.compare(password, user.passwordHash);
+    const passwordCandidate = isCpfLogin && password.replace(/\D/g, "") === cpf ? cpf : password;
+    const valid = await bcrypt.compare(passwordCandidate, user.passwordHash);
     if (!valid) {
       const failed = (user.failedAttempts ?? 0) + 1;
       const upd: Record<string, unknown> = { failedAttempts: failed };
@@ -90,7 +150,16 @@ router.post("/auth/login", async (req, res) => {
       forcePasswordChange: user.forcePasswordChange,
     });
 
-    res.json({ token, role: user.role, forcePasswordChange: user.forcePasswordChange, email: user.email, userId: user.id, name: user.name ?? user.email.split("@")[0], entityId: user.entityId ?? null });
+    res.json({
+      token,
+      role: user.role,
+      forcePasswordChange: user.forcePasswordChange,
+      email: user.email,
+      cpf: user.cpf,
+      userId: user.id,
+      name: user.name ?? user.email.split("@")[0],
+      entityId: user.entityId ?? null,
+    });
   } catch (err) {
     req.log.error({ err }, "Login error");
     res.status(500).json({ error: "Erro interno do servidor" });

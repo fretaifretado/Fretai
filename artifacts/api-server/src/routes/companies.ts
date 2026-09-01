@@ -485,6 +485,15 @@ router.put("/companies/:companyId/employees/:id", requireAuth("platform_admin", 
     const [employee] = await db.update(employeesTable).set(updates)
       .where(and(eq(employeesTable.id, id), eq(employeesTable.companyId, companyId))).returning();
     if (!employee) { res.status(404).json({ error: "Funcionário não encontrado" }); return; }
+    if (body.status !== undefined) {
+      await db.update(usersTable)
+        .set({ isActive: body.status.trim().toLowerCase() !== "desligado", updatedAt: new Date() })
+        .where(and(
+          eq(usersTable.role, "colaborador"),
+          eq(usersTable.entityType, "employee"),
+          eq(usersTable.entityId, employee.id),
+        ));
+    }
     const authUpd = getAuth(req);
     const action = body.status !== undefined && Object.keys(updates).filter(k => k !== "updatedAt").length === 1
       ? "update_employee_status"
@@ -531,6 +540,17 @@ router.delete("/companies/:companyId/employees/:id", requireAuth("platform_admin
     const [ownedEmployee] = await db.select({ id: employeesTable.id }).from(employeesTable)
       .where(and(eq(employeesTable.id, id), eq(employeesTable.companyId, companyIdDel))).limit(1);
     if (!ownedEmployee) { res.status(404).json({ error: "Funcionário não encontrado" }); return; }
+    const collaboratorUsers = await db.select({ id: usersTable.id }).from(usersTable)
+      .where(and(
+        eq(usersTable.role, "colaborador"),
+        eq(usersTable.entityType, "employee"),
+        eq(usersTable.entityId, id),
+      ));
+    if (collaboratorUsers.length > 0) {
+      const userIds = collaboratorUsers.map(user => user.id);
+      await db.delete(passwordResetTokensTable).where(inArray(passwordResetTokensTable.userId, userIds));
+      await db.delete(usersTable).where(inArray(usersTable.id, userIds));
+    }
     await db.delete(employeeMovementsTable).where(eq(employeeMovementsTable.employeeId, id));
     const [deleted] = await db.delete(employeesTable)
       .where(and(eq(employeesTable.id, id), eq(employeesTable.companyId, companyIdDel))).returning();

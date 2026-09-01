@@ -39,6 +39,8 @@ router.post("/admin/partners", requireAdmin, async (req, res) => {
   try {
     const { masterUser, partner } = await db.transaction(async tx => {
       const [createdMaster] = await tx.insert(usersTable).values({
+        name: masterName.trim(),
+        cpf: cleanedCpf,
         email: masterEmail.trim().toLowerCase(),
         passwordHash,
         role: "parceiro_master",
@@ -222,6 +224,8 @@ router.post("/partners/:id/drivers", requireAuth("platform_admin", "parceiro_mas
   try {
     if (!canAccessPartner(getAuth(req), partnerId)) { res.status(403).json({ error: "Acesso negado" }); return; }
     const [userRow] = await db.insert(usersTable).values({
+      name: name.trim(),
+      cpf: cleanedCpf,
       email: email.trim().toLowerCase(),
       passwordHash,
       role: "motorista",
