@@ -218,7 +218,7 @@ export default function MotoristasPage() {
                 <strong>{createdInfo.name}</strong> · E-mail: <strong>{createdInfo.email}</strong> ·{" "}
                 Senha inicial: <code className="bg-green-100 px-1.5 py-0.5 rounded font-mono">{createdInfo.password}</code>
               </p>
-              <p className="text-xs text-green-600 mt-1">Troca de senha obrigatória no primeiro acesso.</p>
+              <p className="text-xs text-green-600 mt-1">O primeiro acesso e a troca obrigatória de senha são feitos no aplicativo Fretai.</p>
             </div>
             <button onClick={() => setCreatedInfo(null)}><X size={14} className="text-green-600" /></button>
           </div>
@@ -439,7 +439,7 @@ export default function MotoristasPage() {
               </div>
 
               <p className="text-xs text-muted-foreground bg-muted/40 rounded-lg px-3 py-2">
-                A senha inicial do motorista será os <strong>6 primeiros dígitos do CPF</strong>. Troca obrigatória no 1º acesso.
+                A senha inicial será os <strong>6 primeiros dígitos do CPF</strong>. O primeiro acesso e a troca obrigatória de senha são feitos no aplicativo Fretai.
               </p>
 
               {formError && (

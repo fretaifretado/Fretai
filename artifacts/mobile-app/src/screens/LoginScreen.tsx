@@ -50,7 +50,7 @@ export function LoginScreen() {
 
       <View style={styles.form}>
         <Text style={styles.formTitle}>Entrar</Text>
-        <Text style={styles.formSubtitle}>Colaborador: no primeiro acesso, use o CPF nos dois campos.</Text>
+        <Text style={styles.formSubtitle}>Colaborador usa CPF. Motorista usa o e-mail cadastrado.</Text>
         <Field
           label="CPF ou e-mail"
           value={identifier}

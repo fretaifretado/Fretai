@@ -107,6 +107,13 @@ export default function Login() {
         };
         if (!res.ok) { setError(data.error ?? "Credenciais inválidas"); return; }
 
+        if (data.role === "motorista" || data.role === "colaborador") {
+          setError(data.role === "motorista"
+            ? "O acesso de motoristas está disponível somente no aplicativo Fretai."
+            : "O acesso de colaboradores está disponível somente no aplicativo Fretai.");
+          return;
+        }
+
         if (data.forcePasswordChange) {
           setPendingToken(data.token!);
           setPendingEmail(data.email!);
