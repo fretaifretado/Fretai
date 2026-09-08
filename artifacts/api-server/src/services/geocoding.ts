@@ -9,6 +9,15 @@ type ViaCepAddress = {
   erro?: boolean;
 };
 
+type BrasilApiCep = {
+  location?: {
+    coordinates?: {
+      latitude?: string;
+      longitude?: string;
+    };
+  };
+};
+
 function addressCandidates(address: string): string[] {
   const cleaned = address.trim().replace(/\s+/g, " ");
   const normalized = cleaned
@@ -26,8 +35,12 @@ function addressCandidates(address: string): string[] {
 
 const wait = (milliseconds: number) => new Promise(resolve => setTimeout(resolve, milliseconds));
 
+function postalCodeFromAddress(address: string): string | null {
+  return address.match(/\b\d{5}-?\d{3}\b/)?.[0]?.replace(/\D/g, "") ?? null;
+}
+
 async function structuredAddressFromCep(address: string): Promise<ViaCepAddress | null> {
-  const postalCode = address.match(/\b\d{5}-?\d{3}\b/)?.[0]?.replace(/\D/g, "");
+  const postalCode = postalCodeFromAddress(address);
   if (!postalCode) return null;
 
   try {
@@ -39,6 +52,26 @@ async function structuredAddressFromCep(address: string): Promise<ViaCepAddress 
     const result = await response.json() as ViaCepAddress;
     if (result.erro || !result.logradouro || !result.localidade || !result.uf) return null;
     return result;
+  } catch {
+    return null;
+  }
+}
+
+async function coordinatesFromCep(address: string): Promise<{ lat: number; lng: number } | null> {
+  const postalCode = postalCodeFromAddress(address);
+  if (!postalCode) return null;
+
+  try {
+    const response = await fetch(`https://brasilapi.com.br/api/cep/v2/${postalCode}`, {
+      headers: { "User-Agent": "FretaiApp/1.0 (geocoding; contato@fretai.com.br)" },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!response.ok) return null;
+    const result = await response.json() as BrasilApiCep;
+    const lat = Number.parseFloat(result.location?.coordinates?.latitude ?? "");
+    const lng = Number.parseFloat(result.location?.coordinates?.longitude ?? "");
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+    return { lat, lng };
   } catch {
     return null;
   }
@@ -70,9 +103,12 @@ export async function geocodeNominatim(address: string): Promise<{ lat: number; 
   if (cached) return cached;
 
   const textualCandidates = addressCandidates(address);
-  const structuredCandidate = await structuredAddressFromCep(address);
+  const [structuredCandidate, cepCoordinates] = await Promise.all([
+    structuredAddressFromCep(address),
+    coordinatesFromCep(address),
+  ]);
   const candidates: Array<string | ViaCepAddress> = structuredCandidate
-    ? [textualCandidates[0]!, structuredCandidate, ...textualCandidates.slice(1)]
+    ? [structuredCandidate]
     : textualCandidates;
   for (let index = 0; index < candidates.length; index++) {
     if (index > 0) await wait(1_100);
@@ -80,7 +116,7 @@ export async function geocodeNominatim(address: string): Promise<{ lat: number; 
       const candidate = candidates[index]!;
       const response = await fetch(nominatimUrl(candidate), {
         headers: { "User-Agent": "FretaiApp/1.0 (geocoding; contato@fretai.com.br)" },
-        signal: AbortSignal.timeout(8_000),
+        signal: AbortSignal.timeout(5_000),
       });
       if (!response.ok) continue;
 
@@ -98,6 +134,10 @@ export async function geocodeNominatim(address: string): Promise<{ lat: number; 
     } catch {
       // Tenta a próxima versão do endereço.
     }
+  }
+  if (cepCoordinates) {
+    geoCache.set(key, cepCoordinates);
+    return cepCoordinates;
   }
   return null;
 }
