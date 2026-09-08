@@ -489,16 +489,15 @@ router.get("/admin/budgets/:id", requireAdmin, async (req, res) => {
       bpsByRoute.get(bp.routeId)!.push(bp);
     }
 
-    const companyGeoReal = row.destinationAddress
+    const companyGeo = row.destinationAddress
       ? await geocodeNominatim(row.destinationAddress)
       : null;
-    const companyGeo = companyGeoReal ?? fakeGeocode(row.destinationAddress ?? "São Paulo");
 
     res.json({
       budget: {
         ...budgetToApi(row, row.companyName),
-        companyLat: companyGeo.lat,
-        companyLng: companyGeo.lng,
+        companyLat: companyGeo?.lat ?? null,
+        companyLng: companyGeo?.lng ?? null,
         partnerId,
       },
       employees: workers.map(w => ({

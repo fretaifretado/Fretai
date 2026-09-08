@@ -34,7 +34,7 @@ interface BudgetInfo {
   id: number; name: string; status: string;
   companyId: number | null;
   companyAddress: string; companyName: string | null;
-  companyLat: number; companyLng: number;
+  companyLat: number | null; companyLng: number | null;
   partnerId: number | null;
 }
 interface BudgetWorker {
@@ -563,7 +563,7 @@ function BudgetBuilderView({ id, token, onBack }: { id: number; token: string | 
         />
       )}
 
-      {step === "map" && budget && (
+      {step === "map" && budget && budget.companyLat != null && budget.companyLng != null && (
         <div className="space-y-4">
           <div className="flex flex-col gap-3 border bg-muted/20 px-4 py-3 sm:flex-row sm:items-center">
             <div className="flex flex-1 items-start gap-3">
@@ -606,6 +606,16 @@ function BudgetBuilderView({ id, token, onBack }: { id: number; token: string | 
               onFinalize={() => setStep("finalize")}
             />
           </Suspense>
+        </div>
+      )}
+
+      {step === "map" && budget && (budget.companyLat == null || budget.companyLng == null) && (
+        <div className="flex items-start gap-3 border border-destructive/30 bg-destructive/10 px-4 py-4 text-sm text-destructive">
+          <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
+          <div>
+            <p className="font-semibold">Não foi possível localizar o endereço da empresa</p>
+            <p className="mt-1">Revise o endereço cadastrado antes de gerar ou visualizar as rotas.</p>
+          </div>
         </div>
       )}
 
