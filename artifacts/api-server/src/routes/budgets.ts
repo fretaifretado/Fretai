@@ -7,6 +7,11 @@ import {
 } from "@workspace/db/schema";
 import { sql, eq, desc, inArray } from "drizzle-orm";
 import { canAccessCompany, getAuth, requireAdmin, requireAuth } from "../middlewares/auth";
+import {
+  isRouteOptimizerConfigured,
+  optimizeRoutes,
+  type RouteOptimizerVehicle,
+} from "../services/route-optimizer";
 
 const router = Router();
 
@@ -773,6 +778,7 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
     // Block assignment: track which blocks are "free" at each shift
     // freeBlocks: blockId → earliest time it becomes free
     const freeBlockAt = new Map<number, number>(); // blockId → minutes when free
+    const blockVehicleType = new Map<number, string>();
     let nextBlockId = 1;
 
     type RouteInsert = {
@@ -791,143 +797,198 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
     const routeClusters: Array<Array<{ bpInsertIdx: number; workerIds: number[] }>> = [];
 
     const radiusKm = parseFloat(String(budget.maxWalkingRadiusKm ?? "1.0"));
+    let usedOrTools = false;
+    let usedLegacyOptimizer = false;
+
+    type BoardingCluster = ReturnType<typeof clusterByRadius>[number];
+    type PlannedRoute = {
+      vehicleType: typeof vehicleTypes[number];
+      clusters: BoardingCluster[];
+      passengers: number;
+      distanceKm: number;
+      durationMinutes: number;
+    };
 
     for (const shiftTime of sortedShifts) {
       const group = shiftGroups.get(shiftTime)!;
       const shiftMins = timeToMins(shiftTime);
       const endTime = shiftEndMap.get(shiftTime);
       const shiftEndMins = endTime ? timeToMins(endTime) : shiftMins + 480;
+      const usedBlocksThisShift = new Set<number>();
+      const plans: PlannedRoute[] = [];
 
-      // Bin-pack workers into vehicles: largest-first, minimum 90% occupancy
-      //
-      // Rules (applied in order):
-      // 1. Find the LARGEST vehicle where remaining >= ceil(capacity × 0.90)
-      //    → this vehicle will be filled to ≥90% occupancy
-      // 2. If using that vehicle would need multiple trips BUT a single consolidation
-      //    vehicle exists that fits all remaining in ONE trip, prefer consolidation
-      //    (fewer routes = better logistics, even if occupancy dips below 90%)
-      // 3. If no vehicle can achieve 90%, fall back to the smallest vehicle that
-      //    fits all remaining passengers (last-resort single trip)
-      const MIN_OCCUPANCY = 0.90;
-      let remaining = [...group];
-      while (remaining.length > 0) {
-        const n = remaining.length;
+      if (isRouteOptimizerConfigured()) {
+        try {
+          const maxCapacity = Math.max(...vehicleTypes.map(vehicle => vehicle.capacity));
+          const rawClusters = clusterByRadius(group, radiusKm, companyGeo.lat, companyGeo.lng);
+          const stopClusters = new Map<string, BoardingCluster>();
+          let stopSequence = 1;
 
-        // Step 1: largest vehicle achieving ≥90% occupancy
-        const ideal = vehicleTypes.find(v => n >= Math.ceil(v.capacity * MIN_OCCUPANCY));
-        // Step 2/3: smallest vehicle that physically fits ALL remaining (may be < 90%)
-        const consolidation = [...vehicleTypes].reverse().find(v => v.capacity >= n);
-
-        let chosen: typeof vehicleTypes[0];
-        if (!ideal) {
-          chosen = consolidation ?? vehicleTypes[vehicleTypes.length - 1]!;
-        } else if (n > ideal.capacity && consolidation && n <= consolidation.capacity) {
-          chosen = consolidation;
-        } else {
-          chosen = ideal;
-        }
-
-        const batchSize = Math.min(chosen.capacity, remaining.length);
-        const batch = remaining.splice(0, batchSize);
-
-        // Find a reusable block: a block "wakes up" exactly when the shift it served ends
-        // (shiftEndMins of the previous shift), so we match any block whose stored free-time
-        // equals the current shiftMins within ±30 min (clock-wrap aware).
-        // We intentionally store shiftEndMins — not shiftEndMins + durationMins — so that
-        // long routes (many stops, large distKm) don't push the free-time past the tolerance
-        // window and accidentally allocate an extra physical vehicle.
-        let assignedBlock = -1;
-        for (const [bid, freeMins] of freeBlockAt.entries()) {
-          const diff = Math.abs(freeMins - shiftMins);
-          const diffWrapped = Math.min(diff, 1440 - diff);
-          if (diffWrapped <= 30) { assignedBlock = bid; break; }
-        }
-        if (assignedBlock === -1) assignedBlock = nextBlockId++;
-
-        // ── Cluster workers into boarding points by walking radius ──────────
-        // Workers within `radiusKm` of each other share a boarding point
-        // (centroid of the cluster). Vehicles stop at the boarding point —
-        // passengers walk to it instead of being picked up at home.
-        const boardingClusters = clusterByRadius(batch, radiusKm, companyGeo.lat, companyGeo.lng);
-
-        // ── TSP optimisation via OSRM Trip API ───────────────────────────────
-        // Asks the OSRM public routing engine to find the shortest road-network
-        // path that visits all boarding-point centroids and ends at the company.
-        // Returns both the optimal visit ORDER and the real road distance in km.
-        // Falls back to Haversine estimate if the API call fails.
-        const bpCentroids = boardingClusters.map(c => c.centroid);
-        const garageOpts = garageLat != null && garageLng != null
-          ? { garageLat, garageLng, direction: "ida" as "ida" | "volta" }
-          : undefined;
-        const tspResult = await optimizeTSP(bpCentroids, companyGeo.lat, companyGeo.lng, garageOpts);
-
-        // Reorder clusters according to TSP-optimal sequence
-        const orderedClusters = tspResult
-          ? tspResult.order.map(i => boardingClusters[i]!).filter(Boolean)
-          : boardingClusters;
-
-        // Use OSRM real road distance; fall back to Haversine if TSP failed
-        let distKm: number;
-        if (tspResult) {
-          distKm = Math.max(1.0, tspResult.distanceKm);
-        } else {
-          const pts = [...bpCentroids, companyGeo];
-          let hav = 0;
-          for (let i = 0; i < pts.length - 1; i++) {
-            hav += haversineKm(pts[i]!.lat, pts[i]!.lng, pts[i + 1]!.lat, pts[i + 1]!.lng);
+          // A busy boarding point may need more than one vehicle. Splitting it into
+          // co-located demand chunks lets OR-Tools assign those passengers safely.
+          for (const cluster of rawClusters) {
+            for (let offset = 0; offset < cluster.workers.length; offset += maxCapacity) {
+              const idSuffix = stopSequence++;
+              stopClusters.set(`${shiftTime}-${idSuffix}`, {
+                centroid: cluster.centroid,
+                workers: cluster.workers.slice(offset, offset + maxCapacity),
+              });
+            }
           }
-          distKm = Math.max(1.0, hav * 1.4);
+
+          const optimizerVehicles: RouteOptimizerVehicle[] = vehicleTypes.flatMap(vehicle => {
+            const copies = Math.max(1, Math.ceil(group.length / vehicle.capacity));
+            return Array.from({ length: copies }, (_, index) => ({
+              id: `${vehicle.id}-${index + 1}`,
+              type: vehicle.type,
+              capacity: vehicle.capacity,
+              costPerKm: parseFloat(String(vehicle.costPerKm ?? "0")),
+              fixedCost: parseFloat(String(vehicle.fixedCost ?? "0")),
+            }));
+          });
+          const sourceVehicleByOptimizerId = new Map(
+            optimizerVehicles.map(optimizerVehicle => {
+              const sourceId = Number.parseInt(optimizerVehicle.id.split("-")[0] ?? "", 10);
+              return [optimizerVehicle.id, vehicleTypes.find(vehicle => vehicle.id === sourceId)];
+            }),
+          );
+
+          const optimization = await optimizeRoutes({
+            start: garageLat != null && garageLng != null
+              ? { lat: garageLat, lng: garageLng }
+              : companyGeo,
+            end: companyGeo,
+            openStart: garageLat == null || garageLng == null,
+            stops: [...stopClusters].map(([stopId, cluster]) => ({
+              id: stopId,
+              location: cluster.centroid,
+              demand: cluster.workers.length,
+              serviceMinutes: 5,
+            })),
+            vehicles: optimizerVehicles,
+            maxRouteMinutes: budget.maxTravelTimeMin ?? 120,
+            targetOccupancyPct: 90,
+            solveTimeSeconds: 15,
+          });
+
+          if (optimization) {
+            if (optimization.unassignedStopIds.length > 0) {
+              throw new Error(`${optimization.unassignedStopIds.length} ponto(s) ficaram sem veículo`);
+            }
+            for (const optimizedRoute of optimization.routes) {
+              const vehicleType = sourceVehicleByOptimizerId.get(optimizedRoute.vehicleId);
+              const clusters = optimizedRoute.stopIds.map(stopId => stopClusters.get(stopId)).filter((cluster): cluster is BoardingCluster => !!cluster);
+              if (!vehicleType || clusters.length !== optimizedRoute.stopIds.length) {
+                throw new Error("Solução do roteirizador não corresponde aos dados enviados");
+              }
+              plans.push({
+                vehicleType,
+                clusters,
+                passengers: optimizedRoute.load,
+                distanceKm: Math.max(1, optimizedRoute.totalDistanceKm),
+                durationMinutes: Math.ceil(optimizedRoute.totalDurationMinutes),
+              });
+            }
+            usedOrTools = true;
+          }
+        } catch (err) {
+          req.log.warn({ err, budgetId: id, shiftTime }, "OR-Tools unavailable; using legacy route optimizer");
+          plans.length = 0;
         }
-        distKm = parseFloat(distKm.toFixed(2));
+      }
 
-        const numStops = orderedClusters.length;
-        const durationMins = Math.round(10 + numStops * 5 + distKm * 2.0);
-        const costPerKm = parseFloat(String(chosen.costPerKm ?? "3.50"));
-        const fixedCost = parseFloat(String(chosen.fixedCost ?? "80.00"));
-        // Cost covers BOTH Ida (going to company) and Volta (returning home) since the
-        // same vehicle makes both trips: variable part is 2× distKm; fixed cost is once
-        // per shift-period (daily driver/fuel base fee applied once per service block).
-        const totalCost = (distKm * 2 * costPerKm + fixedCost).toFixed(2);
-        const occupancy = ((batch.length / chosen.capacity) * 100).toFixed(2);
+      if (plans.length === 0) {
+        usedLegacyOptimizer = true;
+        const MIN_OCCUPANCY = 0.90;
+        const remaining = [...group];
+        while (remaining.length > 0) {
+          const n = remaining.length;
+          const ideal = vehicleTypes.find(vehicle => n >= Math.ceil(vehicle.capacity * MIN_OCCUPANCY));
+          const consolidation = [...vehicleTypes].reverse().find(vehicle => vehicle.capacity >= n);
+          const chosen = !ideal
+            ? (consolidation ?? vehicleTypes[vehicleTypes.length - 1]!)
+            : (n > ideal.capacity && consolidation && n <= consolidation.capacity ? consolidation : ideal);
+          const batch = remaining.splice(0, Math.min(chosen.capacity, remaining.length));
+          const boardingClusters = clusterByRadius(batch, radiusKm, companyGeo.lat, companyGeo.lng);
+          const bpCentroids = boardingClusters.map(cluster => cluster.centroid);
+          const garageOpts = garageLat != null && garageLng != null
+            ? { garageLat, garageLng, direction: "ida" as "ida" | "volta" }
+            : undefined;
+          const tspResult = await optimizeTSP(bpCentroids, companyGeo.lat, companyGeo.lng, garageOpts);
+          const orderedClusters = tspResult
+            ? tspResult.order.map(index => boardingClusters[index]!).filter(Boolean)
+            : boardingClusters;
+          let distanceKm = tspResult?.distanceKm ?? 0;
+          if (!tspResult) {
+            const points = [...bpCentroids, companyGeo];
+            for (let index = 0; index < points.length - 1; index++) {
+              distanceKm += haversineKm(points[index]!.lat, points[index]!.lng, points[index + 1]!.lat, points[index + 1]!.lng);
+            }
+            distanceKm *= 1.4;
+          }
+          distanceKm = parseFloat(Math.max(1, distanceKm).toFixed(2));
+          plans.push({
+            vehicleType: chosen,
+            clusters: orderedClusters,
+            passengers: batch.length,
+            distanceKm,
+            durationMinutes: Math.round(10 + orderedClusters.length * 5 + distanceKm * 2),
+          });
+        }
+      }
 
-        // Store shift END time (not shift-end + durationMins) as the "available at" marker.
-        // A vehicle that finished serving shift X (Ida + Volta) is ready for shift Y exactly
-        // when shift X ends — regardless of how long the route is.  Using
-        // shiftEndMins + durationMins caused long routes to push the marker past the ±30 min
-        // tolerance window and incorrectly allocate a brand-new physical vehicle.
+      for (const plan of plans) {
+        let assignedBlock = -1;
+        for (const [blockId, freeMinutes] of freeBlockAt.entries()) {
+          if (usedBlocksThisShift.has(blockId)) continue;
+          const difference = Math.abs(freeMinutes - shiftMins);
+          const wrappedDifference = Math.min(difference, 1440 - difference);
+          if (wrappedDifference <= 30 && blockVehicleType.get(blockId) === plan.vehicleType.type) {
+            assignedBlock = blockId;
+            break;
+          }
+        }
+        if (assignedBlock === -1) {
+          assignedBlock = nextBlockId++;
+          blockVehicleType.set(assignedBlock, plan.vehicleType.type);
+        }
         freeBlockAt.set(assignedBlock, shiftEndMins);
+        usedBlocksThisShift.add(assignedBlock);
 
-        // Record route index before pushing (used for cluster→route mapping)
+        const costPerKm = parseFloat(String(plan.vehicleType.costPerKm ?? "3.50"));
+        const fixedCost = parseFloat(String(plan.vehicleType.fixedCost ?? "80.00"));
+        const totalCost = (plan.distanceKm * 2 * costPerKm + fixedCost).toFixed(2);
+        const occupancy = ((plan.passengers / plan.vehicleType.capacity) * 100).toFixed(2);
         const routeInsertIdx = routesToInsert.length;
         routesToInsert.push({
           budgetId: id,
           name: `Rota ${shiftTime} - Veículo ${assignedBlock}`,
-          shiftTime, vehicleBlockId: assignedBlock,
-          totalPassengers: batch.length, totalDistanceKm: String(distKm),
-          estimatedMinutes: durationMins, occupancyPct: occupancy, totalCost,
-          vehicleAssignments: [{ vehicleType: chosen.type, count: 1, capacity: chosen.capacity }],
+          shiftTime,
+          vehicleBlockId: assignedBlock,
+          totalPassengers: plan.passengers,
+          totalDistanceKm: String(plan.distanceKm),
+          estimatedMinutes: plan.durationMinutes,
+          occupancyPct: occupancy,
+          totalCost,
+          vehicleAssignments: [{ vehicleType: plan.vehicleType.type, count: 1, capacity: plan.vehicleType.capacity }],
         });
 
-        // One boarding point per cluster; track exact worker IDs per cluster
         const thisRouteClusters: Array<{ bpInsertIdx: number; workerIds: number[] }> = [];
-        let seq = 1;
-        for (const cluster of orderedClusters) {
+        for (let index = 0; index < plan.clusters.length; index++) {
+          const cluster = plan.clusters[index]!;
           const label = cluster.workers[0]?.address?.split(",").slice(0, 2).join(",").trim()
-            ?? `Ponto de Embarque ${seq}`;
+            || `Ponto de Embarque ${index + 1}`;
           const bpInsertIdx = bpsToInsert.length;
           bpsToInsert.push({
             budgetId: id,
-            routeId: -1,          // filled after route DB insert
+            routeId: -1,
             name: label.substring(0, 80),
             lat: String(cluster.centroid.lat),
             lng: String(cluster.centroid.lng),
             passengerCount: cluster.workers.length,
-            sequenceOrder: seq++,
+            sequenceOrder: index + 1,
           });
-          thisRouteClusters.push({
-            bpInsertIdx,
-            workerIds: cluster.workers.map(w => w.id),
-          });
+          thisRouteClusters.push({ bpInsertIdx, workerIds: cluster.workers.map(worker => worker.id) });
         }
         routeClusters[routeInsertIdx] = thisRouteClusters;
       }
@@ -989,7 +1050,8 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
       updatedAt: new Date(),
     }).where(eq(budgetsTable.id, id));
 
-    res.json({ routes: insertedRoutes.length, totalCost: totalCostSum.toFixed(2) });
+    const engine = usedOrTools && usedLegacyOptimizer ? "hybrid" : usedOrTools ? "or-tools+osrm" : "legacy";
+    res.json({ routes: insertedRoutes.length, totalCost: totalCostSum.toFixed(2), engine });
   } catch (err) {
     req.log.error({ err }, "Error processing budget routes");
     res.status(500).json({ error: "Erro ao processar rotas" });
