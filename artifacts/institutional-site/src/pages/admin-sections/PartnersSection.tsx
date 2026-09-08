@@ -85,7 +85,12 @@ export default function PartnersSection({ token }: Props) {
       const res = await fetch(apiUrl("/api/admin/partners"), {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ ...partnerForm, lat: geocodedCoords?.lat ?? null, lng: geocodedCoords?.lng ?? null }),
+        body: JSON.stringify({
+          ...partnerForm,
+          garageAddress: partnerForm.address,
+          garageLat: geocodedCoords?.lat ?? null,
+          garageLng: geocodedCoords?.lng ?? null,
+        }),
       });
       const data = await res.json() as Partner & { masterUser?: { email: string; initialPassword: string }; error?: string };
       if (!res.ok) { setFormError(data.error ?? "Erro."); return; }

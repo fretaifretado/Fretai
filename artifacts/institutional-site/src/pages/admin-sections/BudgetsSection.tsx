@@ -64,6 +64,12 @@ interface Partner {
   garageAddress: string | null; garageLat: number | null; garageLng: number | null;
 }
 
+function hasGarageCoordinates(partner: Partner): boolean {
+  const lat = Number(partner.garageLat);
+  const lng = Number(partner.garageLng);
+  return Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0;
+}
+
 /* ─── Constants ──────────────────────────────────────────────────────────── */
 const BUILDER_STEPS: { key: BuilderStep; label: string }[] = [
   { key: "upload", label: "1 · Importar" },
@@ -182,6 +188,7 @@ function BudgetNewView({ token, onBack, onCreated }: { token: string | null; onB
   const [companies, setCompanies] = useState<Company[]>([]);
   const [partners, setPartners] = useState<Partner[]>([]);
   const [saving, setSaving] = useState(false);
+  const [resolvingGarage, setResolvingGarage] = useState(false);
   const [err, setErr] = useState("");
   const hdrs = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
   const [form, setForm] = useState({ name: "", companyId: "", companyAddress: "", startDate: "", partnerId: "" });
@@ -204,6 +211,31 @@ function BudgetNewView({ token, onBack, onCreated }: { token: string | null; onB
   };
 
   const selectedPartner = partners.find(p => String(p.id) === form.partnerId) ?? null;
+
+  useEffect(() => {
+    if (!form.partnerId || !selectedPartner) return;
+    if (hasGarageCoordinates(selectedPartner)) return;
+
+    const controller = new AbortController();
+    setResolvingGarage(true);
+    void fetch(apiUrl(`/api/admin/partners/${form.partnerId}`), {
+      headers: hdrs,
+      signal: controller.signal,
+    })
+      .then(async response => response.ok ? response.json() as Promise<Partner> : null)
+      .then(partner => {
+        if (!partner) return;
+        setPartners(current => current.map(item => item.id === partner.id ? partner : item));
+      })
+      .catch(error => {
+        if ((error as { name?: string }).name !== "AbortError") console.error("Erro ao localizar garagem", error);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setResolvingGarage(false);
+      });
+
+    return () => controller.abort();
+  }, [form.partnerId, selectedPartner?.id]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -281,13 +313,16 @@ function BudgetNewView({ token, onBack, onCreated }: { token: string | null; onB
                   <p className="text-xs font-semibold text-foreground">
                     📍 Garagem: <span className="font-normal text-muted-foreground">{selectedPartner.garageAddress ?? selectedPartner.address}</span>
                   </p>
-                  {selectedPartner.garageLat != null && selectedPartner.garageLng != null && parseFloat(String(selectedPartner.garageLat)) !== 0 && (
+                  {hasGarageCoordinates(selectedPartner) && (
                     <p className="text-xs text-emerald-600 font-medium">
                       ✓ Coordenadas confirmadas: {parseFloat(String(selectedPartner.garageLat)).toFixed(5)}, {parseFloat(String(selectedPartner.garageLng)).toFixed(5)}
                     </p>
                   )}
-                  {(!selectedPartner.garageLat || parseFloat(String(selectedPartner.garageLat)) === 0) && (
-                    <p className="text-xs text-amber-600 font-medium">⚠ Parceiro sem coordenadas de garagem — edite o parceiro para adicionar.</p>
+                  {resolvingGarage && (
+                    <p className="text-xs text-muted-foreground font-medium">Localizando coordenadas da garagem...</p>
+                  )}
+                  {!resolvingGarage && !hasGarageCoordinates(selectedPartner) && (
+                    <p className="text-xs text-amber-600 font-medium">Não foi possível localizar automaticamente as coordenadas desta garagem.</p>
                   )}
                 </div>
               )}

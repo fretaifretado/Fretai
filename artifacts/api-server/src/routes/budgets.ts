@@ -12,6 +12,7 @@ import {
   optimizeRoutes,
   type RouteOptimizerVehicle,
 } from "../services/route-optimizer";
+import { geocodeNominatim } from "../services/geocoding";
 
 const router = Router();
 
@@ -31,31 +32,6 @@ function fakeGeocode(address: string, baseLat = -23.5505, baseLng = -46.6333) {
     lat: parseFloat((baseLat + r * Math.cos(angle)).toFixed(7)),
     lng: parseFloat((baseLng + r * Math.sin(angle) * 1.3).toFixed(7)),
   };
-}
-
-/* ─── Company address geocoding (single call, used to centre the map) ─────── */
-const geoCache = new Map<string, { lat: number; lng: number }>();
-
-async function geocodeNominatim(address: string): Promise<{ lat: number; lng: number } | null> {
-  if (!address.trim()) return null;
-  const key = address.trim().toLowerCase();
-  if (geoCache.has(key)) return geoCache.get(key)!;
-  try {
-    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1&countrycodes=br`;
-    const res = await fetch(url, {
-      headers: { "User-Agent": "FretaiApp/1.0 (geocoding)" },
-      signal: AbortSignal.timeout(8000),
-    });
-    const data = await res.json() as Array<{ lat: string; lon: string }>;
-    if (data.length > 0 && data[0]) {
-      const result = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
-      geoCache.set(key, result);
-      return result;
-    }
-    return null;
-  } catch {
-    return null;
-  }
 }
 
 function parseShiftStart(shift: string | null | undefined): string | null {

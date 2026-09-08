@@ -5,11 +5,19 @@ import { partnersTable, vehiclesTable, driversTable, usersTable } from "@workspa
 import { eq, desc } from "drizzle-orm";
 import { canAccessPartner, requireAdmin, requireAuth, getAuth } from "../middlewares/auth";
 import { logAudit } from "../services/audit";
+import { geocodeNominatim } from "../services/geocoding";
 
 const router = Router();
 
 function cleanCnpj(v: string) { return v.replace(/\D/g, ""); }
 function cleanCpf(v: string) { return v.replace(/\D/g, ""); }
+
+function parseCoordinate(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || !value.trim()) return null;
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
 /* ── Parceiros: listar ── */
 router.get("/admin/partners", requireAdmin, async (req, res) => {
@@ -35,6 +43,12 @@ router.post("/admin/partners", requireAdmin, async (req, res) => {
 
   const initialPassword = cleanedCpf.slice(0, 6);
   const passwordHash = await bcrypt.hash(initialPassword, 12);
+  const resolvedGarageAddress = garageAddress?.trim() || address.trim();
+  const receivedGarageLat = parseCoordinate(garageLat);
+  const receivedGarageLng = parseCoordinate(garageLng);
+  const geocodedGarage = receivedGarageLat != null && receivedGarageLng != null
+    ? null
+    : await geocodeNominatim(resolvedGarageAddress);
 
   try {
     const { masterUser, partner } = await db.transaction(async tx => {
@@ -54,9 +68,9 @@ router.post("/admin/partners", requireAdmin, async (req, res) => {
         name: name.trim(),
         cnpj: cleanedCnpj,
         address: address.trim(),
-        garageAddress: garageAddress?.trim() ?? null,
-        garageLat: garageLat ? parseFloat(garageLat) : null,
-        garageLng: garageLng ? parseFloat(garageLng) : null,
+        garageAddress: resolvedGarageAddress,
+        garageLat: receivedGarageLat ?? geocodedGarage?.lat ?? null,
+        garageLng: receivedGarageLng ?? geocodedGarage?.lng ?? null,
         phone: phone.trim(),
         email: email.trim().toLowerCase(),
         masterUserId: createdMaster.id,
@@ -89,8 +103,21 @@ router.get("/admin/partners/:id", requireAdmin, async (req, res) => {
   const id = parseInt(req.params.id as string, 10);
   if (isNaN(id)) { res.status(400).json({ error: "ID inválido" }); return; }
   try {
-    const [partner] = await db.select().from(partnersTable).where(eq(partnersTable.id, id)).limit(1);
+    let [partner] = await db.select().from(partnersTable).where(eq(partnersTable.id, id)).limit(1);
     if (!partner) { res.status(404).json({ error: "Parceiro não encontrado" }); return; }
+    if (partner.garageLat == null || partner.garageLng == null) {
+      const resolvedGarageAddress = partner.garageAddress?.trim() || partner.address.trim();
+      const geocodedGarage = await geocodeNominatim(resolvedGarageAddress);
+      if (geocodedGarage) {
+        const [updatedPartner] = await db.update(partnersTable).set({
+          garageAddress: resolvedGarageAddress,
+          garageLat: geocodedGarage.lat,
+          garageLng: geocodedGarage.lng,
+          updatedAt: new Date(),
+        }).where(eq(partnersTable.id, id)).returning();
+        if (updatedPartner) partner = updatedPartner;
+      }
+    }
     res.json({
       ...partner,
       garageLat: partner.garageLat ?? null,
@@ -115,8 +142,8 @@ router.put("/admin/partners/:id", requireAdmin, async (req, res) => {
   if (cnpj) updates.cnpj = cleanCnpj(cnpj);
   if (address) updates.address = address.trim();
   if (garageAddress !== undefined) updates.garageAddress = garageAddress?.trim() ?? null;
-  if (garageLat !== undefined) updates.garageLat = garageLat ? parseFloat(garageLat) : null;
-  if (garageLng !== undefined) updates.garageLng = garageLng ? parseFloat(garageLng) : null;
+  if (garageLat !== undefined) updates.garageLat = parseCoordinate(garageLat);
+  if (garageLng !== undefined) updates.garageLng = parseCoordinate(garageLng);
   if (phone) updates.phone = phone.trim();
   if (email) updates.email = email.trim().toLowerCase();
   try {
