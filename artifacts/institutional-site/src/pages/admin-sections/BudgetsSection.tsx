@@ -820,10 +820,26 @@ function UploadStep({ budgetId, token, existingWorkers, companyId, companyLat, c
   };
 
   const handleImport = async (replace = true) => {
-    const employees = validated.map(e => ({
-      name: e.name, address: e.editAddress !== e.address ? e.editAddress : e.address,
-      shift: e.shift, ...(e.lat != null && e.lng != null ? { lat: e.lat, lng: e.lng } : {}),
-    }));
+    const employees = validated
+      .filter(e =>
+        e.source !== "failed"
+        && e.source !== "pending"
+        && e.lat != null
+        && e.lng != null
+        && Number.isFinite(e.lat)
+        && Number.isFinite(e.lng)
+      )
+      .map(e => ({
+        name: e.name,
+        address: e.editAddress !== e.address ? e.editAddress : e.address,
+        shift: e.shift,
+        lat: e.lat!,
+        lng: e.lng!,
+      }));
+    if (employees.length === 0) {
+      setMsg("Nenhum funcionário possui geolocalização válida para importar.");
+      return;
+    }
     setSub("importing"); setMsg("");
     try {
       const r = await fetch(apiUrl(`/api/admin/budgets/${budgetId}/employees`), {
@@ -843,6 +859,7 @@ function UploadStep({ budgetId, token, existingWorkers, companyId, companyLat, c
   const geocodedCount = validated.filter(e => e.source === "geocoded").length;
   const manualCount = validated.filter(e => e.source === "manual").length;
   const failCount = validated.filter(e => e.source === "failed").length;
+  const validCount = coordsCount + geocodedCount + manualCount;
   const parsedWithCoords = parsed.filter(e => e.lat != null).length;
 
   return (
@@ -1101,18 +1118,20 @@ function UploadStep({ budgetId, token, existingWorkers, companyId, companyLat, c
               {failCount > 0 && (
                 <div className="flex items-start gap-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>Corrija os {failCount} endereço{failCount !== 1 ? "s" : ""} antes de importar. Coordenadas fora da região da empresa também são recusadas.</span>
+                  <span>
+                    Você pode importar agora os <strong>{validCount} colaboradores válidos</strong>. Os {failCount} endereço{failCount !== 1 ? "s" : ""} com erro serão ignorados e poderão ser corrigidos e adicionados depois.
+                  </span>
                 </div>
               )}
 
               <div className="flex gap-2">
-                <Button onClick={() => void handleImport(true)} disabled={failCount > 0} className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white">
+                <Button onClick={() => void handleImport(true)} disabled={validCount === 0} className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white">
                   <CheckCircle2 className="mr-2 h-4 w-4" />
-                  Confirmar e Importar {validated.length} funcionários
+                  {failCount > 0 ? `Importar ${validCount} geolocalizados` : `Confirmar e importar ${validCount} funcionários`}
                 </Button>
                 {existingWorkers.length > 0 && (
-                  <Button variant="outline" onClick={() => void handleImport(false)} disabled={failCount > 0}>
-                    Adicionar aos existentes
+                  <Button variant="outline" onClick={() => void handleImport(false)} disabled={validCount === 0}>
+                    Adicionar {validCount} aos existentes
                   </Button>
                 )}
                 <Button variant="ghost" onClick={() => setParsed([])}>Limpar</Button>
