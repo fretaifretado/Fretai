@@ -19,7 +19,8 @@ ROUTING_ENGINE_TOKEN=troque-por-um-segredo-longo
 ```
 
 O mesmo valor de `ROUTING_ENGINE_TOKEN` deve existir nos dois serviços. Sem
-`ROUTING_ENGINE_URL`, a API principal mantém o algoritmo legado como fallback.
+`ROUTING_ENGINE_URL`, a geração automática de rotas fica indisponível e a API
+retorna um erro de configuração.
 
 ## Produção
 

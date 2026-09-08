@@ -3,9 +3,9 @@ import { db } from "@workspace/db";
 import {
   budgetsTable, companiesTable,
   budgetWorkersTable, budgetRoutesTable, budgetBoardingPointsTable,
-  vehicleTypesTable, partnersTable,
+  vehicleTypesTable, partnersTable, vehiclesTable,
 } from "@workspace/db/schema";
-import { sql, eq, desc, inArray } from "drizzle-orm";
+import { sql, eq, desc, inArray, and } from "drizzle-orm";
 import { canAccessCompany, getAuth, requireAdmin, requireAuth } from "../middlewares/auth";
 import {
   isRouteOptimizerConfigured,
@@ -34,6 +34,29 @@ function fakeGeocode(address: string, baseLat = -23.5505, baseLng = -46.6333) {
   };
 }
 
+const configuredMaxEmployeeDistanceKm = Number.parseFloat(process.env["ROUTING_MAX_EMPLOYEE_DISTANCE_KM"] ?? "150");
+const MAX_EMPLOYEE_DISTANCE_KM = Number.isFinite(configuredMaxEmployeeDistanceKm)
+  ? configuredMaxEmployeeDistanceKm
+  : 150;
+
+function normalizeVehicleType(value: string): string {
+  return value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+}
+
+function vehicleTypeLabel(value: string): string {
+  if (value === "mini_van") return "Mini-Van";
+  if (value === "micro_onibus") return "Micro-ônibus";
+  if (value === "onibus") return "Ônibus";
+  return "Van";
+}
+
+const DEFAULT_VEHICLE_COSTS: Record<string, { costPerKm: string; fixedCost: string }> = {
+  mini_van: { costPerKm: "1.50", fixedCost: "30.00" },
+  van: { costPerKm: "2.10", fixedCost: "60.00" },
+  micro_onibus: { costPerKm: "3.20", fixedCost: "100.00" },
+  onibus: { costPerKm: "4.50", fixedCost: "150.00" },
+};
+
 function parseShiftStart(shift: string | null | undefined): string | null {
   if (!shift) return null;
   const m = shift.match(/^(\d{1,2}:\d{2})/);
@@ -43,17 +66,6 @@ function parseShiftStart(shift: string | null | undefined): string | null {
   if (s.startsWith("tar")) return "14:20";
   if (s.startsWith("noi")) return "22:30";
   return shift.trim().substring(0, 10);
-}
-
-function parseShiftEnd(shift: string | null | undefined): string | null {
-  if (!shift) return null;
-  const m = shift.match(/^\d{1,2}:\d{2}\/(\d{1,2}:\d{2})/);
-  if (m) return m[1].padStart(5, "0");
-  const s = shift.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  if (s.startsWith("man")) return "14:20";
-  if (s.startsWith("tar")) return "22:30";
-  if (s.startsWith("noi")) return "06:00";
-  return null;
 }
 
 function addressKey(address: string): string {
@@ -600,29 +612,19 @@ router.post("/admin/budgets/:id/employees", requireAdmin, async (req, res) => {
       await db.delete(budgetWorkersTable).where(eq(budgetWorkersTable.budgetId, id));
     }
 
-    const [budget] = await db.select({ destinationAddress: budgetsTable.destinationAddress })
-      .from(budgetsTable).where(eq(budgetsTable.id, id)).limit(1);
-    const companyGeoReal = budget?.destinationAddress
-      ? await geocodeNominatim(budget.destinationAddress)
-      : null;
-    const companyGeo = companyGeoReal ?? fakeGeocode(budget?.destinationAddress ?? "São Paulo");
-
     const rows = employees
       .filter(e => e.name?.trim())
       .map(e => {
         const addr = (e.address ?? "").trim();
         const hasRealGeo = e.lat != null && e.lng != null && !isNaN(Number(e.lat)) && !isNaN(Number(e.lng));
-        const geo = hasRealGeo
-          ? { lat: Number(e.lat), lng: Number(e.lng) }
-          : (addr ? fakeGeocode(addr, companyGeo.lat, companyGeo.lng) : { lat: companyGeo.lat, lng: companyGeo.lng });
         return {
           budgetId: id,
           name: e.name.trim(),
           address: addr,
           shift: e.shift?.trim() || null,
-          lat: String(geo.lat),
-          lng: String(geo.lng),
-          geocoded: hasRealGeo || !!addr,
+          lat: hasRealGeo ? String(Number(e.lat)) : null,
+          lng: hasRealGeo ? String(Number(e.lng)) : null,
+          geocoded: hasRealGeo,
         };
       });
 
@@ -637,7 +639,7 @@ router.post("/admin/budgets/:id/employees", requireAdmin, async (req, res) => {
       .set({ employeesCount: total.length, status: "draft", updatedAt: new Date() })
       .where(eq(budgetsTable.id, id));
 
-    res.json({ geocoded: rows.filter(r => r.geocoded).length, failed: 0, total: total.length });
+    res.json({ geocoded: rows.filter(r => r.geocoded).length, failed: rows.filter(r => !r.geocoded).length, total: total.length });
   } catch (err) {
     req.log.error({ err }, "Error uploading employees");
     res.status(500).json({ error: "Erro ao importar funcionários" });
@@ -666,30 +668,101 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
     const [budget] = await db.select().from(budgetsTable).where(eq(budgetsTable.id, id)).limit(1);
     if (!budget) { res.status(404).json({ error: "Orçamento não encontrado" }); return; }
 
-    const strategy = budget.algorithm ?? "min_cost";
     const workers = await db.select().from(budgetWorkersTable).where(eq(budgetWorkersTable.budgetId, id));
     if (workers.length === 0) { res.status(400).json({ error: "Nenhum funcionário importado" }); return; }
-
-    let vehicleTypes = await db.select().from(vehicleTypesTable).orderBy(desc(vehicleTypesTable.capacity));
-    if (vehicleTypes.length === 0) {
-      vehicleTypes = [
-        { id: 1, type: "Ônibus", capacity: 44, costPerKm: "4.50", fixedCost: "150.00", createdAt: new Date() },
-        { id: 2, type: "Micro-ônibus", capacity: 30, costPerKm: "3.20", fixedCost: "100.00", createdAt: new Date() },
-        { id: 3, type: "Van", capacity: 15, costPerKm: "2.10", fixedCost: "60.00", createdAt: new Date() },
-        { id: 4, type: "Mini-Van", capacity: 6, costPerKm: "1.50", fixedCost: "30.00", createdAt: new Date() },
-      ];
+    if (!budget.partnerId) {
+      res.status(400).json({ error: "Selecione um parceiro transportador para gerar rotas automáticas" });
+      return;
+    }
+    if (!isRouteOptimizerConfigured()) {
+      res.status(503).json({ error: "O serviço OR-Tools + OSRM não está configurado" });
+      return;
     }
 
-    // Always sort descending by capacity (largest first) — algorithm fills largest possible
-    // maintaining ≥90% occupancy, downsizing only when needed for the remainder
-    vehicleTypes.sort((a, b) => b.capacity - a.capacity);
+    const [partner, activeVehicles, configuredVehicleTypes] = await Promise.all([
+      db.select().from(partnersTable).where(eq(partnersTable.id, budget.partnerId)).limit(1).then(rows => rows[0] ?? null),
+      db.select().from(vehiclesTable).where(and(
+        eq(vehiclesTable.partnerId, budget.partnerId),
+        eq(vehiclesTable.status, "ativo"),
+      )),
+      db.select().from(vehicleTypesTable).orderBy(desc(vehicleTypesTable.capacity)),
+    ]);
+    if (!partner) { res.status(404).json({ error: "Parceiro transportador não encontrado" }); return; }
+    if (activeVehicles.length === 0) {
+      res.status(409).json({ error: "O parceiro selecionado não possui veículos ativos cadastrados" });
+      return;
+    }
 
-    // Clear existing routes/bps
-    await db.delete(budgetBoardingPointsTable).where(eq(budgetBoardingPointsTable.budgetId, id));
-    await db.delete(budgetRoutesTable).where(eq(budgetRoutesTable.budgetId, id));
-    await db.update(budgetWorkersTable)
-      .set({ boardingPointId: null })
-      .where(eq(budgetWorkersTable.budgetId, id));
+    const vehicleTypes = activeVehicles.map(vehicle => {
+      const configured = configuredVehicleTypes.find(type =>
+        normalizeVehicleType(type.type) === normalizeVehicleType(vehicle.type)
+      );
+      const fallbackCosts = DEFAULT_VEHICLE_COSTS[vehicle.type] ?? DEFAULT_VEHICLE_COSTS["van"]!;
+      return {
+        id: vehicle.id,
+        type: vehicleTypeLabel(vehicle.type),
+        capacity: vehicle.capacity,
+        costPerKm: configured?.costPerKm ?? fallbackCosts.costPerKm,
+        fixedCost: configured?.fixedCost ?? fallbackCosts.fixedCost,
+        plate: vehicle.plate,
+        internalId: vehicle.internalId,
+      };
+    }).sort((a, b) => b.capacity - a.capacity);
+
+    const companyGeo = budget.destinationAddress
+      ? await geocodeNominatim(budget.destinationAddress)
+      : null;
+    if (!companyGeo) {
+      res.status(422).json({ error: "Não foi possível localizar o endereço da empresa" });
+      return;
+    }
+
+    const workersWithoutCoordinates = workers.filter(worker => {
+      const lat = Number(worker.lat);
+      const lng = Number(worker.lng);
+      return !worker.geocoded || !Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180;
+    });
+    if (workersWithoutCoordinates.length > 0) {
+      res.status(422).json({
+        error: `${workersWithoutCoordinates.length} colaborador(es) estão sem coordenadas válidas`,
+        code: "INVALID_EMPLOYEE_COORDINATES",
+        employees: workersWithoutCoordinates.slice(0, 20).map(worker => worker.name),
+      });
+      return;
+    }
+
+    const distantWorkers = workers.filter(worker =>
+      haversineKm(companyGeo.lat, companyGeo.lng, Number(worker.lat), Number(worker.lng)) > MAX_EMPLOYEE_DISTANCE_KM
+    );
+    if (distantWorkers.length > 0) {
+      res.status(422).json({
+        error: `${distantWorkers.length} colaborador(es) estão a mais de ${MAX_EMPLOYEE_DISTANCE_KM} km da empresa. Revise os endereços antes de roteirizar`,
+        code: "EMPLOYEE_COORDINATES_OUT_OF_RANGE",
+        employees: distantWorkers.slice(0, 20).map(worker => worker.name),
+      });
+      return;
+    }
+
+    let garageLat = partner.garageLat;
+    let garageLng = partner.garageLng;
+    if (garageLat == null || garageLng == null) {
+      const garageAddress = partner.garageAddress?.trim() || partner.address.trim();
+      const garageGeo = await geocodeNominatim(garageAddress);
+      if (garageGeo) {
+        garageLat = garageGeo.lat;
+        garageLng = garageGeo.lng;
+        await db.update(partnersTable).set({
+          garageAddress,
+          garageLat,
+          garageLng,
+          updatedAt: new Date(),
+        }).where(eq(partnersTable.id, partner.id));
+      }
+    }
+    if (garageLat == null || garageLng == null) {
+      res.status(422).json({ error: "Não foi possível localizar a garagem do parceiro transportador" });
+      return;
+    }
 
     // Group workers by shift start time
     const shiftGroups = new Map<string, typeof workers>();
@@ -700,68 +773,19 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
     }
 
     const sortedShifts = [...shiftGroups.keys()].sort();
-    const companyGeoReal = budget.destinationAddress
-      ? await geocodeNominatim(budget.destinationAddress)
-      : null;
-    const companyGeo = companyGeoReal ?? fakeGeocode(budget.destinationAddress ?? "São Paulo");
-
-    // Load partner garage coordinates for KM calculation
-    // IDA:   garagem → passageiros → empresa
-    // VOLTA: empresa → passageiros → garagem
-    let garageLat: number | null = null;
-    let garageLng: number | null = null;
-    if (budget.partnerId) {
-      const [partner] = await db
-        .select({ garageLat: partnersTable.garageLat, garageLng: partnersTable.garageLng })
-        .from(partnersTable)
-        .where(eq(partnersTable.id, budget.partnerId))
-        .limit(1);
-      garageLat = partner?.garageLat ?? null;
-      garageLng = partner?.garageLng ?? null;
-    }
-
-    // Assign coordinates: use existing fakeGeocode coords set at import time.
-    // Workers without coordinates yet get a fresh fakeGeocode scatter near the company.
-    for (const w of workers) {
-      if (!w.lat || !w.lng) {
-        const geo = fakeGeocode(w.address ?? "", companyGeo.lat, companyGeo.lng);
-        w.lat = String(geo.lat);
-        w.lng = String(geo.lng);
-        await db.update(budgetWorkersTable)
-          .set({ lat: w.lat, lng: w.lng, geocoded: true })
-          .where(eq(budgetWorkersTable.id, w.id));
-      }
-    }
-
-    // Assign blockIds: vehicles can be reused across compatible shifts
-    // Compatible = shift B start ≈ shift A end
-    const shiftEndMap = new Map<string, string>(); // start → end
-    for (const w of workers) {
-      const start = parseShiftStart(w.shift);
-      const end = parseShiftEnd(w.shift);
-      if (start && end && !shiftEndMap.has(start)) shiftEndMap.set(start, end);
-    }
-    // Default shift ends if not parsed
-    if (!shiftEndMap.has("06:00")) shiftEndMap.set("06:00", "14:20");
-    if (!shiftEndMap.has("14:20")) shiftEndMap.set("14:20", "22:30");
-    if (!shiftEndMap.has("22:30")) shiftEndMap.set("22:30", "06:00");
-
-    const timeToMins = (t: string) => {
-      const [h, m] = t.split(":").map(Number);
-      return (h ?? 0) * 60 + (m ?? 0);
-    };
-
-    // Block assignment: track which blocks are "free" at each shift
-    // freeBlocks: blockId → earliest time it becomes free
-    const freeBlockAt = new Map<number, number>(); // blockId → minutes when free
-    const blockVehicleType = new Map<number, string>();
-    let nextBlockId = 1;
 
     type RouteInsert = {
       budgetId: number; name: string; shiftTime: string; vehicleBlockId: number;
       totalPassengers: number; totalDistanceKm: string; estimatedMinutes: number;
       occupancyPct: string; totalCost: string | null;
-      vehicleAssignments: Array<{ vehicleType: string; count: number; capacity: number }>;
+      vehicleAssignments: Array<{
+        vehicleId: number;
+        vehicleType: string;
+        plate: string;
+        internalId: string | null;
+        count: number;
+        capacity: number;
+      }>;
     };
 
     const routesToInsert: RouteInsert[] = [];
@@ -772,9 +796,8 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
     // routeCluster[i] = { bpInsertIdx, workerIds[] } for route i
     const routeClusters: Array<Array<{ bpInsertIdx: number; workerIds: number[] }>> = [];
 
-    const radiusKm = parseFloat(String(budget.maxWalkingRadiusKm ?? "1.0"));
-    let usedOrTools = false;
-    let usedLegacyOptimizer = false;
+    const configuredRadiusKm = parseFloat(String(budget.maxWalkingRadiusKm ?? "1.0"));
+    const radiusKm = Math.min(1, Number.isFinite(configuredRadiusKm) && configuredRadiusKm > 0 ? configuredRadiusKm : 1);
 
     type BoardingCluster = ReturnType<typeof clusterByRadius>[number];
     type PlannedRoute = {
@@ -787,150 +810,101 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
 
     for (const shiftTime of sortedShifts) {
       const group = shiftGroups.get(shiftTime)!;
-      const shiftMins = timeToMins(shiftTime);
-      const endTime = shiftEndMap.get(shiftTime);
-      const shiftEndMins = endTime ? timeToMins(endTime) : shiftMins + 480;
-      const usedBlocksThisShift = new Set<number>();
       const plans: PlannedRoute[] = [];
+      const totalFleetCapacity = vehicleTypes.reduce((sum, vehicle) => sum + vehicle.capacity, 0);
+      if (group.length > totalFleetCapacity) {
+        res.status(422).json({
+          error: `A frota ativa comporta ${totalFleetCapacity} passageiros, mas o turno ${shiftTime} possui ${group.length}`,
+          code: "INSUFFICIENT_FLEET_CAPACITY",
+        });
+        return;
+      }
 
-      if (isRouteOptimizerConfigured()) {
-        try {
-          const maxCapacity = Math.max(...vehicleTypes.map(vehicle => vehicle.capacity));
-          const rawClusters = clusterByRadius(group, radiusKm, companyGeo.lat, companyGeo.lng);
-          const stopClusters = new Map<string, BoardingCluster>();
-          let stopSequence = 1;
+      const maxCapacity = Math.max(...vehicleTypes.map(vehicle => vehicle.capacity));
+      const rawClusters = clusterByRadius(group, radiusKm, companyGeo.lat, companyGeo.lng);
+      const stopClusters = new Map<string, BoardingCluster>();
+      let stopSequence = 1;
 
-          // A busy boarding point may need more than one vehicle. Splitting it into
-          // co-located demand chunks lets OR-Tools assign those passengers safely.
-          for (const cluster of rawClusters) {
-            for (let offset = 0; offset < cluster.workers.length; offset += maxCapacity) {
-              const idSuffix = stopSequence++;
-              stopClusters.set(`${shiftTime}-${idSuffix}`, {
-                centroid: cluster.centroid,
-                workers: cluster.workers.slice(offset, offset + maxCapacity),
-              });
-            }
-          }
-
-          const optimizerVehicles: RouteOptimizerVehicle[] = vehicleTypes.flatMap(vehicle => {
-            const copies = Math.max(1, Math.ceil(group.length / vehicle.capacity));
-            return Array.from({ length: copies }, (_, index) => ({
-              id: `${vehicle.id}-${index + 1}`,
-              type: vehicle.type,
-              capacity: vehicle.capacity,
-              costPerKm: parseFloat(String(vehicle.costPerKm ?? "0")),
-              fixedCost: parseFloat(String(vehicle.fixedCost ?? "0")),
-            }));
+      // Um ponto muito cheio vira demandas no mesmo local para respeitar a lotação
+      // individual dos veículos sem aumentar o raio de caminhada.
+      for (const cluster of rawClusters) {
+        for (let offset = 0; offset < cluster.workers.length; offset += maxCapacity) {
+          stopClusters.set(`${shiftTime}-${stopSequence++}`, {
+            centroid: cluster.centroid,
+            workers: cluster.workers.slice(offset, offset + maxCapacity),
           });
-          const sourceVehicleByOptimizerId = new Map(
-            optimizerVehicles.map(optimizerVehicle => {
-              const sourceId = Number.parseInt(optimizerVehicle.id.split("-")[0] ?? "", 10);
-              return [optimizerVehicle.id, vehicleTypes.find(vehicle => vehicle.id === sourceId)];
-            }),
-          );
-
-          const optimization = await optimizeRoutes({
-            start: garageLat != null && garageLng != null
-              ? { lat: garageLat, lng: garageLng }
-              : companyGeo,
-            end: companyGeo,
-            openStart: garageLat == null || garageLng == null,
-            stops: [...stopClusters].map(([stopId, cluster]) => ({
-              id: stopId,
-              location: cluster.centroid,
-              demand: cluster.workers.length,
-              serviceMinutes: 5,
-            })),
-            vehicles: optimizerVehicles,
-            maxRouteMinutes: budget.maxTravelTimeMin ?? 120,
-            targetOccupancyPct: 90,
-            solveTimeSeconds: 15,
-          });
-
-          if (optimization) {
-            if (optimization.unassignedStopIds.length > 0) {
-              throw new Error(`${optimization.unassignedStopIds.length} ponto(s) ficaram sem veículo`);
-            }
-            for (const optimizedRoute of optimization.routes) {
-              const vehicleType = sourceVehicleByOptimizerId.get(optimizedRoute.vehicleId);
-              const clusters = optimizedRoute.stopIds.map(stopId => stopClusters.get(stopId)).filter((cluster): cluster is BoardingCluster => !!cluster);
-              if (!vehicleType || clusters.length !== optimizedRoute.stopIds.length) {
-                throw new Error("Solução do roteirizador não corresponde aos dados enviados");
-              }
-              plans.push({
-                vehicleType,
-                clusters,
-                passengers: optimizedRoute.load,
-                distanceKm: Math.max(1, optimizedRoute.totalDistanceKm),
-                durationMinutes: Math.ceil(optimizedRoute.totalDurationMinutes),
-              });
-            }
-            usedOrTools = true;
-          }
-        } catch (err) {
-          req.log.warn({ err, budgetId: id, shiftTime }, "OR-Tools unavailable; using legacy route optimizer");
-          plans.length = 0;
         }
+      }
+
+      const optimizerVehicles: RouteOptimizerVehicle[] = vehicleTypes.map(vehicle => ({
+        id: String(vehicle.id),
+        type: vehicle.type,
+        capacity: vehicle.capacity,
+        costPerKm: parseFloat(String(vehicle.costPerKm ?? "0")),
+        fixedCost: parseFloat(String(vehicle.fixedCost ?? "0")),
+      }));
+      const sourceVehicleByOptimizerId = new Map(
+        vehicleTypes.map(vehicle => [String(vehicle.id), vehicle]),
+      );
+
+      let optimization: Awaited<ReturnType<typeof optimizeRoutes>>;
+      try {
+        optimization = await optimizeRoutes({
+          start: { lat: garageLat, lng: garageLng },
+          end: companyGeo,
+          openStart: false,
+          stops: [...stopClusters].map(([stopId, cluster]) => ({
+            id: stopId,
+            location: cluster.centroid,
+            demand: cluster.workers.length,
+            serviceMinutes: 5,
+          })),
+          vehicles: optimizerVehicles,
+          maxRouteMinutes: budget.maxTravelTimeMin ?? 120,
+          targetOccupancyPct: 90,
+          solveTimeSeconds: 15,
+        });
+      } catch (err) {
+        req.log.error({ err, budgetId: id, shiftTime }, "OR-Tools route optimization failed");
+        res.status(502).json({
+          error: `O roteirizador não conseguiu processar o turno ${shiftTime}. Tente novamente em instantes`,
+          code: "ROUTING_ENGINE_ERROR",
+        });
+        return;
+      }
+
+      if (!optimization || optimization.unassignedStopIds.length > 0) {
+        res.status(422).json({
+          error: `${optimization?.unassignedStopIds.length ?? stopClusters.size} ponto(s) do turno ${shiftTime} ficaram sem veículo. Revise a frota ou o tempo máximo de viagem`,
+          code: "UNASSIGNED_BOARDING_POINTS",
+        });
+        return;
+      }
+
+      for (const optimizedRoute of optimization.routes) {
+        const vehicleType = sourceVehicleByOptimizerId.get(optimizedRoute.vehicleId);
+        const clusters = optimizedRoute.stopIds
+          .map(stopId => stopClusters.get(stopId))
+          .filter((cluster): cluster is BoardingCluster => !!cluster);
+        if (!vehicleType || clusters.length !== optimizedRoute.stopIds.length) {
+          res.status(502).json({ error: "A resposta do roteirizador não corresponde à frota enviada" });
+          return;
+        }
+        plans.push({
+          vehicleType,
+          clusters,
+          passengers: optimizedRoute.load,
+          distanceKm: Math.max(1, optimizedRoute.totalDistanceKm),
+          durationMinutes: Math.ceil(optimizedRoute.totalDurationMinutes),
+        });
       }
 
       if (plans.length === 0) {
-        usedLegacyOptimizer = true;
-        const MIN_OCCUPANCY = 0.90;
-        const remaining = [...group];
-        while (remaining.length > 0) {
-          const n = remaining.length;
-          const ideal = vehicleTypes.find(vehicle => n >= Math.ceil(vehicle.capacity * MIN_OCCUPANCY));
-          const consolidation = [...vehicleTypes].reverse().find(vehicle => vehicle.capacity >= n);
-          const chosen = !ideal
-            ? (consolidation ?? vehicleTypes[vehicleTypes.length - 1]!)
-            : (n > ideal.capacity && consolidation && n <= consolidation.capacity ? consolidation : ideal);
-          const batch = remaining.splice(0, Math.min(chosen.capacity, remaining.length));
-          const boardingClusters = clusterByRadius(batch, radiusKm, companyGeo.lat, companyGeo.lng);
-          const bpCentroids = boardingClusters.map(cluster => cluster.centroid);
-          const garageOpts = garageLat != null && garageLng != null
-            ? { garageLat, garageLng, direction: "ida" as "ida" | "volta" }
-            : undefined;
-          const tspResult = await optimizeTSP(bpCentroids, companyGeo.lat, companyGeo.lng, garageOpts);
-          const orderedClusters = tspResult
-            ? tspResult.order.map(index => boardingClusters[index]!).filter(Boolean)
-            : boardingClusters;
-          let distanceKm = tspResult?.distanceKm ?? 0;
-          if (!tspResult) {
-            const points = [...bpCentroids, companyGeo];
-            for (let index = 0; index < points.length - 1; index++) {
-              distanceKm += haversineKm(points[index]!.lat, points[index]!.lng, points[index + 1]!.lat, points[index + 1]!.lng);
-            }
-            distanceKm *= 1.4;
-          }
-          distanceKm = parseFloat(Math.max(1, distanceKm).toFixed(2));
-          plans.push({
-            vehicleType: chosen,
-            clusters: orderedClusters,
-            passengers: batch.length,
-            distanceKm,
-            durationMinutes: Math.round(10 + orderedClusters.length * 5 + distanceKm * 2),
-          });
-        }
+        res.status(422).json({ error: `Nenhuma rota viável foi encontrada para o turno ${shiftTime}` });
+        return;
       }
 
       for (const plan of plans) {
-        let assignedBlock = -1;
-        for (const [blockId, freeMinutes] of freeBlockAt.entries()) {
-          if (usedBlocksThisShift.has(blockId)) continue;
-          const difference = Math.abs(freeMinutes - shiftMins);
-          const wrappedDifference = Math.min(difference, 1440 - difference);
-          if (wrappedDifference <= 30 && blockVehicleType.get(blockId) === plan.vehicleType.type) {
-            assignedBlock = blockId;
-            break;
-          }
-        }
-        if (assignedBlock === -1) {
-          assignedBlock = nextBlockId++;
-          blockVehicleType.set(assignedBlock, plan.vehicleType.type);
-        }
-        freeBlockAt.set(assignedBlock, shiftEndMins);
-        usedBlocksThisShift.add(assignedBlock);
-
         const costPerKm = parseFloat(String(plan.vehicleType.costPerKm ?? "3.50"));
         const fixedCost = parseFloat(String(plan.vehicleType.fixedCost ?? "80.00"));
         const totalCost = (plan.distanceKm * 2 * costPerKm + fixedCost).toFixed(2);
@@ -938,15 +912,22 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
         const routeInsertIdx = routesToInsert.length;
         routesToInsert.push({
           budgetId: id,
-          name: `Rota ${shiftTime} - Veículo ${assignedBlock}`,
+          name: `Rota ${shiftTime} - ${plan.vehicleType.internalId || plan.vehicleType.plate}`,
           shiftTime,
-          vehicleBlockId: assignedBlock,
+          vehicleBlockId: plan.vehicleType.id,
           totalPassengers: plan.passengers,
           totalDistanceKm: String(plan.distanceKm),
           estimatedMinutes: plan.durationMinutes,
           occupancyPct: occupancy,
           totalCost,
-          vehicleAssignments: [{ vehicleType: plan.vehicleType.type, count: 1, capacity: plan.vehicleType.capacity }],
+          vehicleAssignments: [{
+            vehicleId: plan.vehicleType.id,
+            vehicleType: plan.vehicleType.type,
+            plate: plan.vehicleType.plate,
+            internalId: plan.vehicleType.internalId,
+            count: 1,
+            capacity: plan.vehicleType.capacity,
+          }],
         });
 
         const thisRouteClusters: Array<{ bpInsertIdx: number; workerIds: number[] }> = [];
@@ -970,8 +951,16 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
       }
     }
 
-    // ── Insert routes ───────────────────────────────────────────────────────
+    // Só substitui a roteirização anterior depois que todos os turnos possuem
+    // uma solução válida, evitando perder uma rota boa por falha do serviço.
     if (routesToInsert.length === 0) { res.status(400).json({ error: "Nenhuma rota gerada" }); return; }
+    await db.update(budgetWorkersTable)
+      .set({ boardingPointId: null })
+      .where(eq(budgetWorkersTable.budgetId, id));
+    await db.delete(budgetBoardingPointsTable).where(eq(budgetBoardingPointsTable.budgetId, id));
+    await db.delete(budgetRoutesTable).where(eq(budgetRoutesTable.budgetId, id));
+
+    // ── Insert routes ───────────────────────────────────────────────────────
     const insertedRoutes = await db.insert(budgetRoutesTable).values(routesToInsert).returning();
 
     // Fill in real routeId for each BP using the cluster index map
@@ -1026,8 +1015,7 @@ router.post("/admin/budgets/:id/process", requireAdmin, async (req, res) => {
       updatedAt: new Date(),
     }).where(eq(budgetsTable.id, id));
 
-    const engine = usedOrTools && usedLegacyOptimizer ? "hybrid" : usedOrTools ? "or-tools+osrm" : "legacy";
-    res.json({ routes: insertedRoutes.length, totalCost: totalCostSum.toFixed(2), engine });
+    res.json({ routes: insertedRoutes.length, totalCost: totalCostSum.toFixed(2), engine: "or-tools+osrm" });
   } catch (err) {
     req.log.error({ err }, "Error processing budget routes");
     res.status(500).json({ error: "Erro ao processar rotas" });

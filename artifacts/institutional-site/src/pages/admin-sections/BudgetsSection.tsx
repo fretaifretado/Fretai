@@ -3,7 +3,7 @@ import * as XLSX from "xlsx";
 import {
   ArrowLeft, Plus, Trash2, Eye, Upload, Users, MapPin,
   Navigation, Bus, CheckCircle2, Download, ChevronDown, ChevronUp,
-  FileText, AlertCircle, Send,
+  FileText, AlertCircle, Send, Route, Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -62,6 +62,22 @@ interface Company { id: number; name: string; address?: string | null }
 interface Partner {
   id: number; name: string; address: string;
   garageAddress: string | null; garageLat: number | null; garageLng: number | null;
+}
+interface PartnerVehicle {
+  id: number; type: string; capacity: number; plate: string;
+  internalId: string | null; status: string;
+}
+
+const MAX_ROUTE_DISTANCE_KM = 150;
+
+function distanceKm(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const earthRadiusKm = 6371;
+  const toRadians = (degrees: number) => degrees * Math.PI / 180;
+  const deltaLat = toRadians(bLat - aLat);
+  const deltaLng = toRadians(bLng - aLng);
+  const value = Math.sin(deltaLat / 2) ** 2
+    + Math.cos(toRadians(aLat)) * Math.cos(toRadians(bLat)) * Math.sin(deltaLng / 2) ** 2;
+  return earthRadiusKm * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
 }
 
 function hasGarageCoordinates(partner: Partner): boolean {
@@ -187,6 +203,8 @@ function BudgetListView({ token, onNew, onSelect }: { token: string | null; onNe
 function BudgetNewView({ token, onBack, onCreated }: { token: string | null; onBack: () => void; onCreated: (id: number) => void }) {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [partners, setPartners] = useState<Partner[]>([]);
+  const [partnerVehicles, setPartnerVehicles] = useState<PartnerVehicle[]>([]);
+  const [checkingFleet, setCheckingFleet] = useState(false);
   const [saving, setSaving] = useState(false);
   const [resolvingGarage, setResolvingGarage] = useState(false);
   const [err, setErr] = useState("");
@@ -211,6 +229,29 @@ function BudgetNewView({ token, onBack, onCreated }: { token: string | null; onB
   };
 
   const selectedPartner = partners.find(p => String(p.id) === form.partnerId) ?? null;
+
+  useEffect(() => {
+    if (!form.partnerId) {
+      setPartnerVehicles([]);
+      return;
+    }
+    const controller = new AbortController();
+    setPartnerVehicles([]);
+    setCheckingFleet(true);
+    void fetch(apiUrl(`/api/admin/partners/${form.partnerId}/vehicles`), {
+      headers: hdrs,
+      signal: controller.signal,
+    })
+      .then(response => response.ok ? response.json() as Promise<PartnerVehicle[]> : Promise.reject())
+      .then(vehicles => setPartnerVehicles(Array.isArray(vehicles) ? vehicles.filter(vehicle => vehicle.status === "ativo") : []))
+      .catch(error => {
+        if ((error as { name?: string }).name !== "AbortError") setPartnerVehicles([]);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setCheckingFleet(false);
+      });
+    return () => controller.abort();
+  }, [form.partnerId]);
 
   useEffect(() => {
     if (!form.partnerId || !selectedPartner) return;
@@ -241,6 +282,9 @@ function BudgetNewView({ token, onBack, onCreated }: { token: string | null; onB
     e.preventDefault();
     if (!form.name.trim()) { setErr("Nome é obrigatório"); return; }
     if (!form.companyId) { setErr("Selecione uma empresa"); return; }
+    if (!form.partnerId) { setErr("Selecione um parceiro transportador"); return; }
+    if (checkingFleet) { setErr("Aguarde a validação da frota do parceiro"); return; }
+    if (partnerVehicles.length === 0) { setErr("O parceiro selecionado precisa ter pelo menos um veículo ativo"); return; }
     if (!form.startDate) { setErr("Data de início é obrigatória"); return; }
     if (form.startDate < minStartDate) { setErr("A data de início deve ser no mínimo 2 dias a partir de hoje"); return; }
     setSaving(true); setErr("");
@@ -296,13 +340,12 @@ function BudgetNewView({ token, onBack, onCreated }: { token: string | null; onB
 
             {/* ── Parceiro Transportador ── */}
             <div className="space-y-2">
-              <Label>Parceiro Transportador <span className="text-muted-foreground font-normal text-xs">(opcional)</span></Label>
+              <Label>Parceiro Transportador</Label>
               <Select value={form.partnerId} onValueChange={val => setForm(f => ({ ...f, partnerId: val === "_none" ? "" : val }))}>
                 <SelectTrigger>
                   <SelectValue placeholder={partners.length === 0 ? "Nenhum parceiro cadastrado" : "Selecione o parceiro transportador"} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="_none">— Sem parceiro —</SelectItem>
                   {partners.map(p => (
                     <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>
                   ))}
@@ -323,6 +366,15 @@ function BudgetNewView({ token, onBack, onCreated }: { token: string | null; onB
                   )}
                   {!resolvingGarage && !hasGarageCoordinates(selectedPartner) && (
                     <p className="text-xs text-amber-600 font-medium">Não foi possível localizar automaticamente as coordenadas desta garagem.</p>
+                  )}
+                  {checkingFleet && <p className="text-xs text-muted-foreground">Verificando frota ativa...</p>}
+                  {!checkingFleet && partnerVehicles.length > 0 && (
+                    <p className="text-xs text-emerald-600 font-medium">
+                      {partnerVehicles.length} veículo{partnerVehicles.length !== 1 ? "s" : ""} ativo{partnerVehicles.length !== 1 ? "s" : ""} · capacidade total de {partnerVehicles.reduce((sum, vehicle) => sum + vehicle.capacity, 0)} passageiros por turno
+                    </p>
+                  )}
+                  {!checkingFleet && partnerVehicles.length === 0 && (
+                    <p className="text-xs text-destructive font-medium">Nenhum veículo ativo cadastrado para este parceiro.</p>
                   )}
                 </div>
               )}
@@ -347,7 +399,7 @@ function BudgetNewView({ token, onBack, onCreated }: { token: string | null; onB
               </p>
             </div>
             <div className="flex justify-end pt-2">
-              <Button type="submit" size="lg" disabled={saving}>{saving ? "Criando…" : "Criar Roteirização →"}</Button>
+              <Button type="submit" size="lg" disabled={saving || checkingFleet}>{saving ? "Criando…" : "Criar Roteirização →"}</Button>
             </div>
           </form>
         </CardContent>
@@ -365,6 +417,10 @@ function BudgetBuilderView({ id, token, onBack }: { id: number; token: string | 
   const [loading, setLoading] = useState(true);
   const [initialized, setInitialized] = useState(false);
   const [partnerGarage, setPartnerGarage] = useState<{ lat: number; lng: number; address: string | null } | null>(null);
+  const [autoProcessing, setAutoProcessing] = useState(false);
+  const [autoError, setAutoError] = useState("");
+  const [autoResult, setAutoResult] = useState<{ routes: number; engine: string } | null>(null);
+  const [mapRevision, setMapRevision] = useState(0);
   const hdrs = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 
   const load = useCallback(async () => {
@@ -432,6 +488,35 @@ function BudgetBuilderView({ id, token, onBack }: { id: number; token: string | 
       id: w.id, name: w.name, lat: w.lat!, lng: w.lng!, shift: w.shift, boardingPointId: w.boardingPointId,
     })), [workers]);
 
+  const generateAutomaticRoutes = async () => {
+    setAutoProcessing(true);
+    setAutoError("");
+    setAutoResult(null);
+    try {
+      const response = await fetch(apiUrl(`/api/admin/budgets/${id}/process`), {
+        method: "POST",
+        headers: hdrs,
+      });
+      const data = await response.json() as {
+        routes?: number; engine?: string; error?: string; employees?: string[];
+      };
+      if (!response.ok || !data.routes) {
+        const affectedEmployees = data.employees?.length
+          ? `: ${data.employees.slice(0, 5).join(", ")}${data.employees.length > 5 ? "..." : ""}`
+          : "";
+        setAutoError(`${data.error ?? "Não foi possível gerar as rotas"}${affectedEmployees}`);
+        return;
+      }
+      await load();
+      setMapRevision(revision => revision + 1);
+      setAutoResult({ routes: data.routes, engine: data.engine ?? "or-tools+osrm" });
+    } catch {
+      setAutoError("Erro de comunicação com o servidor de roteirização");
+    } finally {
+      setAutoProcessing(false);
+    }
+  };
+
   if (loading && !budget) return (
     <div className="space-y-4 p-4"><Skeleton className="h-12 w-48" /><Skeleton className="h-96 w-full" /></div>
   );
@@ -471,24 +556,57 @@ function BudgetBuilderView({ id, token, onBack }: { id: number; token: string | 
         <UploadStep
           budgetId={id} token={token} existingWorkers={workers}
           companyId={budget?.companyId ?? null}
+          companyLat={budget?.companyLat ?? null}
+          companyLng={budget?.companyLng ?? null}
           onComplete={() => { void load(); setStep("map"); }}
           onSkip={() => setStep("map")}
         />
       )}
 
       {step === "map" && budget && (
-        <Suspense fallback={<div className="h-96 flex items-center justify-center text-muted-foreground">Carregando mapa…</div>}>
-          <ManualRouteBuilderLazy
-            budgetId={id} token={token}
-            workers={mapWorkers}
-            companyLat={budget.companyLat}
-            companyLng={budget.companyLng}
-            garageLat={partnerGarage?.lat ?? null}
-            garageLng={partnerGarage?.lng ?? null}
-            garageAddress={partnerGarage?.address ?? null}
-            onFinalize={() => setStep("finalize")}
-          />
-        </Suspense>
+        <div className="space-y-4">
+          <div className="flex flex-col gap-3 border bg-muted/20 px-4 py-3 sm:flex-row sm:items-center">
+            <div className="flex flex-1 items-start gap-3">
+              <Route className="mt-0.5 h-5 w-5 text-primary" />
+              <div>
+                <p className="font-semibold">Roteirização automática</p>
+                <p className="text-sm text-muted-foreground">O OR-Tools agrupa os passageiros em pontos de até 1 km e usa somente a frota ativa do parceiro.</p>
+              </div>
+            </div>
+            <Button onClick={() => void generateAutomaticRoutes()} disabled={autoProcessing || workers.length === 0}>
+              {autoProcessing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Navigation className="mr-2 h-4 w-4" />}
+              {autoProcessing ? "Calculando rotas..." : autoResult ? "Recalcular rotas" : "Gerar rotas automaticamente"}
+            </Button>
+          </div>
+
+          {autoError && (
+            <div className="flex items-start gap-2 border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{autoError}</span>
+            </div>
+          )}
+          {autoResult && (
+            <div className="flex flex-col gap-3 border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 sm:flex-row sm:items-center">
+              <CheckCircle2 className="h-4 w-4 shrink-0" />
+              <span className="flex-1"><strong>{autoResult.routes} rota{autoResult.routes !== 1 ? "s" : ""}</strong> gerada{autoResult.routes !== 1 ? "s" : ""} com OR-Tools + OSRM. Revise os pontos no mapa.</span>
+              <Button size="sm" className="bg-emerald-700 hover:bg-emerald-800" onClick={() => setStep("routes")}>Ver rotas</Button>
+            </div>
+          )}
+
+          <Suspense fallback={<div className="h-96 flex items-center justify-center text-muted-foreground">Carregando mapa…</div>}>
+            <ManualRouteBuilderLazy
+              key={`${id}-${mapRevision}`}
+              budgetId={id} token={token}
+              workers={mapWorkers}
+              companyLat={budget.companyLat}
+              companyLng={budget.companyLng}
+              garageLat={partnerGarage?.lat ?? null}
+              garageLng={partnerGarage?.lng ?? null}
+              garageAddress={partnerGarage?.address ?? null}
+              onFinalize={() => setStep("finalize")}
+            />
+          </Suspense>
+        </div>
       )}
 
       {step === "finalize" && budget && (
@@ -513,13 +631,14 @@ function BudgetBuilderView({ id, token, onBack }: { id: number; token: string | 
 
 /* ─── Upload step ────────────────────────────────────────────────────────── */
 interface ParsedEmployee { name: string; address: string; shift: string | null; lat?: number; lng?: number }
-type GeoSource = "coords" | "geocoded" | "failed" | "manual";
+type GeoSource = "coords" | "pending" | "geocoded" | "failed" | "manual";
 interface ValidatedEmployee { name: string; address: string; shift: string | null; lat?: number; lng?: number; source: GeoSource; editAddress: string; origIdx: number }
 type UploadSub = "idle" | "parsed" | "geocoding" | "review" | "importing";
 
-function UploadStep({ budgetId, token, existingWorkers, companyId, onComplete, onSkip }: {
+function UploadStep({ budgetId, token, existingWorkers, companyId, companyLat, companyLng, onComplete, onSkip }: {
   budgetId: number; token: string | null; existingWorkers: BudgetWorker[];
   companyId: number | null;
+  companyLat: number | null; companyLng: number | null;
   onComplete: () => void; onSkip: () => void;
 }) {
   const [sub, setSub] = useState<UploadSub>("idle");
@@ -528,7 +647,6 @@ function UploadStep({ budgetId, token, existingWorkers, companyId, onComplete, o
   const [geoProgress, setGeoProgress] = useState({ current: 0, total: 0 });
   const [regeocoding, setRegeocoding] = useState<number | null>(null);
   const [reviewTab, setReviewTab] = useState<"errors" | "all">("errors");
-  const [acceptFailed, setAcceptFailed] = useState(false);
   const [msg, setMsg] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   const cancelRef = useRef(false);
@@ -548,7 +666,15 @@ function UploadStep({ budgetId, token, existingWorkers, companyId, onComplete, o
         const emps: ParsedEmployee[] = data
           .filter((e): e is Record<string, unknown> => !!e["name"])
           .map(e => {
-            const addrParts = [e["address"], e["addressNumber"] ? `, ${String(e["addressNumber"])}` : "", e["addressComplement"] ? ` - ${String(e["addressComplement"])}` : ""].join("").trim();
+            const street = [e["address"], e["addressNumber"]].filter(Boolean).map(String).join(", ");
+            const addrParts = [
+              street,
+              e["addressComplement"],
+              e["neighborhood"],
+              e["city"],
+              e["state"],
+              e["zipCode"],
+            ].filter(Boolean).map(String).join(", ").trim();
             const shift = e["shiftStart"] && e["shiftEnd"] ? `${String(e["shiftStart"])}/${String(e["shiftEnd"])}` : null;
             return { name: String(e["name"]), address: addrParts, shift };
           })
@@ -633,14 +759,19 @@ function UploadStep({ budgetId, token, existingWorkers, companyId, onComplete, o
     } catch { return null; }
   }
 
+  const isCoordinateNearCompany = (lat: number, lng: number) => {
+    if (companyLat == null || companyLng == null) return true;
+    return distanceKm(companyLat, companyLng, lat, lng) <= MAX_ROUTE_DISTANCE_KM;
+  };
+
   const startGeocoding = async (employees: ParsedEmployee[]) => {
     cancelRef.current = false;
-    setAcceptFailed(false);
     const init: ValidatedEmployee[] = employees.map((e, i) => ({
-      ...e, source: (e.lat != null && e.lng != null ? "coords" : "failed") as GeoSource,
+      ...e,
+      source: (e.lat != null && e.lng != null && isCoordinateNearCompany(e.lat, e.lng) ? "coords" : "pending") as GeoSource,
       editAddress: e.address, origIdx: i,
     }));
-    const needsGeo = init.filter(e => e.source === "failed");
+    const needsGeo = init.filter(e => e.source === "pending");
     setGeoProgress({ current: 0, total: needsGeo.length });
     setValidated([...init]);
     setSub("geocoding");
@@ -657,9 +788,19 @@ function UploadStep({ budgetId, token, existingWorkers, companyId, onComplete, o
         addrCache.set(key, geo);
         if (i < needsGeo.length - 1) await new Promise(r => setTimeout(r, 1100));
       }
-      init[emp.origIdx] = { ...init[emp.origIdx]!, lat: geo?.lat, lng: geo?.lng, source: geo ? "geocoded" : "failed" };
+      const validGeo = geo && isCoordinateNearCompany(geo.lat, geo.lng) ? geo : null;
+      init[emp.origIdx] = {
+        ...init[emp.origIdx]!,
+        lat: validGeo?.lat,
+        lng: validGeo?.lng,
+        source: validGeo ? "geocoded" : "failed",
+      };
       setValidated([...init]);
     }
+    for (let index = 0; index < init.length; index++) {
+      if (init[index]?.source === "pending") init[index] = { ...init[index]!, source: "failed", lat: undefined, lng: undefined };
+    }
+    setValidated([...init]);
     setReviewTab(init.some(e => e.source === "failed") ? "errors" : "all");
     setSub("review");
   };
@@ -668,7 +809,13 @@ function UploadStep({ budgetId, token, existingWorkers, companyId, onComplete, o
     setRegeocoding(idx);
     const emp = validated[idx]; if (!emp) { setRegeocoding(null); return; }
     const geo = await nominatim(emp.editAddress);
-    setValidated(prev => prev.map((e, i) => i !== idx ? e : { ...e, lat: geo?.lat, lng: geo?.lng, source: (geo ? "manual" : "failed") as GeoSource }));
+    const validGeo = geo && isCoordinateNearCompany(geo.lat, geo.lng) ? geo : null;
+    setValidated(prev => prev.map((e, i) => i !== idx ? e : {
+      ...e,
+      lat: validGeo?.lat,
+      lng: validGeo?.lng,
+      source: (validGeo ? "manual" : "failed") as GeoSource,
+    }));
     setRegeocoding(null);
   };
 
@@ -952,21 +1099,19 @@ function UploadStep({ budgetId, token, existingWorkers, companyId, onComplete, o
 
               {/* Confirm section */}
               {failCount > 0 && (
-                <label className="flex items-start gap-2 cursor-pointer select-none">
-                  <input type="checkbox" checked={acceptFailed} onChange={e => setAcceptFailed(e.target.checked)} className="mt-0.5 accent-primary" />
-                  <span className="text-xs text-muted-foreground leading-relaxed">
-                    Importar os <strong className="text-foreground">{failCount} funcionário{failCount !== 1 ? "s" : ""} sem coordenadas</strong> mesmo assim (posição aproximada pelo endereço)
-                  </span>
-                </label>
+                <div className="flex items-start gap-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>Corrija os {failCount} endereço{failCount !== 1 ? "s" : ""} antes de importar. Coordenadas fora da região da empresa também são recusadas.</span>
+                </div>
               )}
 
               <div className="flex gap-2">
-                <Button onClick={() => void handleImport(true)} disabled={failCount > 0 && !acceptFailed} className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white">
+                <Button onClick={() => void handleImport(true)} disabled={failCount > 0} className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white">
                   <CheckCircle2 className="mr-2 h-4 w-4" />
                   Confirmar e Importar {validated.length} funcionários
                 </Button>
                 {existingWorkers.length > 0 && (
-                  <Button variant="outline" onClick={() => void handleImport(false)} disabled={failCount > 0 && !acceptFailed}>
+                  <Button variant="outline" onClick={() => void handleImport(false)} disabled={failCount > 0}>
                     Adicionar aos existentes
                   </Button>
                 )}
