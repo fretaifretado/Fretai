@@ -6,6 +6,7 @@ import { eq, desc, or, inArray, isNull, and } from "drizzle-orm";
 import { canAccessCompany, canAccessEmployee, requireAdmin, requireAuth, getAuth } from "../middlewares/auth";
 import { logAudit } from "../services/audit";
 import { createUnusedValeDiscountForEmployee } from "../services/financial-summary";
+import { isValidVoucherOverride } from "../services/voucher-value";
 
 const router = Router();
 
@@ -286,6 +287,9 @@ router.post("/companies/:id/employees/batch", requireAuth("platform_admin", "cli
   if (!Array.isArray(body.employees) || body.employees.length === 0) {
     res.status(400).json({ error: "Lista de funcionários obrigatória" }); return;
   }
+  if (body.employees.some(e => !isValidVoucherOverride(e.valeValue))) {
+    res.status(400).json({ error: "Valor individual do vale inválido" }); return;
+  }
   const auth = getAuth(req);
   const inserted: number[] = [];
   const skipped: string[] = [];
@@ -409,6 +413,9 @@ router.post("/companies/:id/employees", requireAuth("platform_admin", "cliente_m
   if (!name || !cpf || !matricula || !admissionDate) {
     res.status(400).json({ error: "Nome, CPF, matrícula e data de admissão são obrigatórios" }); return;
   }
+  if (!isValidVoucherOverride(body.valeValue)) {
+    res.status(400).json({ error: "Valor individual do vale inválido" }); return;
+  }
   const cleanedCpf = cleanCpf(cpf);
   if (cleanedCpf.length !== 11) { res.status(400).json({ error: "CPF inválido" }); return; }
   try {
@@ -457,6 +464,9 @@ router.put("/companies/:companyId/employees/:id", requireAuth("platform_admin", 
   const companyId = parseInt(req.params.companyId as string, 10);
   if (isNaN(id) || isNaN(companyId)) { res.status(400).json({ error: "ID inválido" }); return; }
   const body = req.body as Record<string, string | undefined>;
+  if (!isValidVoucherOverride(body.valeValue)) {
+    res.status(400).json({ error: "Valor individual do vale inválido" }); return;
+  }
   const updates: Record<string, unknown> = { updatedAt: new Date() };
   if (body.name) updates.name = body.name.trim();
   if (body.matricula) updates.matricula = body.matricula.trim();

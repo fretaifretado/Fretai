@@ -55,7 +55,6 @@ export default function PendenciasPage() {
 
   function save() {
     if (!editing) return;
-    const turnoSel = turnos.find(t => t.nome === fTurno);
     updateColaborador({
       ...editing,
       telefone: fTelefone.trim(),
@@ -63,7 +62,6 @@ export default function PendenciasPage() {
       cep: fCep.trim(),
       turno: fTurno || editing.turno,
       inicioOperacao: fInicioOperacao.trim() || editing.inicioOperacao,
-      vale: turnoSel && ["Ativo", "Inativo"].includes(editing.status) ? "R$ 8,50/dia" : editing.vale,
     });
     setSavedIds(prev => new Set([...prev, editing.id]));
     setEditing(null);

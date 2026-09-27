@@ -10,6 +10,7 @@ import {
 } from "@workspace/db/schema";
 import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { buildHolidaySet } from "./holiday-calendar";
+import { resolveVoucherValue } from "./voucher-value";
 
 const MONTHS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 const INACTIVE_STATUSES = new Set(["home office", "férias", "ferias", "licença", "licenca", "afastado", "desligado", "demitido", "desligamento"]);
@@ -166,7 +167,7 @@ export async function processAutomaticPurchasesForCompany(companyId: number, tod
     });
     if (days <= 0) continue;
     const vales = days * 2;
-    const unitValue = Number(employee.valeValue ?? company.valeValue);
+    const unitValue = resolveVoucherValue(employee.valeValue, company.valeValue);
     const total = Math.round(vales * unitValue * 100) / 100;
     items.push({
       companyId,
