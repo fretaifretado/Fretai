@@ -15,6 +15,7 @@ import { Search, Pencil, X, Check, AlertCircle, Upload, Download, FileSpreadshee
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { lookupCep } from "@/lib/viacep";
+import { buildHolidaySet } from "./purchaseAutomation";
 import type * as XlsxModule from "xlsx";
 
 let xlsxPromise: Promise<typeof XlsxModule> | null = null;
@@ -432,7 +433,7 @@ export default function ColaboradoresPage() {
   const [valesMap, setValesMap] = useState<Map<number, number>>(new Map());
 
   /** Conta dias úteis de um turno entre duas datas (inclusive) */
-  function countWorkDays(from: Date, to: Date, tipoEscala: string, escala?: string | null): number {
+  function countWorkDays(from: Date, to: Date, tipoEscala: string, holidays: Set<string>, escala?: string | null): number {
     let count = 0;
     const cur = new Date(from);
     cur.setHours(0, 0, 0, 0);
@@ -440,7 +441,8 @@ export default function ColaboradoresPage() {
     end.setHours(0, 0, 0, 0);
     while (cur <= end) {
       const wd = cur.getDay(); // 0=dom, 6=sab
-      if (isWorkingDay(wd, tipoEscala, escala)) count++;
+      const dateIso = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, "0")}-${String(cur.getDate()).padStart(2, "0")}`;
+      if (!holidays.has(dateIso) && isWorkingDay(wd, tipoEscala, escala)) count++;
       cur.setDate(cur.getDate() + 1);
     }
     return count;
@@ -457,11 +459,12 @@ export default function ColaboradoresPage() {
 
   const fetchVales = useCallback(async (companyId: number) => {
     try {
-      const res = await fetch(`${API_URL}/api/me/purchase-orders?companyId=${companyId}`, {
-        headers: getAuthHeaders(),
-      });
-      if (!res.ok) return;
-      const data = await res.json() as {
+      const [res, holidaysRes] = await Promise.all([
+        fetch(`${API_URL}/api/me/purchase-orders?companyId=${companyId}`, { headers: getAuthHeaders() }),
+        fetch(`${API_URL}/api/me/holidays`, { headers: getAuthHeaders() }),
+      ]);
+      if (!res.ok || !holidaysRes.ok) throw new Error("Não foi possível carregar pedidos ou feriados");
+      const [data, customHolidays] = await Promise.all([res.json(), holidaysRes.json()]) as [{
         employeeId: number | null;
         vales: number;
         dias: number;
@@ -469,10 +472,11 @@ export default function ColaboradoresPage() {
         dataInicio: string;
         dataFim: string;
         turno: string;
-      }[];
+      }[], { date: string }[]];
 
       const hoje = new Date();
       hoje.setHours(0, 0, 0, 0);
+      const holidays = buildHolidaySet(hoje.getFullYear(), customHolidays.map(holiday => holiday.date));
 
       const map = new Map<number, number>();
 
@@ -536,7 +540,7 @@ export default function ColaboradoresPage() {
           : "6x1");
 
         // Dias úteis já passados desde o início do período
-        const diasConsumidos = countWorkDays(inicio, ateQuando, tipoEscala, turno?.escala);
+        const diasConsumidos = countWorkDays(inicio, ateQuando, tipoEscala, holidays, turno?.escala);
         const valesConsumidos = Math.min(diasConsumidos * 2, o.vales);
         const disponivel = Math.max(o.vales - valesConsumidos, 0);
 
@@ -552,7 +556,7 @@ export default function ColaboradoresPage() {
 
       setValesMap(map);
     } catch {
-      // silently ignore
+      setValesMap(new Map());
     }
   }, [turnos, colaboradores]);
 
