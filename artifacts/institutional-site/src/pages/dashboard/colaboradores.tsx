@@ -466,6 +466,7 @@ export default function ColaboradoresPage() {
       if (!res.ok || !holidaysRes.ok) throw new Error("Não foi possível carregar pedidos ou feriados");
       const [data, customHolidays] = await Promise.all([res.json(), holidaysRes.json()]) as [{
         employeeId: number | null;
+        periodo: string;
         vales: number;
         dias: number;
         status: string;
@@ -479,23 +480,15 @@ export default function ColaboradoresPage() {
       const holidays = buildHolidaySet(hoje.getFullYear(), customHolidays.map(holiday => holiday.date));
 
       const map = new Map<number, number>();
+      const activePeriods = new Set<string>();
 
       for (const o of data) {
-        if (!o.employeeId || o.status === "Cancelado") continue;
-
-        // Negative vales (discounts) should be subtracted directly
-        if (o.vales < 0) {
-          map.set(o.employeeId, (map.get(o.employeeId) ?? 0) + o.vales);
-          continue;
-        }
+        if (!o.employeeId || o.status === "Cancelado" || o.vales <= 0) continue;
 
         const inicio = parseOrderDate(o.dataInicio);
         const fim    = parseOrderDate(o.dataFim);
-        if (!inicio || !fim) {
-          // sem datas: usa total sem desconto
-          map.set(o.employeeId, (map.get(o.employeeId) ?? 0) + o.vales);
-          continue;
-        }
+        if (!inicio || !fim || hoje > fim) continue;
+        activePeriods.add(`${o.employeeId}:${o.periodo}`);
 
         if (hoje < inicio) {
           // período ainda não começou — todos disponíveis
@@ -545,6 +538,12 @@ export default function ColaboradoresPage() {
         const disponivel = Math.max(o.vales - valesConsumidos, 0);
 
         map.set(o.employeeId, (map.get(o.employeeId) ?? 0) + disponivel);
+      }
+
+      for (const o of data) {
+        if (!o.employeeId || o.status === "Cancelado" || o.vales >= 0) continue;
+        if (!activePeriods.has(`${o.employeeId}:${o.periodo}`)) continue;
+        map.set(o.employeeId, (map.get(o.employeeId) ?? 0) + o.vales);
       }
 
       // Ensure no negative vales by clamping to 0
