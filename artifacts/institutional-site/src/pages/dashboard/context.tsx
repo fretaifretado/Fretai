@@ -725,27 +725,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  /* ---------------------------- Agendamentos -----------------------------
-   * Persistência e source of truth ficam no servidor: tabelas
-   * `scheduled_movements` + `scheduled_movement_targets`. Cada target tem
-   * dois timestamps autoritativos no banco — `applied_at` e `reverted_at` —
-   * que o backend grava em transação quando o agendamento entra em vigor
-   * ou termina (cron-on-read em `advanceStatesForCompany`).
-   *
-   * O cliente projeta esses dois flags **uma vez por transição**:
-   *   - quando vê pela primeira vez `applied_at` em um target → aplica
-   *     `valorNovo` no colaborador
-   *   - quando vê pela primeira vez `reverted_at` em um target → restaura
-   *     `valorAnterior`
-   * Depois disso, ele lembra da assinatura `appliedAt|revertedAt` que já
-   * projetou e não mexe mais — assim, edições manuais posteriores (até
-   * mesmo que voltem para o mesmo valor de `valorNovo`) não são clobradas
-   * por polls subsequentes vendo um agendamento concluído antigo.
-   *
-   * Em outro navegador / após reload o Map começa vazio: a primeira
-   * leitura projeta o estado final correto (apply + revert se ambos
-   * existem) e a partir daí a assinatura é registrada e respeitada.
-   */
+  /* Turno e filial são projetados no cliente; status é relido de employees,
+   * pois agendamentos históricos não podem sobrescrever o estado atual. */
   const projectedAgendamentoSigsRef = useRef<Map<number, string>>(new Map());
 
   function reconcileColaboradoresWithAgendamentos(serverAgs: Agendamento[]) {
@@ -763,6 +744,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     });
 
     for (const ag of sorted) {
+      if (ag.tipo === "status") continue;
       // Cada alvo do mesmo agendamento sempre tem os mesmos timestamps
       // (são gravados juntos no servidor); usamos o primeiro como assinatura.
       const sample = ag.alvos[0];
@@ -778,8 +760,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
           // Primeira vez que vemos applied_at sem reverted_at → aplica valorNovo.
           if (ag.tipo === "turno"  && c.turno  !== ag.valorNovo)
             return { ...c, turno: ag.valorNovo };
-          if (ag.tipo === "status" && c.status !== (ag.valorNovo as Status))
-            return { ...c, status: ag.valorNovo as Status };
           if (ag.tipo === "filial" && (c.local !== ag.valorNovo || c.filialId !== (ag.filialIdNovo ?? null)))
             return { ...c, local: ag.valorNovo, filialId: ag.filialIdNovo ?? null };
           return c;
@@ -789,8 +769,6 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         // edições manuais feitas entre apply e revert).
         if (ag.tipo === "turno"  && c.turno  === ag.valorNovo)
           return { ...c, turno: alvo.valorAnterior };
-        if (ag.tipo === "status" && c.status === (ag.valorNovo as Status))
-          return { ...c, status: alvo.valorAnterior as Status };
         if (ag.tipo === "filial" && c.local  === ag.valorNovo)
           return { ...c, local: alvo.valorAnterior, filialId: alvo.filialIdAnterior ?? null };
         return c;
@@ -860,6 +838,21 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       });
       setAgendamentos(purged);
       reconcileColaboradoresWithAgendamentos(purged);
+      const employeesRes = await fetch(`${API_URL}/api/me/employees`, { headers });
+      if (employeesRes.ok) {
+        const employees = await employeesRes.json() as Array<{ id: number; status: string | null }>;
+        const statuses = new Map(employees.map(employee => [employee.id, employee.status ?? "Ativo"]));
+        setColaboradores(previous => {
+          let changed = false;
+          const updated = previous.map(employee => {
+            const status = statuses.get(employee.id) as Status | undefined;
+            if (!status || employee.status === status) return employee;
+            changed = true;
+            return { ...employee, status };
+          });
+          return changed ? updated : previous;
+        });
+      }
     } catch (err) {
       console.error("[dashboard] erro ao carregar agendamentos:", err);
     }
