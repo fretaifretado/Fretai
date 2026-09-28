@@ -615,8 +615,9 @@ export default function ComprasPage() {
     return pedidos.filter(p => p.periodo === selectedMonth);
   }, [pedidos, selectedMonth]);
 
-  const totalGasto          = pedidosFiltrados.reduce((a, p) => a + p.total, 0);
-  const totalValesHistorico = pedidosFiltrados.reduce((a, p) => a + p.vales, 0);
+  const pedidosContabilizados = pedidosFiltrados.filter(p => p.status !== "Cancelado");
+  const totalGasto          = pedidosContabilizados.reduce((a, p) => a + p.total, 0);
+  const totalValesHistorico = pedidosContabilizados.reduce((a, p) => a + p.vales, 0);
   const ultimoPedido        = pedidos.length > 0 ? pedidos[0].periodo : "—";
 
   const proxDia28 = (() => {
